@@ -1340,16 +1340,18 @@
   desugar time -- strictly before HIR/KIR construction, so every downstream
   consumer (validate-expr's arity/range check, direct-facts'
   effect-extraction, ir.cljc, every backend, admission.cljc, verifier.clj)
-  sees the EXACT SAME plain-integer `cap-call` shape the pre-existing
-  `(cap-call <int> value)` form has always produced -- none of them are
-  aware a keyword was ever written. An unregistered keyword is a hard
+  sees the same guest-i64 `cap-call` shape as a source numeric literal. On
+  nbb that means JavaScript BigInt, not a compiler-host number; otherwise a
+  named call's body and its inferred effect row disagree at native verifier
+  time. None of the downstream consumers are aware a keyword was ever
+  written. An unregistered keyword is a hard
   parse-time rejection (closed-world/deny-by-default for names, mirroring
   the existing [0,255]-range check for the integer form)."
   [kw form]
   (let [id (capability-wire-id kw form)]
     (when *used-capability-keywords*
       (vswap! *used-capability-keywords* conj kw))
-    id))
+    (effect-capability-id id)))
 
 (defn- capability-keyword-for-symbol
   "Map a namespaced call head `clock/now` to registered keyword `:clock/now`."
@@ -5213,7 +5215,8 @@
                          (first args) nil locals signatures used)
                 request-type (infer-expression-type request locals signatures)
                 capability (get source-operation-registry op)
-                id (capability-wire-id capability form)]
+                id (effect-capability-id
+                    (capability-wire-id capability form))]
             (vswap! used conj capability)
             (preserve-form-meta
              form
