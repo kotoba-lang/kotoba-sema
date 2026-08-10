@@ -33,3 +33,13 @@
               "kotoba/lang/guest-grammar.edn")))
   (is (seq sema/capability-registry))
   (is (seq sema/source-operation-registry)))
+
+(deftest public-sema-facade-owns-consumer-entry-points
+  (is (contains? sema/forbidden-heads 'eval))
+  (is (every? pos? [sema/max-functions sema/max-expression-nodes
+                    sema/max-lowered-nodes sema/max-bindings
+                    sema/max-list-items sema/max-namespace-capabilities
+                    sema/max-namespace-docstring-chars
+                    sema/max-function-docstring-chars]))
+  (is (map? (sema/kernel-region-report
+             (sema/analyze "(defn main [] 42)")))))
