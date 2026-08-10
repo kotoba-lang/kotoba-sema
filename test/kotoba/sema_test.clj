@@ -42,4 +42,8 @@
                     sema/max-namespace-docstring-chars
                     sema/max-function-docstring-chars]))
   (is (map? (sema/kernel-region-report
-             (sema/analyze "(defn main [] 42)")))))
+             (sema/analyze "(defn main [] 42)"))))
+  (with-redefs [sema/max-functions 1]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"function count"
+                          (sema/analyze
+                           "(defn helper [] 1) (defn main [] 42)")))))
