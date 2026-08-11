@@ -8070,11 +8070,16 @@
                                         (:closure-result? %))
                                parsed)
                          (some (fn [{:keys [param-types result body]}]
-                                 (or (some #(or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
+                                 (or (some #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
                                                 (structured-type? %)) param-types)
                                      (or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} result)
                                          (structured-type? result))
                                      ;; `:bool` literals are plain 0/1 words, not typed values.
+                                     ;; A `:bool` PARAMETER is different: it is a real host
+                                     ;; boolean at the public boundary and must retain its
+                                     ;; `:param-types` table in typed HIR. Without that, a
+                                     ;; library whose only typed feature is `[b :bool]` emits
+                                     ;; compatibility HIR and silently relabels `b` as :i64.
                                      (some #(or (string? %) (keyword? %)
                                                 (and (seq? %)
                                                      (or (contains? typed-map-operations (first %))
