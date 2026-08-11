@@ -14,6 +14,20 @@
     (let [result (sema/analyze "(defn main [] :string \"ok\")")]
       (is (= :kotoba.hir/v3 (:format result)))
       (is (= :string (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "a bare bool parameter is a typed host boundary"
+    (let [result (sema/analyze
+                  "(ns example.predicates (:export [negate]))
+                   (defn negate [value :bool witness :i64] :bool
+                     (if value false true))")]
+      (is (= :kotoba.hir/v3 (:format result)))
+      (is (= [:bool :i64] (get-in result [:functions 0 :param-types])))
+      (is (= :bool (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "a bool expression without a typed parameter stays compatibility HIR"
+    (let [result (sema/analyze "(defn main [] (= 1 1))")]
+      (is (= :kotoba.hir/v2 (:format result)))
+      (is (= :bool (get-in result [:functions 0 :result])))
       (is (hir/valid? result)))))
 
 (deftest reader-and-schema-contracts
