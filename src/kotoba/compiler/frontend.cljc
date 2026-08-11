@@ -197,7 +197,8 @@
 ;; invention that the kernel then branches on -- "this CPU has NX" decided by a
 ;; compiler that has never seen the CPU.
 (def kernel-privileged-operations
-  '{kernel-boot-info 0 kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
+  '{kernel-boot-info 0 kernel-read-cr0 0 kernel-write-cr0 1
+    kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
     kernel-cli 0 kernel-sti 0 kernel-hlt 0 kernel-pause 0
     kernel-out-u8 2 kernel-out-u32 2
     kernel-in-u8 1 kernel-in-u32 1
