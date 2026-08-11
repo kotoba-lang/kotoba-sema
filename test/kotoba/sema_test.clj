@@ -47,3 +47,30 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"function count"
                           (sema/analyze
                            "(defn helper [] 1) (defn main [] 42)")))))
+
+(defn- result-of
+  "The declared result type of `p` in SRC. `main` must be zero-arity, so the
+  function under test is a helper beside it."
+  [src]
+  (let [r (sema/analyze (str src "\n(defn main [] 0)"))]
+    (->> (:functions r) (filter #(= 'p (:name %))) first :result)))
+
+(deftest string-predicates-are-bool-like-every-other-predicate
+  ;; Profile 5 (compiler ADR 0191) typed comparisons and predicates as `:bool`
+  ;; so `and`/`or`/`not` compose. It carried the arithmetic and generic
+  ;; predicates and left `string=?` and `string-contains?` at `:i64`, in the
+  ;; same frontend where the later `string-index-contains` returns `:bool`.
+  (testing "a :bool-declared function may return one"
+    (is (= :bool (result-of "(defn p [a :string b :string] :bool (string=? a b))")))
+    (is (= :bool (result-of "(defn p [a :string] :bool (string-contains? a \"x\"))"))))
+  (testing "and they compose, which is the whole reason profile 5 exists"
+    (is (= :bool (result-of
+                  "(defn p [a :string] :bool (and (string=? a \"x\") (string-contains? a \"y\")))"))))
+  (testing "not, over a string predicate"
+    (is (= :bool (result-of "(defn p [a :string b :string] :bool (not (string=? a b)))"))))
+  (testing "an i64-declared function may no longer return one — this is the break"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (result-of "(defn p [a :string b :string] :i64 (string=? a b))"))))
+  (testing "the migration ADR 0191 names is available: (if p 1 0)"
+    (is (= :i64 (result-of
+                 "(defn p [a :string b :string] :i64 (if (string=? a b) 1 0))")))))

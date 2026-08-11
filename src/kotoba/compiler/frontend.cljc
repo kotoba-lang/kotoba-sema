@@ -4600,10 +4600,23 @@
           (reject! "http-response-status requires a record status field" (first args)))
         :i64)
 
+      ;; `:bool`, not `:i64`. Profile 5 (compiler ADR 0191) moved comparisons
+      ;; and predicates to `:bool` so `and`/`or`/`not` compose and a predicate
+      ;; can be written the way Clojure writes one. It carried
+      ;; `= < > <= >= not not= zero? pos? neg? empty? some?` and left the two
+      ;; string predicates behind — in this same file, where the later
+      ;; `string-index-contains` returns `:bool`. So one file typed two
+      ;; spellings of the same question differently, a `:bool`-declared
+      ;; function could not return a string predicate, and
+      ;; `(and (string=? a b) (string=? a c))` was rejected.
+      ;;
+      ;; The cost of the omission was paid at every call site: authors wrapped
+      ;; predicates in `(if p true false)` — ADR 0191's own mechanical
+      ;; migration, run backwards.
       (= op 'string=?)
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
-          :i64)
+          :bool)
 
       (= op 'string-concat)
       (do (doseq [[arg type] (map vector args types)]
@@ -4624,7 +4637,7 @@
       (= op 'string-contains?)
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
-          :i64)
+          :bool)
 
       (= op 'string-split-count)
       (do (doseq [[arg type] (map vector args types)]
