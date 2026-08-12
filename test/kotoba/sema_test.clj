@@ -57,6 +57,16 @@
     (is (= :i64 (:result result)))
     (is (hir/valid? result))))
 
+(deftest recoverable-page-fault-operations-have-sealed-arities
+  (let [result (sema/analyze
+                "(defn main []
+                   (let [handler (kernel-page-fault-recovery-handler-address)
+                         configured (kernel-configure-page-fault-recovery 4096 12272)
+                         probe (kernel-probe-recoverable-guard-write)]
+                     (+ handler configured probe)))")]
+    (is (= :i64 (:result result)))
+    (is (hir/valid? result))))
+
 (deftest public-sema-facade-owns-consumer-entry-points
   (is (contains? sema/forbidden-heads 'eval))
   (is (every? pos? [sema/max-functions sema/max-expression-nodes
