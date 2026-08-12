@@ -67,6 +67,17 @@
     (is (= :i64 (:result result)))
     (is (hir/valid? result))))
 
+(deftest double-fault-ist-operations-have-sealed-arities
+  (let [result (sema/analyze
+                "(defn main []
+                   (let [handler (kernel-double-fault-handler-address)
+                         configured (kernel-configure-double-fault-ist 4096 12288)
+                         loaded (kernel-load-gdt-tss 8192 10)
+                         probe (kernel-probe-double-fault)]
+                     (+ handler configured loaded probe)))")]
+    (is (= :i64 (:result result)))
+    (is (hir/valid? result))))
+
 (deftest public-sema-facade-owns-consumer-entry-points
   (is (contains? sema/forbidden-heads 'eval))
   (is (every? pos? [sema/max-functions sema/max-expression-nodes
