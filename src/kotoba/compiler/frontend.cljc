@@ -199,6 +199,8 @@
 (def kernel-privileged-operations
   '{kernel-boot-info 0 kernel-read-cr0 0 kernel-write-cr0 1
     kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
+    kernel-read-cs 0 kernel-page-fault-handler-address 0 kernel-load-idt 2
+    kernel-probe-guard-write 0 kernel-probe-text-write 0 kernel-probe-nx-execute 0
     kernel-cli 0 kernel-sti 0 kernel-hlt 0 kernel-pause 0
     kernel-out-u8 2 kernel-out-u32 2
     kernel-in-u8 1 kernel-in-u32 1
