@@ -48,6 +48,15 @@
   (is (seq sema/capability-registry))
   (is (seq sema/source-operation-registry)))
 
+(deftest page-fault-evidence-operations-are-a-closed-kernel-surface
+  (let [result (sema/analyze
+                "(defn main []
+                   (let [handler (kernel-page-fault-handler-address)
+                         selector (kernel-read-cs)]
+                     (kernel-load-idt handler 10)))")]
+    (is (= :i64 (:result result)))
+    (is (hir/valid? result))))
+
 (deftest public-sema-facade-owns-consumer-entry-points
   (is (contains? sema/forbidden-heads 'eval))
   (is (every? pos? [sema/max-functions sema/max-expression-nodes
