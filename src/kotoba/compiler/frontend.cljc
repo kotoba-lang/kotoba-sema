@@ -233,7 +233,20 @@
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
 (def canonical-list-operations '#{typed-list-new})
-(def bytes-operations '{bytes-empty 0})
+;; `bytes-empty` was the whole table until 2026-08-13: a constructor for the
+;; canonical empty value and no way to read one. A guest could take a `:bytes`
+;; parameter and pass it back, and nothing else -- so binary input (a GGUF
+;; block, a wire frame, a hash preimage) was inert inside Kotoba.
+;;
+;; `bytes-u8-at` is UNSIGNED (0..255). Byte data is unsigned everywhere it
+;; comes from, and a signed byte would make every caller mask; the JVM's
+;; signed `byte` is a host representation detail, not a language decision.
+;;
+;; An out-of-range index TRAPS rather than returning 0 or -1. Zero is a legal
+;; byte value, so returning it for a failed read would make "the byte is 0"
+;; and "the read was invalid" the same answer -- the shape ADR-2608136000
+;; names. The caller has `bytes-length` and can ask first.
+(def bytes-operations '{bytes-empty 0 bytes-length 1 bytes-u8-at 2})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -3926,6 +3939,11 @@
         (when-not (empty? args)
           (reject! "bytes-empty does not accept operands" form))
 
+        (contains? '#{bytes-length bytes-u8-at} op)
+        (do (when-not (= (get bytes-operations op) (count args))
+              (reject! "bytes operation arity mismatch" form))
+            (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -4949,6 +4967,22 @@
                                       (second type) item))
           type)
         bytes-empty :bytes
+        ;; Reading a `:bytes` value. Until these, `bytes-operations` was a
+        ;; single constructor for the empty value and there was no way to
+        ;; observe a byte at all -- so a guest could receive binary input and
+        ;; do nothing with it. Both return :i64 because a byte IS a small
+        ;; integer here; there is no narrower scalar and inventing one would
+        ;; only add conversions.
+        bytes-length
+        (do (require-expression-type! (infer-expression-type (first args) locals signatures)
+                                      :bytes (first args))
+            :i64)
+        bytes-u8-at
+        (do (require-expression-type! (infer-expression-type (first args) locals signatures)
+                                      :bytes (first args))
+            (require-expression-type! (infer-expression-type (second args) locals signatures)
+                                      :i64 (second args))
+            :i64)
         hetero-vector-new
         (let [[type & items] args
               item-types (second type)]
