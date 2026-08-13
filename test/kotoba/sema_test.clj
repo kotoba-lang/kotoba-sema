@@ -118,3 +118,85 @@
   (testing "the migration ADR 0191 names is available: (if p 1 0)"
     (is (= :i64 (result-of
                  "(defn p [a :string b :string] :i64 (if (string=? a b) 1 0))")))))
+
+(defn- function-named
+  [result name]
+  (->> (:functions result) (filter #(= name (:name %))) first))
+
+(defn- form-tree [form]
+  (tree-seq coll? seq form))
+
+(defn- body-heads [form]
+  (into [] (comp (filter seq?) (map first)) (form-tree form)))
+
+(deftest option-some?-widens-from-option-i64-to-option-T
+  ;; Bare `option-some?` (and the `some?` / `nil?` desugars that become it) is
+  ;; typed `:option-i64`. Decision cores that store `[:option :string]` on a
+  ;; record therefore have to write `option-some?-of` at every site — the same
+  ;; tax `option-or` already pays by rewriting to `option-value-of`. This pass
+  ;; is that rewrite: HIR still carries the typed `-of` form native admits.
+  (testing "option-some? on [:option :string] is :bool and lowers to -of"
+    (let [result (sema/analyze
+                  (str "(defn p [v [:option :string]] :bool (option-some? v))\n"
+                       "(defn main [] 0)"))
+          p (function-named result 'p)]
+      (is (hir/valid? result))
+      (is (= :bool (:result p)))
+      (is (some #{'option-some?-of} (body-heads (:body p))))
+      (is (not-any? #{'option-some?} (body-heads (:body p))))))
+  (testing "option-value on [:option :string] lowers to option-value-of"
+    (let [p (function-named
+             (sema/analyze
+              (str "(defn p [v [:option :string]] :string (option-value v \"none\"))\n"
+                   "(defn main [] 0)"))
+             'p)]
+      (is (= :string (:result p)))
+      (is (some #{'option-value-of} (body-heads (:body p))))
+      (is (not-any? #{'option-value} (body-heads (:body p))))))
+  (testing "some? and nil? follow, because they desugar to option-some?"
+    (let [some-p (function-named
+                  (sema/analyze
+                   (str "(defn p [v [:option :string]] :bool (some? v))\n"
+                        "(defn main [] 0)"))
+                  'p)
+          nil-p (function-named
+                 (sema/analyze
+                  (str "(defn p [v [:option :string]] :bool (nil? v))\n"
+                       "(defn main [] 0)"))
+                 'p)]
+      (is (= :bool (:result some-p)))
+      (is (some #{'option-some?-of} (body-heads (:body some-p))))
+      (is (= :bool (:result nil-p)))
+      (is (some #{'option-some?-of} (body-heads (:body nil-p))))))
+  (testing "and of two record option-string fields is :bool, without (if … true false)"
+    (let [p (function-named
+             (sema/analyze
+              "(ns example.actor
+                 (:schemas {:example/actor
+                            [:record :example/actor
+                             [[:endpoint [:option :string]]
+                              [:region [:option :string]]]]})
+                 (:export [p]))
+               (defn p [a [:ref :example/actor]] :bool
+                 (and (option-some? (record-get a :endpoint))
+                      (option-some? (record-get a :region))))")
+             'p)]
+      (is (= :bool (:result p)))
+      (is (some #{'option-some?-of} (body-heads (:body p))))
+      (is (not-any? #{'option-some?} (body-heads (:body p))))
+      (is (not-any? true? (form-tree (:body p)))
+          "the (if pred true false) wrap is the stale self-restriction this removes")))
+  (testing "legacy :option-i64 keeps the bare form — KIR execute still uses it"
+    (let [p (function-named
+             (sema/analyze
+              (str "(defn p [v :option-i64] :bool (option-some? v))\n"
+                   "(defn main [] 0)"))
+             'p)]
+      (is (= :bool (:result p)))
+      (is (some #{'option-some?} (body-heads (:body p))))
+      (is (not-any? #{'option-some?-of} (body-heads (:body p))))))
+  (testing "rewrite leak still fails closed: option-some? remains option-i64-only"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"expected option-i64"
+                          (sema/analyze
+                           "(defn p [v :i64] :bool (option-some? v))\n(defn main [] 0)")))))

@@ -1872,6 +1872,13 @@
       (some (fn [[k t]] (when (= k field) t))
             (nth rec 2)))))
 
+(defn- option-vector-type?
+  "Parametric option `[:option T]`, not the legacy monomorphic `:option-i64`."
+  [type]
+  (and (vector? type)
+       (= 2 (count type))
+       (= :option (first type))))
+
 (defn- resolve-option-type
   "Best-effort option type for sugar lowering (Product Value ABI v1).
 
@@ -5509,6 +5516,32 @@
                      form
                      :kotoba.error/option-type-unresolved))
           (list 'option-value-of option-type value fallback))
+
+        ;; Bare `option-some?` / `option-value` are typed `:option-i64`. A
+        ;; decision core that stores `[:option :string]` on a record therefore
+        ;; has to write `option-some?-of` at every site — the same tax
+        ;; `option-or` above already pays by rewriting to `option-value-of`.
+        ;; When the value's type is a parametric `[:option T]`, rewrite to the
+        ;; `-of` form native already admits. Leave `:option-i64` as the bare
+        ;; form so KIR execute and existing native tests keep working.
+        ;; Inference of the bare form stays `:option-i64`-only: a missed
+        ;; rewrite still fails closed with `expected option-i64`.
+        (= op 'option-some?)
+        (let [value (rewrite-record-projection (first args) locals signatures schemas)
+              option-type (try (infer-expression-type value locals signatures)
+                               (catch #?(:clj Exception :cljs :default) _ nil))]
+          (if (option-vector-type? option-type)
+            (list 'option-some?-of option-type value)
+            (list 'option-some? value)))
+
+        (= op 'option-value)
+        (let [value (rewrite-record-projection (first args) locals signatures schemas)
+              fallback (rewrite-record-projection (second args) locals signatures schemas)
+              option-type (try (infer-expression-type value locals signatures)
+                               (catch #?(:clj Exception :cljs :default) _ nil))]
+          (if (option-vector-type? option-type)
+            (list 'option-value-of option-type value fallback)
+            (list 'option-value value fallback)))
 
         ;; Type-directed sugar may appear inside a lowered pattern branch. The
         ;; branch binder is lexical, but a generic structural recursion would
