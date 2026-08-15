@@ -51,7 +51,11 @@
     :http/accept 17 :http/reply 18
     :fs/transact 19 :process/spawn 20 :secret/get 21
     :git/run 22 :entropy/draw 23
-    :dataspace/transact 24})
+    :dataspace/transact 24
+    ;; Stream ingress (root ADR-2608150900): frames in and frames out are
+    ;; separate authorities -- hearing a stream is not permission to speak
+    ;; into it.
+    :stream/accept 25 :stream/send 26})
 
 (defn- load-capability-catalog []
   #?(:clj
