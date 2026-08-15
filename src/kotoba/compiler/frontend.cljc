@@ -98,6 +98,34 @@
   "Inverse of capability-registry for diagnostics and effect ceilings."
   (into {} (map (fn [[k v]] [v k]) capability-registry)))
 
+;; Dataspace v1 is a language-owned typed capability contract. These
+;; descriptors intentionally match capability-kits/dataspace-v1.edn. Keeping
+;; the source sugar here means HIR/KIR/backends only see ordinary closed
+;; record/variant construction plus typed-cap-call; there is no second runtime
+;; or authority path for coordination forms.
+(def dataspace-assert-type
+  [:record :kotoba.dataspace/assert [[:assertion :string] [:facet :i64]]])
+(def dataspace-retract-type
+  [:record :kotoba.dataspace/retract [[:assertion :string] [:facet :i64]]])
+(def dataspace-observe-type
+  [:record :kotoba.dataspace/observe [[:pattern :string] [:facet :i64]]])
+(def dataspace-request-type
+  [:variant :kotoba.dataspace/request
+   [[:assert dataspace-assert-type]
+    [:retract dataspace-retract-type]
+    [:observe dataspace-observe-type]
+    [:facet-enter :bool]
+    [:facet-leave :i64]]])
+(def dataspace-result-type
+  [:variant :kotoba.dataspace/result
+   [[:asserted [:record :kotoba.dataspace/asserted
+                [[:count :i64] [:notices :string]]]]
+    [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
+    [:matches [:record :kotoba.dataspace/matches [[:bindings :string]]]]
+    [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
+    [:error [:record :kotoba.dataspace/error
+             [[:code :keyword] [:message :string]]]]]])
+
 (def arithmetic '#{+ - * quot bit-xor bit-and bit-or})
 (def i32-operations
   '{i32-wrap 1 u32-wrap 1 i32-wrapping-add 2 i32-wrapping-mul 2 i32-xor 2
@@ -740,7 +768,8 @@
 (def pure-product-disallowed-heads
   "Control / ambient heads rejected under `:language-profile :pure-product`
   even when the general subset might admit them (see pure-product-profile.edn)."
-  '#{cap-call doseq dotimes defmulti defmethod
+  '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!
+     doseq dotimes defmulti defmethod
      future pmap agent send send-off
      condp cond-> cond->> some-> some->> as-> -> ->>})
 
@@ -2542,6 +2571,51 @@
       (swap! *pending-loop-helpers* conj helper))
     (list helper-name callback-value (desugar-expr coll))))
 
+(defn- desugar-dataspace-form
+  "Lower one source coordination form to the existing typed capability
+  kernel. Assertion/pattern text is inert bounded EDN; facet 0 is the
+  provider-owned root facet. The named capability resolver both seals wire id
+  24 and records namespace usage for fail-closed declaration checking."
+  [op args form]
+  (let [[tag payload-type payload]
+        (case op
+          assert!
+          (do (when-not (<= 1 (count args) 2)
+                (reject! "assert! requires assertion text and an optional facet" form))
+              [:assert dataspace-assert-type
+               (list 'record-new dataspace-assert-type
+                     (first args) (or (second args) 0))])
+
+          retract!
+          (do (when-not (<= 1 (count args) 2)
+                (reject! "retract! requires assertion text and an optional facet" form))
+              [:retract dataspace-retract-type
+               (list 'record-new dataspace-retract-type
+                     (first args) (or (second args) 0))])
+
+          observe!
+          (do (when-not (<= 1 (count args) 2)
+                (reject! "observe! requires pattern text and an optional facet" form))
+              [:observe dataspace-observe-type
+               (list 'record-new dataspace-observe-type
+                     (first args) (or (second args) 0))])
+
+          facet-enter!
+          (do (when-not (empty? args)
+                (reject! "facet-enter! takes no arguments" form))
+              [:facet-enter :bool true])
+
+          facet-leave!
+          (do (when-not (= 1 (count args))
+                (reject! "facet-leave! requires one facet identifier" form))
+              [:facet-leave :i64 (first args)]))
+        request (list 'variant-new dataspace-request-type tag payload)
+        lowered (list 'typed-cap-call
+                      (resolve-capability-keyword! :dataspace/transact form)
+                      dataspace-request-type dataspace-result-type
+                      (desugar-expected-value dataspace-request-type request))]
+    (attach-source-operation form lowered :dataspace/transact)))
+
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; A closed EDN-shaped value in a :document context is already fully
@@ -3002,6 +3076,11 @@
         cond->> (desugar-cond-thread args form true)
         dotimes (desugar-dotimes args form)
         doseq (desugar-doseq args form)
+        assert! (desugar-dataspace-form op args form)
+        retract! (desugar-dataspace-form op args form)
+        observe! (desugar-dataspace-form op args form)
+        facet-enter! (desugar-dataspace-form op args form)
+        facet-leave! (desugar-dataspace-form op args form)
         assert (do
                  (when-not (= 1 (count args))
                    (reject! "assert requires exactly one condition; messages are not supported"

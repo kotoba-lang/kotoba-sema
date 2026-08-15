@@ -105,6 +105,52 @@
     (is (= '(cap-call 24 x)
            (->> (:functions hir) (filter #(= 'publish (:name %))) first :body)))))
 
+(deftest dataspace-source-forms-lower-to-one-typed-effect-kernel
+  (let [hir (sema/analyze
+             "(ns app (:capabilities #{:dataspace/transact}))
+              (defn publish [x :string] (assert! x))
+              (defn retract [x :string f :i64] (retract! x f))
+              (defn subscribe [p :string] (observe! p))
+              (defn enter [] (facet-enter!))
+              (defn leave [f :i64] (facet-leave! f))
+              (defn main [] 0)")
+        bodies (into {} (map (juxt :name :body)) (:functions hir))]
+    (is (= #{[:cap/call 24]} (:effects hir)))
+    (is (= #{:dataspace/transact} (:named-operations hir)))
+    (doseq [name '[publish retract subscribe enter leave]]
+      (is (= 'typed-cap-call (first (get bodies name))))
+      (is (= 24 (second (get bodies name)))))
+    (is (= :assert (-> bodies (get 'publish) (nth 4) (nth 2))))
+    (is (= 0 (-> bodies (get 'publish) (nth 4) (nth 3) last))
+        "one-argument assertion is rooted in facet zero")
+    (is (= :observe (-> bodies (get 'subscribe) (nth 4) (nth 2))))
+    (is (= :facet-enter (-> bodies (get 'enter) (nth 4) (nth 2))))
+    (is (= :facet-leave (-> bodies (get 'leave) (nth 4) (nth 2))))))
+
+(deftest dataspace-source-forms-fail-closed
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"not declared in namespace :capabilities"
+       (sema/analyze
+        "(ns app (:capabilities #{:entropy/draw}))
+         (defn publish [x :string] (assert! x))
+         (defn main [] 0)")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"assert! requires assertion text"
+       (sema/analyze
+        "(ns app (:capabilities #{:dataspace/transact}))
+         (defn publish [] (assert!))")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"type mismatch"
+       (sema/analyze
+        "(ns app (:capabilities #{:dataspace/transact}))
+         (defn publish [] (assert! 42))
+         (defn main [] 0)")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"outside pure-product profile"
+       (sema/analyze
+        "(defn publish [x :string] (assert! x))"
+        {:language-profile :pure-product}))))
+
 (deftest cljs-fallback-is-kept-in-lockstep-with-catalog
   "CLJS cannot read the classpath resource; forgetting the fallback
    silently drops named dataspace/transact on that backend."
