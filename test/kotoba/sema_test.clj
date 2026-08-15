@@ -60,8 +60,41 @@
            (get sema/source-operation-registry 'dataspace/transact)))
     (is (= (set (keys sema/capability-registry))
            (set (vals sema/source-operation-registry))))
-    (is (= (range 1 25) (sort (vals sema/capability-registry)))
+    ;; 25/26 are stream/accept and stream/send (root ADR-2608150900). The
+    ;; assertion is contiguity, not a fixed ceiling -- it moves when the
+    ;; registry legitimately grows and fails when a gap is left.
+    (is (= (range 1 27) (sort (vals sema/capability-registry)))
         "wire ids stay contiguous from 1; a gap means named source will reject")))
+
+(deftest stream-ingress-is-catalog-wire-ids-25-and-26
+  "root ADR-2608150900: a bidirectional frame stream, where http-ingress is one
+  request paired to one reply. Frames in and frames out are separate wire ids
+  because they are separate authorities."
+  (let [catalog (edn/read-string
+                 (slurp (io/resource "kotoba/lang/capability-catalog.edn")))
+        from-catalog (into {} (map (fn [[k e]] [k (:compiler-wire-id e)])
+                                   (:capabilities catalog)))]
+    (is (= 25 (get from-catalog :stream/accept)))
+    (is (= 26 (get from-catalog :stream/send)))
+    (is (= 25 (get sema/capability-registry :stream/accept)))
+    (is (= 26 (get sema/capability-registry :stream/send)))
+    (is (= :stream/accept (get sema/source-operation-registry 'stream/accept)))
+    (is (= :stream/send (get sema/source-operation-registry 'stream/send)))))
+
+(deftest hearing-a-stream-is-not-permission-to-speak-into-it
+  (testing "a guest that declares only accept gets only accept's effect"
+    (let [hir (sema/analyze
+               "(ns app (:capabilities #{:stream/accept}))
+                (defn listen [s] (cap-call :stream/accept s))
+                (defn main [] 0)")]
+      (is (= #{[:cap/call 25]} (:effects hir)))))
+  (testing "and declaring both yields both, separately"
+    (let [hir (sema/analyze
+               "(ns app (:capabilities #{:stream/accept :stream/send}))
+                (defn listen [s] (cap-call :stream/accept s))
+                (defn speak [f] (cap-call :stream/send f))
+                (defn main [] 0)")]
+      (is (= #{[:cap/call 25] [:cap/call 26]} (:effects hir))))))
 
 (deftest named-dataspace-cap-call-resolves-to-wire-id-24
   (let [hir (sema/analyze
