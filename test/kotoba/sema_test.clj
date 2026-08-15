@@ -1,5 +1,7 @@
 (ns kotoba.sema-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing]]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))
 
@@ -41,12 +43,50 @@
                     (get (sema/schema-identities table) :app/item)))))
 
 (deftest semantic-catalogs-are-on-the-classpath
-  (is (some? (clojure.java.io/resource
-              "kotoba/lang/capability-catalog.edn")))
-  (is (some? (clojure.java.io/resource
-              "kotoba/lang/guest-grammar.edn")))
+  (is (some? (io/resource "kotoba/lang/capability-catalog.edn")))
+  (is (some? (io/resource "kotoba/lang/guest-grammar.edn")))
   (is (seq sema/capability-registry))
   (is (seq sema/source-operation-registry)))
+
+(deftest dataspace-transact-is-catalog-wire-id-24
+  "ADR-2608154100: named dataspace/transact is wire id 24, contiguous with 1–23."
+  (let [catalog (edn/read-string
+                 (slurp (io/resource "kotoba/lang/capability-catalog.edn")))
+        from-catalog (into {} (map (fn [[k e]] [k (:compiler-wire-id e)])
+                                   (:capabilities catalog)))]
+    (is (= 24 (get from-catalog :dataspace/transact)))
+    (is (= 24 (get sema/capability-registry :dataspace/transact)))
+    (is (= :dataspace/transact
+           (get sema/source-operation-registry 'dataspace/transact)))
+    (is (= (set (keys sema/capability-registry))
+           (set (vals sema/source-operation-registry))))
+    (is (= (range 1 25) (sort (vals sema/capability-registry)))
+        "wire ids stay contiguous from 1; a gap means named source will reject")))
+
+(deftest named-dataspace-cap-call-resolves-to-wire-id-24
+  (let [hir (sema/analyze
+             "(ns app (:capabilities #{:dataspace/transact}))
+              (defn publish [x] (cap-call :dataspace/transact x))
+              (defn main [] 0)")]
+    (is (= #{[:cap/call 24]} (:effects hir)))
+    (is (= '(cap-call 24 x)
+           (->> (:functions hir) (filter #(= 'publish (:name %))) first :body)))))
+
+(deftest cljs-fallback-is-kept-in-lockstep-with-catalog
+  "CLJS cannot read the classpath resource; forgetting the fallback
+   silently drops named dataspace/transact on that backend."
+  (let [src (slurp (io/file "src/kotoba/compiler/frontend.cljc"))]
+    (is (re-find #":dataspace/transact 24" src)
+        "capability-registry-cljs-fallback must include wire id 24")))
+
+(deftest undeclared-dataspace-capability-is-rejected
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"not declared in namespace :capabilities"
+       (sema/analyze
+        "(ns app (:capabilities #{:entropy/draw}))
+         (defn publish [x] (cap-call :dataspace/transact x))
+         (defn main [] 0)"))))
 
 (deftest page-fault-evidence-operations-are-a-closed-kernel-surface
   (let [result (sema/analyze

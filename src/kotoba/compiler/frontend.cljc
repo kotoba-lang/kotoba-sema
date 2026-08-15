@@ -50,7 +50,8 @@
     :object/put-block 15 :object/compare-and-set-ref 16
     :http/accept 17 :http/reply 18
     :fs/transact 19 :process/spawn 20 :secret/get 21
-    :git/run 22 :entropy/draw 23})
+    :git/run 22 :entropy/draw 23
+    :dataspace/transact 24})
 
 (defn- load-capability-catalog []
   #?(:clj
