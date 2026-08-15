@@ -155,14 +155,14 @@
    :backends #{:compiler :kotoba-kir}
    :effect [:cap/call 24]
    :capability :dataspace/transact
-   :request-boundary :bounded-edn-string
+   :request-boundary :document
    :arities {:assert! [1 2]
              :retract! [1 2]
              :observe! [1 2]
              :facet-enter! [0]
              :facet-leave! [1]}
    :facet-default 0
-   :note "Assertion and pattern values are inert EDN strings in dataspace-v1. The forms never mint authority; the namespace must declare :dataspace/transact and the host must bind a live capability. facet-leave! is explicit until a checked unwind construct exists."}
+   :note "Assertion and pattern values are inert documents in dataspace-v1. The forms never mint authority; the namespace must declare :dataspace/transact and the host must bind a live capability. facet-leave! is explicit until a checked unwind construct exists. Wire remains DAG-CBOR kotoba.value.v1; not Preserves."}
   :map {:desugars-to "deterministic fuel helper with direct one/two-source state or packed typed three-to-five-source state" :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}
         :note "named or inline callbacks accept one to five collections; stored closures accept one to four; all stop at the shortest source; CLJS validates the same bounded vector state"}
   :filter {:desugars-to "recursive helper or primary bounded unroll" :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}

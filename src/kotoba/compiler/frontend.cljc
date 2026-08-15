@@ -104,11 +104,11 @@
 ;; record/variant construction plus typed-cap-call; there is no second runtime
 ;; or authority path for coordination forms.
 (def dataspace-assert-type
-  [:record :kotoba.dataspace/assert [[:assertion :string] [:facet :i64]]])
+  [:record :kotoba.dataspace/assert [[:assertion :document] [:facet :i64]]])
 (def dataspace-retract-type
-  [:record :kotoba.dataspace/retract [[:assertion :string] [:facet :i64]]])
+  [:record :kotoba.dataspace/retract [[:assertion :document] [:facet :i64]]])
 (def dataspace-observe-type
-  [:record :kotoba.dataspace/observe [[:pattern :string] [:facet :i64]]])
+  [:record :kotoba.dataspace/observe [[:pattern :document] [:facet :i64]]])
 (def dataspace-request-type
   [:variant :kotoba.dataspace/request
    [[:assert dataspace-assert-type]
@@ -119,9 +119,9 @@
 (def dataspace-result-type
   [:variant :kotoba.dataspace/result
    [[:asserted [:record :kotoba.dataspace/asserted
-                [[:count :i64] [:notices :string]]]]
+                [[:count :i64] [:notices :document]]]]
     [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
-    [:matches [:record :kotoba.dataspace/matches [[:bindings :string]]]]
+    [:matches [:record :kotoba.dataspace/matches [[:bindings :document]]]]
     [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
     [:error [:record :kotoba.dataspace/error
              [[:code :keyword] [:message :string]]]]]])
@@ -2573,7 +2573,7 @@
 
 (defn- desugar-dataspace-form
   "Lower one source coordination form to the existing typed capability
-  kernel. Assertion/pattern text is inert bounded EDN; facet 0 is the
+  kernel. Assertion/pattern values are inert documents; facet 0 is the
   provider-owned root facet. The named capability resolver both seals wire id
   24 and records namespace usage for fail-closed declaration checking."
   [op args form]
@@ -2581,21 +2581,21 @@
         (case op
           assert!
           (do (when-not (<= 1 (count args) 2)
-                (reject! "assert! requires assertion text and an optional facet" form))
+                (reject! "assert! requires an assertion document and an optional facet" form))
               [:assert dataspace-assert-type
                (list 'record-new dataspace-assert-type
                      (first args) (or (second args) 0))])
 
           retract!
           (do (when-not (<= 1 (count args) 2)
-                (reject! "retract! requires assertion text and an optional facet" form))
+                (reject! "retract! requires an assertion document and an optional facet" form))
               [:retract dataspace-retract-type
                (list 'record-new dataspace-retract-type
                      (first args) (or (second args) 0))])
 
           observe!
           (do (when-not (<= 1 (count args) 2)
-                (reject! "observe! requires pattern text and an optional facet" form))
+                (reject! "observe! requires a pattern document and an optional facet" form))
               [:observe dataspace-observe-type
                (list 'record-new dataspace-observe-type
                      (first args) (or (second args) 0))])

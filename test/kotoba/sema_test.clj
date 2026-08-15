@@ -108,9 +108,9 @@
 (deftest dataspace-source-forms-lower-to-one-typed-effect-kernel
   (let [hir (sema/analyze
              "(ns app (:capabilities #{:dataspace/transact}))
-              (defn publish [x :string] (assert! x))
-              (defn retract [x :string f :i64] (retract! x f))
-              (defn subscribe [p :string] (observe! p))
+              (defn publish [x :document] (assert! x))
+              (defn retract [x :document f :i64] (retract! x f))
+              (defn subscribe [p :document] (observe! p))
               (defn enter [] (facet-enter!))
               (defn leave [f :i64] (facet-leave! f))
               (defn main [] 0)")
@@ -132,10 +132,10 @@
        clojure.lang.ExceptionInfo #"not declared in namespace :capabilities"
        (sema/analyze
         "(ns app (:capabilities #{:entropy/draw}))
-         (defn publish [x :string] (assert! x))
+         (defn publish [x :document] (assert! x))
          (defn main [] 0)")))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"assert! requires assertion text"
+       clojure.lang.ExceptionInfo #"assert! requires an assertion document"
        (sema/analyze
         "(ns app (:capabilities #{:dataspace/transact}))
          (defn publish [] (assert!))")))
@@ -143,12 +143,12 @@
        clojure.lang.ExceptionInfo #"type mismatch"
        (sema/analyze
         "(ns app (:capabilities #{:dataspace/transact}))
-         (defn publish [] (assert! 42))
+         (defn publish [] (assert! (quot 1 0)))
          (defn main [] 0)")))
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo #"outside pure-product profile"
        (sema/analyze
-        "(defn publish [x :string] (assert! x))"
+        "(defn publish [x :document] (assert! x))"
         {:language-profile :pure-product}))))
 
 (deftest cljs-fallback-is-kept-in-lockstep-with-catalog
