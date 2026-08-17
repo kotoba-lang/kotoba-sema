@@ -139,6 +139,51 @@
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :bytes (bytes-slice value 0 1 2))")))))
 
+(deftest bytes-concat-is-a-typed-pure-join
+  (testing "joining two byte sequences yields bytes and stays pure"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [twice]))
+                   (defn twice [value :bytes] :bytes (bytes-concat value value))")]
+      (is (= '(bytes-concat value value) (get-in result [:functions 0 :body])))
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (empty? (get-in result [:functions 0 :effects])))
+      (is (hir/valid? result))))
+  (testing "it composes with the other bytes operations"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [rotate]))
+                   (defn rotate [value :bytes] :bytes
+                     (bytes-concat (bytes-slice value 1 3) (bytes-slice value 0 1)))")]
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "the empty sequence is a lawful operand"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [same]))
+                   (defn same [value :bytes] :bytes (bytes-concat (bytes) value))")]
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "both operands must be bytes"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         (sema/analyze
+          "(ns example.bytes (:export [j]))
+           (defn j [value :bytes] :bytes (bytes-concat value (bytes-count value)))")))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         (sema/analyze
+          "(ns example.bytes (:export [j]))
+           (defn j [value :i64] :bytes (bytes-concat value value))"))))
+  (testing "arity is fixed at two operands"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-concat requires two bytes operands"
+         (sema/analyze
+          "(ns example.bytes (:export [j]))
+           (defn j [value :bytes] :bytes (bytes-concat value))")))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-concat requires two bytes operands"
+         (sema/analyze
+          "(ns example.bytes (:export [j]))
+           (defn j [value :bytes] :bytes (bytes-concat value value value))")))))
+
 (deftest reader-and-schema-contracts
   (is (= 'defn (ffirst (sema/read-forms "(defn main [] 42)"))))
   (let [table {:app/item

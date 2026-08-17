@@ -267,7 +267,8 @@
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
 (def canonical-list-operations '#{typed-list-new})
-(def bytes-operations '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3})
+(def bytes-operations
+  '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -4039,6 +4040,13 @@
           (validate-expr start locals functions (inc depth) budget)
           (validate-expr end locals functions (inc depth) budget))
 
+        (= op 'bytes-concat)
+        (let [[left right] args]
+          (when-not (= 2 (count args))
+            (reject! "bytes-concat requires two bytes operands" form))
+          (validate-expr left locals functions (inc depth) budget)
+          (validate-expr right locals functions (inc depth) budget))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -5094,6 +5102,22 @@
                                     :i64 start)
           (require-expression-type! (infer-expression-type end locals signatures)
                                     :i64 end)
+          :bytes)
+        bytes-concat
+        ;; The first bytes operation that cannot be answered by pointing into
+        ;; an operand: the result is longer than either input, so somewhere to
+        ;; put it has to exist. Backends therefore owe three things typing
+        ;; cannot check -- that the destination does not overlap either
+        ;; operand, that the combined length neither overflows nor exceeds the
+        ;; space actually available, and that the cost charged for the join
+        ;; grows with the bytes moved rather than with the instruction count.
+        ;; A backend whose copy is one bulk instruction satisfies the first two
+        ;; and quietly fails the third.
+        (let [[left right] args]
+          (require-expression-type! (infer-expression-type left locals signatures)
+                                    :bytes left)
+          (require-expression-type! (infer-expression-type right locals signatures)
+                                    :bytes right)
           :bytes)
         hetero-vector-new
         (let [[type & items] args
