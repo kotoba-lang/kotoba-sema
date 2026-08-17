@@ -139,7 +139,13 @@
         "one-argument assertion is rooted in facet zero")
     (is (= :observe (-> bodies (get 'subscribe) (nth 4) (nth 2))))
     (is (= :facet-enter (-> bodies (get 'enter) (nth 4) (nth 2))))
-    (is (= :facet-leave (-> bodies (get 'leave) (nth 4) (nth 2))))))
+    (is (= :facet-leave (-> bodies (get 'leave) (nth 4) (nth 2))))
+    (let [result-type (nth (get bodies 'subscribe) 3)
+          matches-case (some #(when (= :matches (first %)) %)
+                             (nth result-type 2))]
+      (is (= [[:bindings :document] [:notices :document]]
+             (nth (second matches-case) 2))
+          "observe! result carries delivered notices, not only a snapshot"))))
 
 (deftest dataspace-source-forms-fail-closed
   (is (thrown-with-msg?
