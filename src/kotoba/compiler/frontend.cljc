@@ -267,7 +267,7 @@
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
 (def canonical-list-operations '#{typed-list-new})
-(def bytes-operations '{bytes-empty 0 bytes-count 1 bytes-at 2})
+(def bytes-operations '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -4031,6 +4031,14 @@
           (validate-expr value locals functions (inc depth) budget)
           (validate-expr index locals functions (inc depth) budget))
 
+        (= op 'bytes-slice)
+        (let [[value start end] args]
+          (when-not (= 3 (count args))
+            (reject! "bytes-slice requires a bytes operand and two offsets" form))
+          (validate-expr value locals functions (inc depth) budget)
+          (validate-expr start locals functions (inc depth) budget)
+          (validate-expr end locals functions (inc depth) budget))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -5070,6 +5078,23 @@
           (require-expression-type! (infer-expression-type index locals signatures)
                                     :i64 index)
           :i64)
+        bytes-slice
+        ;; Half-open [start, end): the result length is `end - start`, so an
+        ;; empty slice is `start = end` and no offset is ever one past a byte
+        ;; that has to exist. As with bytes-at, `0 <= start <= end <= count` is
+        ;; a run-time fact rather than a typing one, and backends must enforce
+        ;; it against the *operand's* length -- not against whatever buffer the
+        ;; operand happens to live in -- and trap otherwise. A backend that
+        ;; returns the subrange as a view rather than a copy must also say so:
+        ;; the result then aliases the operand and cannot outlive it.
+        (let [[value start end] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          (require-expression-type! (infer-expression-type start locals signatures)
+                                    :i64 start)
+          (require-expression-type! (infer-expression-type end locals signatures)
+                                    :i64 end)
+          :bytes)
         hetero-vector-new
         (let [[type & items] args
               item-types (second type)]
