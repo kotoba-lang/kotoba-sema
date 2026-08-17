@@ -267,7 +267,7 @@
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
 (def canonical-list-operations '#{typed-list-new})
-(def bytes-operations '{bytes-empty 0 bytes-count 1})
+(def bytes-operations '{bytes-empty 0 bytes-count 1 bytes-at 2})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -4024,6 +4024,13 @@
             (reject! "bytes-count requires one bytes operand" form))
           (validate-expr value locals functions (inc depth) budget))
 
+        (= op 'bytes-at)
+        (let [[value index] args]
+          (when-not (= 2 (count args))
+            (reject! "bytes-at requires a bytes operand and an index" form))
+          (validate-expr value locals functions (inc depth) budget)
+          (validate-expr index locals functions (inc depth) budget))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -5051,6 +5058,17 @@
         (let [[value] args]
           (require-expression-type! (infer-expression-type value locals signatures)
                                     :bytes value)
+          :i64)
+        bytes-at
+        ;; The result is the *unsigned* byte, so it widens into i64 rather than
+        ;; carrying a narrower byte type the rest of the language does not have.
+        ;; Whether the index is in range is a run-time fact, not a typing one:
+        ;; backends must bounds-check and trap, never read past the operand.
+        (let [[value index] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          (require-expression-type! (infer-expression-type index locals signatures)
+                                    :i64 index)
           :i64)
         hetero-vector-new
         (let [[type & items] args

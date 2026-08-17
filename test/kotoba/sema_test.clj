@@ -46,6 +46,46 @@
         "(ns example.bytes (:export [size]))
          (defn size [value :i64] :i64 (bytes-count value))"))))
 
+(deftest bytes-at-is-a-typed-pure-unsigned-byte-read
+  (testing "an indexed byte read is pure and yields i64"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [head]))
+                   (defn head [value :bytes] :i64 (bytes-at value 0))")]
+      (is (= '(bytes-at value 0) (get-in result [:functions 0 :body])))
+      (is (= :i64 (get-in result [:functions 0 :result])))
+      (is (empty? (get-in result [:functions 0 :effects])))
+      (is (hir/valid? result))))
+  (testing "the index is an ordinary i64 expression, not only a literal"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [at]))
+                   (defn at [value :bytes index :i64] :i64 (bytes-at value index))")]
+      (is (= '(bytes-at value index) (get-in result [:functions 0 :body])))
+      (is (= :i64 (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "the sequence operand must be bytes"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :i64] :i64 (bytes-at value 0))"))))
+  (testing "the index operand must be i64"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :i64 (bytes-at value value))"))))
+  (testing "arity is fixed at two operands"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-at requires a bytes operand and an index"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :i64 (bytes-at value))")))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-at requires a bytes operand and an index"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :i64 (bytes-at value 0 1))")))))
+
 (deftest reader-and-schema-contracts
   (is (= 'defn (ffirst (sema/read-forms "(defn main [] 42)"))))
   (let [table {:app/item
