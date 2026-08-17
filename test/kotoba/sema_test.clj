@@ -86,6 +86,59 @@
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :i64 (bytes-at value 0 1))")))))
 
+(deftest bytes-slice-is-a-typed-pure-half-open-subrange
+  (testing "a subrange of bytes is itself bytes, and is pure"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [head]))
+                   (defn head [value :bytes] :bytes (bytes-slice value 0 2))")]
+      (is (= '(bytes-slice value 0 2) (get-in result [:functions 0 :body])))
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (empty? (get-in result [:functions 0 :effects])))
+      (is (hir/valid? result))))
+  (testing "the offsets are ordinary i64 expressions"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [part]))
+                   (defn part [value :bytes start :i64 end :i64] :bytes
+                     (bytes-slice value start end))")]
+      (is (= '(bytes-slice value start end) (get-in result [:functions 0 :body])))
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "it composes with the other bytes operations"
+    (let [result (sema/analyze
+                  "(ns example.bytes (:export [tail]))
+                   (defn tail [value :bytes] :bytes
+                     (bytes-slice value 1 (bytes-count value)))")]
+      (is (= :bytes (get-in result [:functions 0 :result])))
+      (is (hir/valid? result))))
+  (testing "the sequence operand must be bytes"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :i64] :bytes (bytes-slice value 0 2))"))))
+  (testing "both offsets must be i64"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :bytes (bytes-slice value value 2))")))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :bytes (bytes-slice value 0 value))"))))
+  (testing "arity is fixed at three operands"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :bytes (bytes-slice value 0))")))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
+         (sema/analyze
+          "(ns example.bytes (:export [head]))
+           (defn head [value :bytes] :bytes (bytes-slice value 0 1 2))")))))
+
 (deftest reader-and-schema-contracts
   (is (= 'defn (ffirst (sema/read-forms "(defn main [] 42)"))))
   (let [table {:app/item
