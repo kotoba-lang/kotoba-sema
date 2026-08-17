@@ -32,6 +32,20 @@
       (is (= :bool (get-in result [:functions 0 :result])))
       (is (hir/valid? result)))))
 
+(deftest bytes-count-is-a-typed-pure-bytes-operation
+  (let [result (sema/analyze
+                "(ns example.bytes (:export [size]))
+                 (defn size [value :bytes] :i64 (bytes-count value))")]
+    (is (= '(bytes-count value) (get-in result [:functions 0 :body])))
+    (is (= :i64 (get-in result [:functions 0 :result])))
+    (is (empty? (get-in result [:functions 0 :effects])))
+    (is (hir/valid? result)))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"expected bytes, got i64"
+       (sema/analyze
+        "(ns example.bytes (:export [size]))
+         (defn size [value :i64] :i64 (bytes-count value))"))))
+
 (deftest reader-and-schema-contracts
   (is (= 'defn (ffirst (sema/read-forms "(defn main [] 42)"))))
   (let [table {:app/item

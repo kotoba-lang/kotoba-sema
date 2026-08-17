@@ -266,7 +266,7 @@
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
 (def canonical-list-operations '#{typed-list-new})
-(def bytes-operations '{bytes-empty 0})
+(def bytes-operations '{bytes-empty 0 bytes-count 1})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -4017,6 +4017,12 @@
         (when-not (empty? args)
           (reject! "bytes-empty does not accept operands" form))
 
+        (= op 'bytes-count)
+        (let [[value] args]
+          (when-not (= 1 (count args))
+            (reject! "bytes-count requires one bytes operand" form))
+          (validate-expr value locals functions (inc depth) budget))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -5040,6 +5046,11 @@
                                       (second type) item))
           type)
         bytes-empty :bytes
+        bytes-count
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :i64)
         hetero-vector-new
         (let [[type & items] args
               item-types (second type)]
