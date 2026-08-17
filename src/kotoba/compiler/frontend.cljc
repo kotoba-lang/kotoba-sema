@@ -121,7 +121,8 @@
    [[:asserted [:record :kotoba.dataspace/asserted
                 [[:count :i64] [:notices :document]]]]
     [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]]
-    [:matches [:record :kotoba.dataspace/matches [[:bindings :document]]]]
+    [:matches [:record :kotoba.dataspace/matches
+               [[:bindings :document] [:notices :document]]]]
     [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
     [:error [:record :kotoba.dataspace/error
              [[:code :keyword] [:message :string]]]]]])
