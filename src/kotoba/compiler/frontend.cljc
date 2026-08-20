@@ -163,6 +163,37 @@
   '{kernel-load-u8 3 kernel-load-u8-4k 3 kernel-load-u8-16k 3
     kernel-store-u8 4 kernel-store-u8-4k 4
     kernel-load-u32 3 kernel-store-u32 4
+    ;; The lock pair. `(kernel-try-lock-u32 base length index)` -> 1 if this
+    ;; call moved the u32 at `index` from 0 to 1, else 0;
+    ;; `(kernel-unlock-u32 base length index)` -> 1 if it moved that word from
+    ;; 1 back to 0, else 0. Both are single atomic read-modify-writes with
+    ;; release/acquire ordering, and both are bounds-checked exactly like the
+    ;; loads and stores above -- same `base length index` shape, same taint
+    ;; analysis on `base`, same four-byte tail requirement.
+    ;;
+    ;; A LOCK rather than a general compare-exchange, and that is the decision
+    ;; rather than an abbreviation of one. Measured 2026-08-20 across the five
+    ;; `aiueos` value-runtime objects that need this: all eleven call sites are
+    ;; the same binary try-lock at offset 0 -- acquire expecting 0, release
+    ;; expecting 1. There is no counter, no CAS retry loop over data, and no
+    ;; second lock word. Exposing the general operation would widen the surface
+    ;; to cover no observed use, and would cost twice:
+    ;;
+    ;;   x86-64   `lock cmpxchg` fixes the comparand and result in EAX. As a
+    ;;            named operation the backend saves and restores RAX around a
+    ;;            fixed sequence, the way `x86-quotient` already does for its
+    ;;            own RAX/RDX pair. As a general operator, EAX becomes a new
+    ;;            kind of constraint for the register allocator to carry.
+    ;;   aarch64  there is no CAS below ARMv8.1-LSE, so the portable form is an
+    ;;            LDAXR/STLXR pair whose store can fail spuriously and must be
+    ;;            retried. A try-lock may report failure, so that retry is a
+    ;;            bounded sequence inside one selection. A general CAS would
+    ;;            put the retry in the guest, as control flow across blocks.
+    ;;
+    ;; A lock is also the honest description of what the value runtime holds:
+    ;; the arena's design is one u32 lock word at offset 0 of an RW/NX page,
+    ;; with everything else mutated only while it is held. amu#625.
+    kernel-try-lock-u32 3 kernel-unlock-u32 3
     ;; (kernel-subregion base length offset sublen) -> base+offset, trapping
     ;; unless offset+sublen fits inside length. Listed here so its first
     ;; argument is checked as a base like every other kernel op's: a derived
