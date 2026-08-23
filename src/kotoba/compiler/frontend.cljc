@@ -129,6 +129,12 @@
   '{kernel-load-u8 3 kernel-load-u8-4k 3 kernel-load-u8-16k 3
     kernel-store-u8 4 kernel-store-u8-4k 4
     kernel-load-u32 3 kernel-store-u32 4
+    ;; Atomic compare/exchange is the synchronization primitive for bounded
+    ;; Kotoba-owned kernel tables. It returns the observed u32 value; callers
+    ;; acquire when that value equals EXPECTED and may release with the same
+    ;; operation. The backend performs the same base/length/index checks as a
+    ;; normal u32 access before issuing the atomic instruction.
+    kernel-compare-exchange-u32 5
     ;; (kernel-subregion base length offset sublen) -> base+offset, trapping
     ;; unless offset+sublen fits inside length. Listed here so its first
     ;; argument is checked as a base like every other kernel op's: a derived
@@ -197,7 +203,7 @@
 ;; invention that the kernel then branches on -- "this CPU has NX" decided by a
 ;; compiler that has never seen the CPU.
 (def kernel-privileged-operations
-  '{kernel-boot-info 0 kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
+  '{kernel-boot-info 0 kernel-publish-current-domain 1 kernel-value-runtime-capability-table 0 kernel-value-provider-queue 0 kernel-value-runtime-arena 0 kernel-value-runtime-cas-scratch 0 kernel-publish-value-provider-status 1 kernel-value-provider-status 0 kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
     kernel-cli 0 kernel-sti 0 kernel-hlt 0 kernel-pause 0
     kernel-out-u8 2 kernel-out-u32 2
     kernel-in-u8 1 kernel-in-u32 1
@@ -6322,7 +6328,8 @@
 ;; ---------------------------------------------------------------------------
 ;; Kernel region provenance.
 ;;
-;; `kernel-load-u8`/`kernel-store-u8`/... take (base, length, index, ...) and
+;; `kernel-load-u8`/`kernel-store-u8`/`kernel-compare-exchange-u32`/... take
+;; (base, length, index, ...) and
 ;; the native backends emit a real bounds check before the access: length must
 ;; not exceed the op's static maximum, base must be non-zero, index must be
 ;; below length, and any violation reaches `UD2`/`brk` before memory is
@@ -6391,7 +6398,13 @@
   (letfn [(clean? [expr seen]
             (cond
               (integer? expr) true
-              (and (seq? expr) (= 'kernel-boot-info (first expr))) true
+              (and (seq? expr)
+                   (contains? '#{kernel-boot-info
+                                 kernel-value-runtime-capability-table
+                                 kernel-value-provider-queue
+                                 kernel-value-runtime-arena
+                                 kernel-value-runtime-cas-scratch}
+                              (first expr))) true
               ;; A checked sub-window. Its own parent base sits in argument
               ;; position 0 and is validated as a base in its own right by
               ;; `kernel-base-uses`, so recursing here would double-report.
@@ -6552,6 +6565,31 @@
      :uses-boot-info?
      (boolean (some (fn [{:keys [body]}]
                       (some #(and (seq? %) (= 'kernel-boot-info (first %)))
+                            (tree-seq coll? seq body)))
+                    functions))
+     :uses-private-value-runtime-capability-table?
+     (boolean (some (fn [{:keys [body]}]
+                      (some #(and (seq? %)
+                                  (= 'kernel-value-runtime-capability-table
+                                     (first %)))
+                            (tree-seq coll? seq body)))
+                    functions))
+     :uses-private-value-provider-queue?
+     (boolean (some (fn [{:keys [body]}]
+                      (some #(and (seq? %)
+                                  (= 'kernel-value-provider-queue (first %)))
+                            (tree-seq coll? seq body)))
+                    functions))
+     :uses-private-value-runtime-arena?
+     (boolean (some (fn [{:keys [body]}]
+                      (some #(and (seq? %)
+                                  (= 'kernel-value-runtime-arena (first %)))
+                            (tree-seq coll? seq body)))
+                    functions))
+     :uses-private-value-runtime-cas-scratch?
+     (boolean (some (fn [{:keys [body]}]
+                      (some #(and (seq? %)
+                                  (= 'kernel-value-runtime-cas-scratch (first %)))
                             (tree-seq coll? seq body)))
                     functions))
      :tainted tainted

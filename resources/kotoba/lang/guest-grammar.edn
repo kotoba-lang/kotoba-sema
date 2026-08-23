@@ -343,7 +343,7 @@
    "bit-shift-left" "bit-shift-right" "unsigned-bit-shift-right" "host-i64-roundtrip"
    "pair" "pair-first" "pair-second" "list" "cons" "first" "second" "rest" "empty?"
    "quot" "bit-and" "bit-xor"
-   "kernel-load-u8" "kernel-store-u8" "kernel-boot-info"
+   "kernel-load-u8" "kernel-store-u8" "kernel-compare-exchange-u32" "kernel-boot-info" "kernel-publish-current-domain" "kernel-value-runtime-capability-table" "kernel-value-provider-queue" "kernel-value-runtime-arena" "kernel-value-runtime-cas-scratch" "kernel-publish-value-provider-status" "kernel-value-provider-status"
    "not=" "cond" "case" "if-let" "when-let" "->" "->>"}
 
  :maturity

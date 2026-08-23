@@ -48,6 +48,48 @@
                           (sema/analyze
                            "(defn helper [] 1) (defn main [] 42)")))))
 
+(deftest atomic-kernel-table-primitive-is-bounded-and-typed
+  (let [hir (sema/analyze
+             "(defn swap [base length index expected desired] (kernel-compare-exchange-u32 base length index expected desired)) (defn main [] 0)")
+        swap (first (filter #(= 'swap (:name %)) (:functions hir)))]
+    (is (= :i64 (:result swap)))
+    (is (= '(kernel-compare-exchange-u32 base length index expected desired)
+           (:body swap))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"arity mismatch"
+        (sema/analyze
+         "(defn main [] (kernel-compare-exchange-u32 4096 64 0 0))"))))
+
+(deftest scheduler-domain-publication-is-a-typed-kernel-primitive
+  (let [hir (sema/analyze
+             "(defn publish [domain] (kernel-publish-current-domain domain)) (defn main [] 0)")
+        publish (first (filter #(= 'publish (:name %)) (:functions hir)))]
+    (is (= :i64 (:result publish)))
+    (is (= '(kernel-publish-current-domain domain) (:body publish))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"arity mismatch"
+        (sema/analyze
+         "(defn main [] (kernel-publish-current-domain))"))))
+
+(deftest value-runtime-capability-table-is-kernel-private
+  (let [hir (sema/analyze
+             "(defn table [] (kernel-value-runtime-capability-table)) (defn main [] 0)")
+        table (first (filter #(= 'table (:name %)) (:functions hir)))]
+    (is (= :i64 (:result table)))
+    (is (= '(kernel-value-runtime-capability-table) (:body table)))))
+
+(deftest value-runtime-provider-regions-are-kernel-private
+  (let [hir (sema/analyze
+              "(defn queue [] (kernel-value-provider-queue))
+              (defn arena [] (kernel-value-runtime-arena))
+              (defn scratch [] (kernel-value-runtime-cas-scratch))
+              (defn main [] 0)")
+        by-name (into {} (map (juxt :name identity) (:functions hir)))]
+    (is (= :i64 (:result (get by-name 'queue))))
+    (is (= '(kernel-value-provider-queue) (:body (get by-name 'queue))))
+    (is (= :i64 (:result (get by-name 'arena))))
+    (is (= '(kernel-value-runtime-arena) (:body (get by-name 'arena))))
+    (is (= :i64 (:result (get by-name 'scratch))))
+    (is (= '(kernel-value-runtime-cas-scratch) (:body (get by-name 'scratch))))))
+
 (defn- result-of
   "The declared result type of `p` in SRC. `main` must be zero-arity, so the
   function under test is a helper beside it."
