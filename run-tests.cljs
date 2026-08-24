@@ -13,7 +13,8 @@
 (ns run-tests
   (:require [cljs.test :as t]
             [kotoba.compiler.case-uniqueness-test]
-            [kotoba.compiler.host-nesting-test]))
+            [kotoba.compiler.host-nesting-test]
+            [kotoba.compiler.oracle-reach-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -22,4 +23,5 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.compiler.case-uniqueness-test
-             'kotoba.compiler.host-nesting-test)
+             'kotoba.compiler.host-nesting-test
+             'kotoba.compiler.oracle-reach-test)
