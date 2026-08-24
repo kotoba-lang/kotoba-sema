@@ -2077,6 +2077,40 @@
                          then-form)
                    else-form))))))
 
+(defn- uniqueness-key
+  "A stand-in for `v` that is safe to HASH on every runtime.
+
+   ClojureScript cannot hash a JS `bigint`: `cljs.core/hash` reaches
+   `goog.getUid`, which sets a property on the object, and a bigint is a
+   primitive. It throws `Cannot create property 'closure_uid_...' on bigint`.
+
+   That would be a curiosity if `distinct` hashed everything, but it does not
+   -- up to eight elements it stays linear and compares with `=`, so the
+   throw only appears from the NINTH. Measured 2026-08-24 on nbb 1.5.212:
+
+     (case i 0 .. 7 default)   compiles
+     (case i 0 .. 8 default)   Cannot create property 'closure_uid_...'
+     (case x :a .. :i default) compiles      ;; keywords hash fine
+     the same 64-arm case on the JVM          compiles
+
+   A `.kotoba` integer literal is a bigint on ClojureScript and a Long on the
+   JVM, so this was ClojureScript-only, and only for integer dispatch values.
+   The visible cost was in the source people write: `aiueos/kotoba/sha256.kotoba`
+   spells SHA-256's 64 round constants as a 63-deep nested `if`, which is what
+   is left when `case` is not available for a constant table.
+
+   Integers are keyed by their decimal text, which is identical on both
+   runtimes (`(str 5)`, `(str 5N)` and `(str (bigint 5))` are all \"5\"), and
+   tagged so that the integer 5 does not collide with the string \"5\" or the
+   keyword :5."
+  [v]
+  (if (kotoba-integer? v) [::integer (str v)] [::literal v]))
+
+(defn- all-distinct?
+  "Uniqueness over values that may include `.kotoba` integer literals."
+  [xs]
+  (= (count xs) (count (distinct (map uniqueness-key xs)))))
+
 (defn- desugar-case [args form]
   (when (empty? args) (reject! "case requires a dispatch expression" form))
   (let [[dispatch & clauses] args
@@ -2088,7 +2122,7 @@
         literal? #(or (kotoba-integer? %) (keyword? %) (boolean? %) (string? %))]
     (when-not (every? literal? constants)
       (reject! "case constants must be bounded integer, keyword, boolean, or string literals" form))
-    (when-not (= (count constants) (count (distinct constants)))
+    (when-not (all-distinct? constants)
       (reject! "case constants must be unique" form))
     (let [tmp (synthetic "case")]
       (list 'let [tmp (desugar-expr dispatch)]
@@ -7271,7 +7305,10 @@
                                    (reject! "all defmethods must use the same parameter vector"
                                             method)))
                              values (mapv #(nth % 2) method-forms)
-                             _ (when-not (= (count values) (count (distinct values)))
+                             ;; Same hashing hazard as `case`: a dispatch
+                             ;; value may be an integer literal, which is a
+                             ;; bigint on ClojureScript.
+                             _ (when-not (all-distinct? values)
                                  (reject! "duplicate defmethod dispatch value" method-forms))
                              default-method (first (filter #(= :default (nth % 2))
                                                            method-forms))
