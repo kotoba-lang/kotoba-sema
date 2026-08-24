@@ -2626,22 +2626,40 @@
         coll-param (symbol (str helper-name "_coll"))
         value (symbol (str helper-name "_value"))
         callback-value (callback-closure :lazy-filter callback 1)
+        cursor (symbol (str helper-name "_cursor"))
+        ;; The rejection branch is a `recur`, not a self-call through `invoke`.
+        ;;
+        ;; It used to be `(invoke (helper cb (lazy-rest coll)))` -- build the
+        ;; next thunk and force it immediately -- which nests one host frame
+        ;; per REJECTED element. `lazy-map` never has this shape because both
+        ;; of its branches return a `pair`; only `filter` has to keep looking.
+        ;;
+        ;; The KIR trampoline flattens a self-tail call to a `__kotoba_loop_N`
+        ;; helper, and `loop`/`recur` is what produces one. Going through
+        ;; `invoke` of a closure is invisible to it: the recursion is a call to
+        ;; a closure handle, not a named self-call, so nothing could flatten it.
+        ;; Measured 2026-08-24 before this change: amu's `lazy-sequence`
+        ;; fixture -- four rejected elements -- exhausted the constant oracle's
+        ;; host stack on nbb 1.5.212 while the JVM folded it.
+        ;;
+        ;; The ACCEPT branch still names the helper, and must: that call sits
+        ;; inside a `(fn [] ...)`, deferred until the consumer asks for the
+        ;; rest. It is not a tail call and must not become one.
         resolver
         (binding [*lifting-lazy-thunk?* true]
           (lift-lambda
            (list 'fn []
-                 (list 'if (list 'lazy-empty? coll-param)
-                       0
-                       (list 'let [value (list 'lazy-first coll-param)]
-                             (list 'if (list 'invoke :bool callback-param value)
-                                   (list 'pair
-                                         (list 'fn [] value)
-                                         (list 'fn []
-                                               (list helper-name callback-param
-                                                     (list 'lazy-rest coll-param))))
-                                   (list 'invoke
-                                         (list helper-name callback-param
-                                               (list 'lazy-rest coll-param)))))))))
+                 (list 'loop [cursor coll-param]
+                       (list 'if (list 'lazy-empty? cursor)
+                             0
+                             (list 'let [value (list 'lazy-first cursor)]
+                                   (list 'if (list 'invoke :bool callback-param value)
+                                         (list 'pair
+                                               (list 'fn [] value)
+                                               (list 'fn []
+                                                     (list helper-name callback-param
+                                                           (list 'lazy-rest cursor))))
+                                         (list 'recur (list 'lazy-rest cursor)))))))))
         helper {:name helper-name :params [callback-param coll-param]
                 :result :i64 :effects #{} :body resolver}]
     (when *pending-loop-helpers*
