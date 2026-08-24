@@ -57,3 +57,30 @@
 (deftest keyword-arms-were-never-affected
   (testing "keywords hash on every runtime, so nine of them always worked"
     (is (analyzes? "(defn k [x :keyword] :i64 (case x :a 1 :b 2 :c 3 :d 4 :e 5 :f 6 :g 7 :h 8 :i 9 0))\n(defn main [] :i64 (k :c))"))))
+
+(deftest the-property-the-key-depends-on-is-pinned-here
+  (testing "integers keyed by decimal text: full precision, and the same text on both runtimes"
+    ;; `uniqueness-key` keys an integer constant by `(str v)`. That is only
+    ;; sound because the decimal text is EXACT and IDENTICAL on both runtimes
+    ;; -- a bigint on ClojureScript, a Long on the JVM. Nothing was asserting
+    ;; it; it had been checked by hand once, which is the same as not checked.
+    ;;
+    ;; Two constants one apart, both above 2^53, where a detour through a
+    ;; double would make them the same number and the pair would be refused as
+    ;; duplicates. Analyzing means the two stayed distinct.
+    (is (analyzes?
+         (str "(defn k [i :i64] :i64 (case i "
+              "9007199254740992 1 9007199254740993 2 "
+              ;; and enough further arms to be past the hashing threshold,
+              ;; which is where the key is used at all
+              "1 3 2 4 3 5 4 6 5 7 6 8 7 9 "
+              "0))\n(defn main [] :i64 (k 9007199254740993))"))
+        "2^53 and 2^53+1 are one apart and become the SAME double -- they must not collapse"))
+  (testing "and the duplicate of a large constant is still caught"
+    (is (str/includes?
+         (str (rejection-of
+               (str "(defn k [i :i64] :i64 (case i "
+                    "9007199254740992 1 9007199254740992 2 "
+                    "1 3 2 4 3 5 4 6 5 7 6 8 7 9 "
+                    "0))\n(defn main [] :i64 (k 1))")))
+         "case constants must be unique"))))
