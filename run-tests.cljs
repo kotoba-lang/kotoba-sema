@@ -12,7 +12,8 @@
 ;; the superproject measures this file against the directory.
 (ns run-tests
   (:require [cljs.test :as t]
-            [kotoba.compiler.case-uniqueness-test]))
+            [kotoba.compiler.case-uniqueness-test]
+            [kotoba.compiler.host-nesting-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -20,4 +21,5 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.compiler.case-uniqueness-test)
+(t/run-tests 'kotoba.compiler.case-uniqueness-test
+             'kotoba.compiler.host-nesting-test)

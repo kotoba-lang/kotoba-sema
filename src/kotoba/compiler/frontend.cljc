@@ -9,6 +9,7 @@
             [kotoba.artifact.core :as artifact]
             [kotoba.compiler.schema :as schema]
             [kotoba.hir :as hir]
+            [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
             #?@(:clj [[clojure.tools.reader :as reader]
                       [clojure.tools.reader.reader-types :as rt]]
@@ -711,6 +712,15 @@
                form :kotoba.error/hetero-vector-slice-index-range))
     #?(:clj (long host-index) :cljs host-index)))
 
+(def max-reader-depth
+  "`:max-reader-depth` from lang/guest-grammar.edn's `:admission-limits`.
+
+   It bounds the SOURCE. Desugaring creates nesting the source does not have —
+   a flat 64-arm `case` reads at depth 2 and becomes a 64-deep chain of `if` —
+   so this is not a bound on the tree the compiler walks. `analyze` says so
+   where that difference bites."
+  512)
+
 (defn- check-reader-depth! [source]
   (loop [index 0 depth 0 in-string? false escaped? false in-comment? false]
     (when (< index (count source))
@@ -725,7 +735,7 @@
           in-string? (recur (inc index) depth true false false)
           (#{\( \[ \{} ch)
           (let [next-depth (inc depth)]
-            (when (> next-depth 512)
+            (when (> next-depth max-reader-depth)
               (throw (ex-info "reader nesting exceeds admission limit" {:phase :read})))
             (recur (inc index) next-depth false false false))
           (#{\) \] \}} ch) (recur (inc index) (max 0 (dec depth)) false false false)
@@ -7931,7 +7941,7 @@
      :dispatch dispatch
      :record-schemas record-schemas}))
 
-(defn analyze
+(defn- analyze*
   "Analyze Kotoba source into HIR.
 
   opts:
@@ -7944,7 +7954,7 @@
                        `__kotoba_or_*` / `__kotoba_and_*` bindings from the
                        per-module first pass. User source still cannot invent
                        those names — each module was checked before link.)"
-  ([source] (analyze source nil))
+  ([source] (analyze* source nil))
   ([source opts]
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
@@ -8450,3 +8460,37 @@
         :named-operations named-operations
         :language-profile language-profile
         :functions functions})))))
+
+(defn analyze
+  "Analyze Kotoba source into HIR, refusing in this language's own vocabulary
+  when the host runs out of native stack.
+
+  Why the wrapper. `check-reader-depth!` bounds nesting at 512 -- but it
+  measures the SOURCE, and desugaring creates nesting the source does not
+  have. A flat `(case i 0 .. 63 default)` reads at depth 2 and becomes a
+  64-deep chain of `if`, which `analyze*` then walks recursively. Measured
+  2026-08-24: the JVM analyzes 128 arms, and ClojureScript raised a raw
+  `RangeError: Maximum call stack size exceeded` from inside the compiler --
+  an admission limit that says 512 while the host gives out an order of
+  magnitude earlier, and gives out in the host's words instead of ours.
+
+  This does NOT raise the ceiling. It makes crossing it a refusal a caller can
+  read and act on, with `:phase :subset` and a stable code like every other
+  refusal here. Raising it means not consuming host stack per level of
+  desugared nesting, which is a different change and is not this one.
+
+  The predicate is `kotoba.kir/host-stack-exhausted?` -- shared, not copied.
+  The same invariant already holds at the KIR constant oracle, and one
+  invariant should not have three implementations."
+  ([source] (analyze source nil))
+  ([source opts]
+   (try
+     (analyze* source opts)
+     (catch #?(:clj Throwable :cljs :default) e
+       (if (kir/host-stack-exhausted? e)
+         (throw (ex-info "desugared nesting exhausted the host stack"
+                         {:phase :subset
+                          :kotoba.error/code :kotoba.error/host-nesting-exhausted
+                          :source-reader-depth-limit max-reader-depth
+                          :note "the source is inside the admission limit; the tree the desugar builds is not"}))
+         (throw e))))))
