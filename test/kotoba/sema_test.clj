@@ -403,6 +403,22 @@
 (defn- form-tree [form]
   (tree-seq coll? seq form))
 
+(deftest pure-map-reduce-fusion-elides-intermediate-vectors
+  (let [ops (fn [body]
+              (let [{:keys [functions]}
+                    (sema/analyze
+                     (str "(ns t (:export [f]))\n"
+                          "(defn f [v :vector-i64] :i64 " body ")"))]
+                (into #{} (comp (map :body)
+                                (mapcat form-tree)
+                                (filter seq?)
+                                (map first))
+                      functions)))]
+    (is (not (contains? (ops "(reduce + 0 (map inc v))") 'vector-conj)))
+    (is (not (contains? (ops "(reduce + 0 (map dec (map inc v)))") 'vector-conj)))
+    (is (contains? (ops "(reduce + 0 (map (fn [x] (+ x 1)) v))") 'vector-conj)
+        "unproven callbacks retain eager materialization")))
+
 (defn- body-heads [form]
   (into [] (comp (filter seq?) (map first)) (form-tree form)))
 

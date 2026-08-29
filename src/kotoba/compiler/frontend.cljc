@@ -3743,8 +3743,35 @@
                                                    (list 'vector-at v i)))
                                        acc))))))
             (let [[f-form init-form coll-form] args
+                  ;; A closed, pure unary map chain can be consumed directly by
+                  ;; a pure primitive fold.  The ordinary eager map lowering
+                  ;; remains the fallback for callbacks whose effects are not
+                  ;; proven here, because interleaving an effectful mapper with
+                  ;; a reducer would change the language's eager evaluation
+                  ;; order.  `inc` and `dec` are total i64 arithmetic sugar, so
+                  ;; composing them at the vector read is semantics-preserving.
+                  map-chain
+                  (when (and (symbol? f-form)
+                             (not (contains? *lexical-bindings* f-form))
+                             (contains? '#{+ - * bit-and bit-or bit-xor} f-form))
+                    (loop [candidate coll-form callbacks []]
+                      (if (and (seq? candidate)
+                               (= 'map (first candidate))
+                               (= 3 (count candidate))
+                               (symbol? (second candidate))
+                               (not (contains? *lexical-bindings* (second candidate)))
+                               (contains? '#{inc dec} (second candidate)))
+                        (recur (nth candidate 2) (conj callbacks (second candidate)))
+                        (when (seq callbacks)
+                          {:collection candidate
+                           ;; We peel outermost first; values flow from the
+                           ;; innermost map to the outermost map.
+                           :callbacks (vec (reverse callbacks))}))))
                   init* (desugar-expr init-form)
-                  coll* (desugar-result-expr :vector-i64 coll-form)
+                  coll* (desugar-result-expr :vector-i64
+                                             (if map-chain
+                                               (:collection map-chain)
+                                               coll-form))
                   v (synthetic "reduce_v")
                   i (synthetic "reduce_i")
                   acc (synthetic "reduce_acc")
@@ -3755,10 +3782,16 @@
                   stored? (not (or primitive? named?
                                    (and (seq? f-form) (= 'fn (first f-form)))))
                   callback (when stored? (synthetic "reduce_callback"))
+                  item (reduce (fn [value callback-name]
+                                 (case callback-name
+                                   inc (list '+ value 1)
+                                   dec (list '- value 1)))
+                               (list 'vector-at v i)
+                               (:callbacks map-chain))
                   step
                   (cond
                     primitive?
-                    (list f-form acc (list 'vector-at v i))
+                    (list f-form acc item)
 
                     (and (seq? f-form) (= 'fn (first f-form)))
                     (let [[_ params & body] f-form]
@@ -3768,18 +3801,17 @@
                         (reject! "reduce fn must be (fn [acc x] single-expr)" f-form))
                       (let [[a b] params]
                         (list 'let [a acc
-                                    b (list 'vector-at v i)]
+                                    b item]
                               (binding [*lexical-bindings*
                                         (into *lexical-bindings* params)]
                                 (desugar-expr (first body))))))
 
                     ;; Named binary module function (fail-closed if unbound / wrong arity).
                     named?
-                    (list f-form acc (list 'vector-at v i))
+                    (list f-form acc item)
 
                     :else
-                    (list (invoke-dispatcher-name 2) callback acc
-                          (list 'vector-at v i)))]
+                    (list (invoke-dispatcher-name 2) callback acc item))]
               ;; Re-enter desugar so loop → __kotoba_loop_N under *pending-loop-helpers*.
               (desugar-expr
                (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
