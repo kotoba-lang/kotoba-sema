@@ -2777,6 +2777,24 @@
         (lexical-call-form? form)
         (desugar-lexical-call (or contextual-result-type :i64) form)
 
+        ;; Variadic string-concat surface: (string-concat a b c ...) folds
+        ;; left-to-right into the binary operation the arity table, the
+        ;; validator, and every backend already implement. This admits no new
+        ;; call head and no new ABI -- `string-operations` still says
+        ;; `string-concat 2`, and validation runs after desugar, so what
+        ;; reaches it is unchanged. Placed after `lexical-call-form?` so a
+        ;; lexically bound `string-concat` still shadows the builtin.
+        ;;
+        ;; Measured before this existed: `(string-concat "a" "b" "c")` was
+        ;; rejected with "string operation arity mismatch", so the only
+        ;; portable spelling for three parts was a nest, or `string-join` with
+        ;; a dummy "" separator. kotoba-lang/provider had 551 `string-concat`
+        ;; occurrences and kotoba-lang/murakumo 494, most of them nested.
+        (and (= op 'string-concat) (> (count args) 2))
+        (desugar-expr (reduce (fn [acc part] (list 'string-concat acc part))
+                              (first args)
+                              (rest args)))
+
         (contains? contextual-string-argument-indexes op)
         (let [string-indexes (get contextual-string-argument-indexes op)]
           (apply list op
