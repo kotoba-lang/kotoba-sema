@@ -266,6 +266,7 @@
   '{kernel-boot-info 0 kernel-read-cr0 0 kernel-write-cr0 1
     kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
     kernel-read-cs 0 kernel-page-fault-handler-address 0
+    kernel-rt-timer-handler-address 0
     kernel-page-fault-recovery-handler-address 0
     kernel-configure-page-fault-recovery 2 kernel-load-idt 2
     kernel-double-fault-handler-address 0
