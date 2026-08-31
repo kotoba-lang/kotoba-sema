@@ -7342,6 +7342,209 @@
                       form)
     :else form))
 
+;; ── defdesugar: registered pure bounded templates ───────────────────────────
+;;
+;; `lang/guest-grammar.edn` lists `:defdesugar` in `:sugar`, `surface-status`
+;; records it as `:registered-pure-bounded-template`, `elaboration-pipeline`
+;; names `:registered-defdesugar-only` as a rule of the bounded-pure-desugar
+;; stage, and `lang/conformance/control/match_desugar.kotoba` is a fixture for
+;; it. None of that was reachable: the frontend had no `defdesugar` at all, so
+;; that fixture was rejected by the CLI on both routes with "only ns, def, defn,
+;; and defn- are allowed at top level".
+;;
+;; This matters beyond convenience. ADR-2608301500 classifies the `defmacro`
+;; ban as permanent on the `:code-identity` axis, and rests that permanence on
+;; `defdesugar` being the bounded alternative. A ban whose alternative does not
+;; exist is a ban with no answer.
+;;
+;; What makes this bounded rather than a macro system:
+;;
+;;   - Registered only. A call expands if and only if its head names a
+;;     `defdesugar` in this module. Nothing computes a name.
+;;   - No recursion, structurally. A template body is expanded against the
+;;     templates declared BEFORE it, so a template can never reach itself and
+;;     there is no cycle to detect -- expansion depth is bounded by the
+;;     declaration order, not by a fuel counter that has to be trusted.
+;;   - Substitution only. A template is a form with holes; it does not run.
+;;   - Bounded. Template count, parameter count, body size and total expansion
+;;     count all have limits, and each is a refusal rather than a truncation.
+;;
+;; Arguments are bound once, into synthesized names, rather than substituted
+;; textually. `(defdesugar clamp [x lo hi] (if (< x lo) lo (if (> x hi) hi x)))`
+;; mentions `x` twice, so textual substitution would evaluate the argument
+;; twice -- silently, and visibly only when the argument is a capability call.
+;; The names are synthesized rather than the parameters' own because `let` binds
+;; sequentially: expanding `(clamp a x c)` in a scope that has its own `x` would
+;; otherwise make the second binding read the new `x` instead of the caller's.
+
+(def max-desugar-templates 32)
+(def max-desugar-template-parameters 8)
+(def max-desugar-template-nodes 512)
+(def max-desugar-expansions 4096)
+
+;; Heads whose meaning the rest of the frontend depends on. A template may not
+;; take one of these names: the expansion pass runs before every other pass, so
+;; it would be rewriting the language out from under them.
+(def ^:private structural-heads
+  '#{ns def defn defn- defmulti defmethod defrecord defprotocol definterface
+     extend-type extend-protocol defdesugar
+     if let let* do fn loop recur quote var recur-to})
+
+(defn- desugar-template-parts
+  "Read one `(defdesugar name [params] body)` into `{:name :params :body}`."
+  [form]
+  (let [[_ name params & tail] form]
+    (when-not (simple-symbol? name)
+      (reject! "desugar template requires a simple name" form))
+    (when (reserved-binding-name? name)
+      (reject! "symbol uses the reserved __kotoba_ prefix" name))
+    (when (or (contains? structural-heads name) (contains? forbidden-heads name))
+      (reject! "desugar template may not take a reserved head name" name))
+    (when-not (vector? params)
+      (reject! "desugar template requires a parameter vector" form))
+    (when (> (count params) max-desugar-template-parameters)
+      (reject! "desugar template parameter count exceeds limit" form))
+    (when-not (every? simple-symbol? params)
+      (reject! "desugar template parameters must be plain symbols" params))
+    (when (some reserved-binding-name? params)
+      (reject! "symbol uses the reserved __kotoba_ prefix" params))
+    (when-not (= (count params) (count (set params)))
+      (reject! "desugar template parameters must be distinct" params))
+    (when-not (= 1 (count tail))
+      (reject! "desugar template requires exactly one body expression" form))
+    (let [body (first tail)]
+      (when (> (count (tree-seq coll? seq body)) max-desugar-template-nodes)
+        (reject! "desugar template body exceeds node limit" form))
+      {:name name :params (vec params) :body body})))
+
+(defn- substitute-template-parameters
+  "Rename `parameters` (a symbol -> symbol map) throughout `form`.
+
+  Consistent renaming is sound even where the body rebinds a parameter's name:
+  `(defdesugar f [x] (let [x 1] x))` becomes `(let [t 1] t)`, which the outer
+  binding of `t` shadows exactly as the source shadowed `x`. `quote` is the one
+  subtree that must be left alone -- its contents are data, not code."
+  [form parameters]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+    (symbol? form) (get parameters form form)
+    (seq? form) (with-meta (apply list (map #(substitute-template-parameters % parameters) form))
+                  (meta form))
+    (vector? form) (mapv #(substitute-template-parameters % parameters) form)
+    (map? form) (into (empty form)
+                      (map (fn [[k v]] [(substitute-template-parameters k parameters)
+                                        (substitute-template-parameters v parameters)]))
+                      form)
+    (set? form) (into (empty form) (map #(substitute-template-parameters % parameters)) form)
+    :else form))
+
+(defn- expand-desugar-calls
+  "Rewrite every `(template arg ...)` in `form` against `templates`.
+
+  Arguments are expanded first, so a template call inside an argument is
+  handled by the same pass rather than left behind."
+  [form templates counter]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+
+    (seq? form)
+    (let [head (first form)
+          arguments (mapv #(expand-desugar-calls % templates counter) (rest form))]
+      (if-let [template (and (symbol? head) (get templates head))]
+        (do
+          (when-not (= (count arguments) (count (:params template)))
+            (reject! "desugar template call arity does not match its parameters" form))
+          (when (> (vswap! counter inc) max-desugar-expansions)
+            (reject! "desugar expansion count exceeds limit" form))
+          (let [index @counter
+                renamed (into {} (map (fn [parameter]
+                                        [parameter (symbol (str "__kotoba_desugar_" index "_"
+                                                                (name parameter)))]))
+                              (:params template))
+                bindings (vec (mapcat (fn [parameter argument]
+                                        [(get renamed parameter) argument])
+                                      (:params template) arguments))]
+            (with-meta (list 'let bindings
+                             (substitute-template-parameters (:body template) renamed))
+              (meta form))))
+        (with-meta (apply list (cons (expand-desugar-calls head templates counter) arguments))
+          (meta form))))
+
+    (vector? form) (mapv #(expand-desugar-calls % templates counter) form)
+    (map? form) (into (empty form)
+                      (map (fn [[k v]] [(expand-desugar-calls k templates counter)
+                                        (expand-desugar-calls v templates counter)]))
+                      form)
+    (set? form) (into (empty form) (map #(expand-desugar-calls % templates counter)) form)
+    :else form))
+
+(defn- reject-template-references!
+  "A template name outside head position has no expansion. Saying so here is
+  the difference between one clear refusal and an unresolved symbol reported
+  from somewhere in lowering."
+  [form names]
+  (cond
+    (and (seq? form) (= 'quote (first form))) nil
+    (seq? form) (doseq [[position value] (map-indexed vector form)]
+                  (if (zero? position)
+                    (when-not (symbol? value) (reject-template-references! value names))
+                    (if (and (symbol? value) (contains? names value))
+                      (reject! "desugar template must be called, not referenced" value)
+                      (reject-template-references! value names))))
+    (coll? form) (doseq [value (if (map? form) (apply concat form) (seq form))]
+                   (if (and (symbol? value) (contains? names value))
+                     (reject! "desugar template must be called, not referenced" value)
+                     (reject-template-references! value names)))
+    :else nil))
+
+(defn- expand-defdesugar-forms
+  "Register `defdesugar` templates and expand their calls out of `forms`."
+  [forms]
+  (let [declarations (filter #(and (seq? %) (= 'defdesugar (first %))) forms)]
+    (if (empty? declarations)
+      forms
+      (do
+        (when (> (count declarations) max-desugar-templates)
+          (reject! "desugar template count exceeds limit" declarations))
+        (let [counter (volatile! 0)
+              ;; Declaration order is the whole recursion story: each body is
+              ;; expanded against the templates declared before it, so a
+              ;; template cannot reach itself and no cycle can form.
+              templates
+              (reduce (fn [acc declaration]
+                        (let [{:keys [name params body]} (desugar-template-parts declaration)]
+                          (when (contains? acc name)
+                            (reject! "duplicate desugar template name" declaration))
+                          (assoc acc name
+                                 {:name name :params params
+                                  :body (expand-desugar-calls body acc counter)})))
+                      {} declarations)
+              names (set (keys templates))
+              ;; Declaration order forbids a cycle, but it does not by itself
+              ;; SAY so: a body naming itself, or naming a template declared
+              ;; later, simply fails to expand and survives as a call to a
+              ;; function that does not exist -- reported from lowering, about
+              ;; a name the source never wrote as a function. After expansion
+              ;; no template name can legitimately remain in any body, so one
+              ;; check covers both directions and names the real cause.
+              _ (doseq [template (vals templates)]
+                  (doseq [value (tree-seq coll? seq (:body template))]
+                    (when (and (symbol? value) (contains? names value))
+                      (reject! (if (= value (:name template))
+                                 "desugar template may not call itself"
+                                 "desugar template may not call one declared after it")
+                               (:body template)))))
+              remaining (remove #(and (seq? %) (= 'defdesugar (first %))) forms)
+              defined (into #{} (comp (filter #(and (seq? %) (contains? '#{defn defn- def} (first %))))
+                                      (map second)
+                                      (filter simple-symbol?))
+                            remaining)
+              collisions (set/intersection names defined)]
+          (when (seq collisions)
+            (reject! "desugar template name collides with a definition" (vec (sort collisions))))
+          (doseq [form remaining] (reject-template-references! form names))
+          (mapv #(expand-desugar-calls % templates counter) remaining))))))
+
 (defn- closed-multimethod-literal? [value]
   (or (kotoba-integer? value) (keyword? value) (boolean? value) (string? value)))
 
@@ -8043,6 +8246,7 @@
         forms (:forms record-protocol-expansion)
         protocol-dispatch (:dispatch record-protocol-expansion)
         forms (expand-closed-multimethod-forms forms)
+        forms (expand-defdesugar-forms forms)
         namespaces (filter #(and (seq? %) (= 'ns (first %))) forms)
         defs (filter #(and (seq? %) (contains? '#{defn defn-} (first %))) forms)
         constant-forms (filter #(and (seq? %) (= 'def (first %))) forms)

@@ -15,7 +15,8 @@
             [kotoba.compiler.case-uniqueness-test]
             [kotoba.compiler.host-nesting-test]
             [kotoba.compiler.oracle-reach-test]
-            [kotoba.compiler.parameter-annotation-test]))
+            [kotoba.compiler.parameter-annotation-test]
+            [kotoba.compiler.defdesugar-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -26,4 +27,5 @@
 (t/run-tests 'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.oracle-reach-test
-             'kotoba.compiler.parameter-annotation-test)
+             'kotoba.compiler.parameter-annotation-test
+             'kotoba.compiler.defdesugar-test)
