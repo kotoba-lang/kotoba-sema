@@ -7150,42 +7150,66 @@
                       form)
     :else form))
 
+(defn- parameter-type-item?
+  "Does this item occupy a TYPE position rather than a pattern position?
+
+  Every value type is either a keyword or a vector whose head is a keyword --
+  `:fn` `:result` `:variant` `:option` `:list` `:stream` `:task` `:vector`
+  `:set` `:map` `:record` `:ref`, plus the `[:alias name]` form. No parameter
+  pattern can look like that: vector destructuring binds symbols, so its head
+  is a symbol, and map destructuring is a map. The two positions are therefore
+  distinguishable item by item, which is what lets annotations be per-parameter
+  instead of all-or-nothing."
+  [item]
+  (or (keyword? item)
+      (and (vector? item) (keyword? (first item)))))
+
 (defn- typed-param-parts
-  "Legacy `[x y]` remains two i64 parameters. Once any type keyword appears,
-  the whole vector must be alternating `[name :type ...]`; this keeps the
-  source grammar deterministic and makes every non-i64 host boundary explicit."
+  "Read `[name]` and `[name :type]` per parameter, in any mixture.
+
+  An unannotated parameter is `:i64`, exactly as before -- so every non-i64
+  host boundary is still written down, which is the property this function
+  exists to keep. What is gone is the all-or-nothing rule: annotating one
+  parameter used to force annotating every parameter in the vector, so a
+  function taking one string among four counters carried three `:i64`s that
+  said nothing. That is most of the annotation churn in a .cljc port, and none
+  of it was carrying information.
+
+  Scanning is per item and unambiguous (see `parameter-type-item?`); it does
+  not depend on the vector's length or on any item's index, which is what the
+  old alternating-pairs rule needed."
   [raw-params constants]
-  (let [raw-params (mapv (fn [index item]
-                           (if (and (odd? index) (type-alias-form? item))
-                             (resolve-type-alias! item constants)
-                             item))
-                         (range) raw-params)]
-  (if (or (some keyword? raw-params)
-          (and (even? (count raw-params))
-               (some structured-type? (map second (partition 2 raw-params)))))
-    (do
-      (when-not (even? (count raw-params))
-        (reject! "typed parameters require alternating name/type pairs" raw-params))
-      (mapv (fn [[pattern type]]
-              (validate-value-type! type)
-              (when (and (or (contains? #{:f32 :f64 :string :keyword :map :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} type)
-                             (structured-type? type))
-                         (not (or (symbol? pattern)
-                                  (and (= type :map) (map? pattern))
-                                  (and (contains? #{:vector-i64 :vector-f64} type)
-                                       (vector? pattern))
-                                  (and (heterogeneous-vector-type? type)
-                                       (vector? pattern))
-                                  (and (or (canonical-typed-map-type? type)
-                                           (record-type? type)
-                                           (schema-ref-type? type))
-                                       (map? pattern)))))
-                (reject! "typed values require plain-symbol bindings" pattern))
-              (cond-> {:pattern pattern
-                       :type (if (callable-type? type) :i64 type)}
-                (callable-type? type) (assoc :callable-contract type)))
-            (partition 2 raw-params)))
-    (mapv (fn [pattern] {:pattern pattern :type :i64}) raw-params))))
+  (loop [items (vec raw-params) parts []]
+    (if (empty? items)
+      parts
+      (let [pattern (first items)
+            _ (when (parameter-type-item? pattern)
+                (reject! "parameter name expected, found a type" pattern))
+            annotated? (parameter-type-item? (second items))
+            type (if annotated?
+                   (let [declared (second items)]
+                     (if (type-alias-form? declared)
+                       (resolve-type-alias! declared constants)
+                       declared))
+                   :i64)]
+        (when annotated? (validate-value-type! type))
+        (when (and (or (contains? #{:f32 :f64 :string :keyword :map :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} type)
+                       (structured-type? type))
+                   (not (or (symbol? pattern)
+                            (and (= type :map) (map? pattern))
+                            (and (contains? #{:vector-i64 :vector-f64} type)
+                                 (vector? pattern))
+                            (and (heterogeneous-vector-type? type)
+                                 (vector? pattern))
+                            (and (or (canonical-typed-map-type? type)
+                                     (record-type? type)
+                                     (schema-ref-type? type))
+                                 (map? pattern)))))
+          (reject! "typed values require plain-symbol bindings" pattern))
+        (recur (subvec items (if annotated? 2 1))
+               (conj parts (cond-> {:pattern pattern
+                                    :type (if (callable-type? type) :i64 type)}
+                             (callable-type? type) (assoc :callable-contract type))))))))
 
 (defn- binding-symbols [pattern]
   (->> (tree-seq coll? seq pattern)
