@@ -78,6 +78,31 @@
      ;; exactly once. Found by compiling one.
      vector-assoc! vector-f64-assoc!})
 
+(def producing
+  "Heads that hand back a vector this binding OWNS.
+
+  Provenance, not use count. `linear?` asks how many times a name is used and
+  where; it does not ask where the value came from, and for an in-place store
+  that is the wrong question on its own. A handle fetched out of an aggregate
+  is used once, in vector-operation position, and is still ALIVE -- the
+  aggregate holds it.
+
+  Measured 2026-09-01 on amu 0bf63c94: a record holding two vector-i64 fields,
+  one fetched with `record-get`, written with `vector-assoc!`, and the SAME
+  field read from the record again, was admitted and returned 7 rather than 0.
+  The store was visible to a reader that never asked for it, which is the one
+  thing the bang promises cannot happen.
+
+  So the set is closed and small: a let-bound handle may be written in place
+  only when its initialiser is one of these. Anything else -- `record-get`,
+  `hetero-vector-at`, `map-get`, a call to another function -- is refused,
+  because this analysis cannot see who else holds it. A parameter is the other
+  legitimate source and is handled by `linear-parameter?`."
+  '#{vector-alloc vector-new vector-assoc vector-assoc! vector-conj
+     vector-drop
+     vector-f64-alloc vector-f64-new vector-f64-assoc vector-f64-assoc!
+     vector-f64-conj vector-f64-drop})
+
 (def reading
   "Operations that observe without consuming."
   '#{vector-count vector-f64-count vector-at vector-f64-at
@@ -253,6 +278,27 @@
     (set? form) (every? #(position-ok? % target) form)
     :else true))
 
+(defn- owned-binding?
+  "True unless `target` is bound from something that may still hold it.
+
+  Walks every `let` in `form`; if one binds `target`, its initialiser must
+  have a `producing` head. A target that no `let` binds is a parameter or a
+  free name, which this predicate does not judge -- `linear-parameter?` and
+  the caller do.
+
+  Fail closed: an initialiser shape that is not recognised is refused, so a
+  head added to the language later is unsafe by default rather than silently
+  admitted."
+  [form target]
+  (let [initialisers (atom [])]
+    ((fn walk [f]
+       (when (let-form? f)
+         (doseq [[n init] (partition 2 (second f))]
+           (when (= n target) (swap! initialisers conj init))))
+       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
+     form)
+    (every? #(and (seq? %) (contains? producing (first %))) @initialisers)))
+
 (defn linear?
   "True when `target` may be updated in place inside `form`.
 
@@ -267,7 +313,8 @@
      because it is the property that matters"
   [form target]
   (and (<= (sym-uses form target) 1)
-       (position-ok? form target)))
+       (position-ok? form target)
+       (owned-binding? form target)))
 
 (defn- binding-pairs [bindings] (partition 2 bindings))
 

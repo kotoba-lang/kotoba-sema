@@ -246,3 +246,46 @@
           (vector-at v 0)
           (go (vector-assoc! v 0 i) (+ i 1) n))
        'v)))
+
+;; Provenance. `linear?` asked how many times a name is used and where, and
+;; not where its value came from -- so a handle fetched out of an aggregate
+;; counted as one use, in vector-operation position, and was admitted while
+;; the aggregate still held it. Measured 2026-09-01 on amu 0bf63c94: a record
+;; with two vector-i64 fields, one fetched with record-get, written with
+;; vector-assoc!, and the SAME field read from the record again, compiled and
+;; returned 7 rather than 0. The store was visible to a reader that never
+;; asked for it, which is the one thing the bang promises cannot happen.
+
+(deftest a-handle-fetched-out-of-a-record-is-not-dead
+  (is (not (aff/linear? '(do (let [b (record T (vector-alloc 4))
+                                   v (record-get T b :bids)
+                                   w (vector-assoc! v 0 7)]
+                               (vector-at w 0)))
+                        'v))))
+
+(deftest a-handle-returned-by-an-unknown-call-is-not-dead
+  ;; Fail closed: this analysis cannot see who else the callee handed it to.
+  (is (not (aff/linear? '(do (let [v (make-slab 4)
+                                   a (vector-assoc! v 0 7)]
+                               (vector-at a 0)))
+                        'v))))
+
+(deftest a-handle-the-binding-owns-is-still-linear
+  ;; The producing heads must keep working, or this fix would close the gate
+  ;; on every program it exists to admit -- which is how it was broken before.
+  (testing "vector-alloc"
+    (is (aff/linear? '(do (let [v (vector-alloc 4)
+                                a (vector-assoc! v 0 7)]
+                            (vector-at a 0)))
+                     'v)))
+  (testing "vector-new"
+    (is (aff/linear? '(do (let [v (vector-new 1 2 3)
+                                a (vector-assoc! v 0 9)]
+                            (vector-at a 0)))
+                     'v)))
+  (testing "a consuming update, which owns what it returns"
+    (is (aff/linear? '(do (let [v (vector-alloc 4)
+                                a (vector-assoc! v 0 1)
+                                b (vector-assoc! a 1 2)]
+                            (vector-at b 0)))
+                     'a))))
