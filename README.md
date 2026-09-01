@@ -21,6 +21,13 @@ The language repository remains authoritative for the vendored guest grammar
 and capability catalog. This repository owns loading and enforcing those
 contracts during semantic analysis.
 
+`(eval request)` is deliberately not host evaluation. The frontend elaborates
+the one-argument form to the catalogued `:code/eval` typed ability (wire ID 30),
+inferring the request as `:document` and the result from its typed context.
+`load-string`, `read-string`, reader evaluation, and ambient name resolution
+remain forbidden. The host must resolve a checked definition CID and admit its
+complete effect row before execution.
+
 ## Development
 
 ```sh
