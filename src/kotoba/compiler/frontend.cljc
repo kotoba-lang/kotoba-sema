@@ -4616,7 +4616,13 @@
       (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
 
-      (= op 'vector-assoc)
+      ;; `vector-assoc!` types identically, because it IS the same
+      ;; operation: the bang only tells a backend it may lower the update
+      ;; to a store, and `check-affine-writes!` is what earns that. A
+      ;; different type here would make the bang a different operation,
+      ;; which is exactly what the KIR interpreter refuses to let it
+      ;; become.
+      (contains? '#{vector-assoc vector-assoc!} op)
       (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1))
           (require-expression-type! (nth types 2) :i64 (nth args 2)) :vector-i64)
