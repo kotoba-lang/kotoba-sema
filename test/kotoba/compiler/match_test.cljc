@@ -128,6 +128,17 @@
     (is (= 1 (on-map "{:a 1}" arms)))
     (is (= -1 (on-map "{:c 1}" arms)))))
 
+(deftest a-single-test-arm-does-not-wrap-its-test
+  (testing "`(if test true false)` is the wrap this repo calls a stale self-restriction"
+    ;; Every test here is already :bool-typed, so folding a one-test arm through
+    ;; the conjunction builder would add a node and say nothing. Most arms have
+    ;; exactly one test: a literal pattern, or a one-key map pattern.
+    (doseq [source ["(defn main [] :i64 (match {:value 9} {:value n} n :else 0))"
+                    "(defn main [] :i64 (match 5 0 100 5 200 :else 300))"
+                    "(defn main [] :i64 (match {:a 1 :b 2} {:a x :b y} (+ x y) :else 0))"]]
+      (let [body (:body (first (:functions (sema/analyze source))))]
+        (is (not-any? true? (tree-seq coll? seq body)) source)))))
+
 (deftest a-map-pattern-tests-presence-not-projection
   (testing "an absent key falls through even though `get` would answer 0"
     (is (= -1 (on-map "{:other 9}" "{:value n} n :else -1"))))
