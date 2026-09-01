@@ -6,23 +6,63 @@
 
 ;; ── the shape a struct of arrays writes ─────────────────────────────────────
 
-(deftest a-shadowing-update-chain-is-linear
-  ;; The order book's whole access pattern: allocate once, write by index,
-  ;; each write shadowing the handle before it.
-  (is (aff/linear-let-chain?
-       '(let [v (vector-i64-new 1024)
-              v (vector-assoc v 0 7)
-              v (vector-assoc v 1 9)]
-          (vector-at v 0))
+(deftest a-threaded-let-is-linear
+  ;; Distinct names, because Kotoba refuses a rebound one: `amu check` on a
+  ;; `let` that binds `v` twice answers `duplicate let binding` (measured
+  ;; 2026-09-01, amu e96dd8c6). The first version of this analysis looked for
+  ;; exactly that shape and would have been a gate nothing could pass.
+  (is (aff/linear-let-thread?
+       '(let [a (vector-new 1 2 3)
+              b (vector-assoc a 0 9)]
+          (vector-at b 0))
+       '[a b])))
+
+(deftest a-longer-thread-is-linear
+  (is (aff/linear-let-thread?
+       '(let [a (vector-new 0 0 0)
+              b (vector-assoc a 0 7)
+              c (vector-assoc b 1 9)]
+          (vector-count c))
+       '[a b c])))
+
+(deftest a-name-read-after-being-consumed-is-not-linear
+  ;; `a` is consumed by `b` and then read again. An in-place store would be
+  ;; visible through a handle somebody still holds.
+  (is (not (aff/linear-let-thread?
+            '(let [a (vector-new 1 2 3)
+                   b (vector-assoc a 0 9)]
+               (+ (vector-at b 0) (vector-at a 0)))
+            '[a b]))))
+
+;; ── the shape Kotoba actually uses ──────────────────────────────────────────
+
+(deftest a-parameter-threaded-through-tail-recursion-is-linear
+  ;; `let` cannot rebind, so a loop threads the handle through a parameter.
+  ;; `v` appears in both arms of the `if` and only one arm runs, so this is
+  ;; ONE use per path -- which the analysis only sees if alternatives are
+  ;; counted as alternatives rather than summed.
+  (is (aff/linear-parameter?
+       '(if (>= i n)
+          (vector-at v 0)
+          (go (vector-assoc v 0 i) (+ i 1) n))
        'v)))
 
-(deftest reading-between-writes-is-still-linear
-  (is (aff/linear-let-chain?
-       '(let [v (vector-i64-new 8)
-              v (vector-assoc v 0 (+ 1 2))
-              v (vector-assoc v 1 3)]
-          (vector-count v))
-       'v)))
+(deftest two-uses-in-one-arm-is-still-not-linear
+  ;; The maximum over arms must not hide a sum inside one of them.
+  (is (not (aff/linear-parameter?
+            '(if (>= i n)
+               (+ (vector-at v 0) (vector-at v 1))
+               (go (vector-assoc v 0 i) (+ i 1) n))
+            'v))))
+
+(deftest a-use-in-the-test-counts-on-every-path
+  ;; The condition runs whichever arm is taken, so a use there plus a use in
+  ;; an arm is two uses on one path.
+  (is (not (aff/linear-parameter?
+            '(if (> (vector-at v 0) n)
+               0
+               (go (vector-assoc v 0 i) (+ i 1) n))
+            'v))))
 
 ;; ── the refusals, one per way a live value could be corrupted ───────────────
 
@@ -53,31 +93,45 @@
   (is (contains? aff/consuming 'vector-drop))
   (is (not (contains? aff/reading 'vector-drop))))
 
-(deftest a-chain-with-no-rebinding-is-not-a-chain
-  ;; Nothing to lower in place: there is no consumed handle.
-  (is (not (aff/linear-let-chain?
-            '(let [v (vector-i64-new 4)] (vector-at v 0)) 'v))))
+(deftest a-single-binding-is-not-a-thread
+  ;; Nothing to lower in place: no handle is consumed.
+  (is (not (aff/linear-let-thread?
+            '(let [a (vector-new 1 2)] (vector-at a 0)) '[a]))))
 
-(deftest an-escaping-body-refuses-the-whole-chain
-  (is (not (aff/linear-let-chain?
-            '(let [v (vector-i64-new 4)
-                   v (vector-assoc v 0 1)]
-               (some-function v))
-            'v))))
+(deftest an-escaping-body-refuses-the-whole-thread
+  (is (not (aff/linear-let-thread?
+            '(let [a (vector-new 1 2)
+                   b (vector-assoc a 0 1)]
+               (some-function b))
+            '[a b]))))
 
 (deftest a-name-used-twice-in-one-initialiser-refuses
-  (is (not (aff/linear-let-chain?
-            '(let [v (vector-i64-new 4)
-                   v (vector-assoc v (vector-at v 0) 1)]
-               (vector-count v))
-            'v))))
+  (is (not (aff/linear-let-thread?
+            '(let [a (vector-new 1 2)
+                   b (vector-assoc a (vector-at a 0) 1)]
+               (vector-count b))
+            '[a b]))))
 
 ;; ── the analysis says nothing about unrelated names ─────────────────────────
 
-(deftest another-binding-does-not-make-this-one-non-linear
-  (is (aff/linear-let-chain?
-       '(let [w (vector-i64-new 2)
-              v (vector-i64-new 4)
-              v (vector-assoc v 0 1)]
-          (vector-at v 0))
-       'v)))
+(deftest an-unrelated-binding-does-not-make-this-one-non-linear
+  (is (aff/linear-let-thread?
+       '(let [w (vector-new 9)
+              a (vector-new 1 2)
+              b (vector-assoc a 0 1)]
+          (vector-at b 0))
+       '[a b])))
+
+(deftest the-bang-form-consumes-like-the-one-it-replaces
+  ;; It was missing from `consuming`, which made every linear program fail the
+  ;; gate that exists to admit it -- and fail with a message saying the handle
+  ;; was used more than once when it was used exactly once.
+  (is (contains? aff/consuming 'vector-assoc!))
+  (is (aff/linear-parameter?
+       '(if (>= i n)
+          (vector-at v 0)
+          (go (vector-assoc! v 0 i) (+ i 1) n))
+       'v))
+  (is (not (aff/linear-parameter?
+            '(+ (vector-at v 1) (vector-at (vector-assoc! v 0 i) 0))
+            'v))))

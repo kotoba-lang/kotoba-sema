@@ -47,12 +47,11 @@
 
   ## Why it lives in the frontend
 
-  It first landed in `kotoba-native`, next door to
-  `kotoba.native.vector-region`, which is a similar-looking escape analysis.
-  That was the wrong home: this reads SOURCE forms, `kotoba-sema` is what
-  holds source, and a backend repo is not on `kotoba-sema`'s dependency path
-  -- so the gate could never have been consulted from where the decision is
-  made. Moved rather than duplicated."
+  It first landed in `kotoba-native`, next to `kotoba.native.vector-region`,
+  which is a similar-looking escape analysis. Wrong home: this reads SOURCE,
+  `kotoba-sema` is what holds source, and a backend repo is not on this one's
+  dependency path -- so the gate could never have been consulted from where
+  the decision is made."
   (:require [clojure.set :as set]))
 
 (def consuming
@@ -63,15 +62,40 @@
   else. Admitting it as non-consuming would make the one operation that
   ALIASES the safe one."
   '#{vector-assoc vector-f64-assoc vector-conj vector-f64-conj
-     vector-drop vector-f64-drop})
+     vector-drop vector-f64-drop
+     ;; The bang forms consume too. Leaving them out made the gate refuse the
+     ;; only programs it exists to admit: `(vector-assoc! v 0 i)` was neither
+     ;; consuming nor reading, so `position-ok?` fell through to the bare `v`
+     ;; inside it and answered false. Every linear program was rejected, with
+     ;; a message saying the handle was used more than once when it was used
+     ;; exactly once. Found by compiling one.
+     vector-assoc! vector-f64-assoc!})
 
 (def reading
   "Operations that observe without consuming."
   '#{vector-count vector-f64-count vector-at vector-f64-at
      vector-get vector-f64-get nth})
 
+(def ^:private branching
+  "Heads whose arms are alternatives, not a sequence.
+
+  Only one arm runs, so uses in different arms are uses on DIFFERENT PATHS and
+  the count is the maximum rather than the sum. Getting this wrong is not a
+  small conservatism: the shape Kotoba programs actually use to thread a
+  vector is tail recursion, base case reading and step case consuming --
+
+      (defn go [v :vector-i64 i :i64 n :i64] :i64
+        (if (>= i n)
+          (vector-at v 0)
+          (go (vector-assoc v 0 i) (+ i 1) n)))
+
+  -- and summing the arms calls that two uses, which refuses the one shape
+  that matters."
+  '#{if cond case when when-not if-let when-let})
+
 (defn- sym-uses
-  "How many times `target` appears as a bare symbol in `form`.
+  "How many times `target` can be used on the WORST SINGLE PATH through
+  `form`.
 
   Counted rather than detected, because `at most once` is the question and
   `appears at all` is a different one — a binding used twice on one path
@@ -79,6 +103,12 @@
   [form target]
   (cond
     (= form target) 1
+    (and (seq? form) (contains? branching (first form)) (< 2 (count form)))
+    ;; The test runs on every path; the arms are alternatives. This does not
+    ;; separate `cond`/`case` tests from their arms, which over-counts a test
+    ;; and never under-counts an arm -- the safe direction.
+    (+ (sym-uses (second form) target)
+       (reduce max 0 (map #(sym-uses % target) (drop 2 form))))
     (seq? form) (reduce + 0 (map #(sym-uses % target) form))
     (vector? form) (reduce + 0 (map #(sym-uses % target) form))
     (map? form) (reduce + 0 (map #(+ (sym-uses (key %) target)
@@ -137,37 +167,61 @@
 
 (defn- binding-pairs [bindings] (partition 2 bindings))
 
-(defn linear-let-chain?
-  "True when every rebinding of `name` in a `let` consumes the previous one.
+(defn linear-parameter?
+  "True when a function parameter is threaded linearly through its body.
 
-  The shape a struct of arrays writes:
+  The shape Kotoba actually uses, because `let` cannot rebind a name:
 
-      (let [v (vector-i64-new n)
-            v (vector-assoc v 0 x)
-            v (vector-assoc v 1 y)]
-        (vector-at v 0))
+      (defn go [v :vector-i64 i :i64 n :i64] :i64
+        (if (>= i n)
+          (vector-at v 0)
+          (go (vector-assoc v 0 i) (+ i 1) n)))
 
-  Each `v` shadows the last, so the previous handle is unreachable the moment
-  the new one exists — which is exactly the condition for the store to be
-  in place. A binding that is read between two updates is still linear; one
-  that is read AFTER its last update is too. What is not linear is a form that
-  mentions the name twice in one initialiser, or anywhere outside a vector
-  operation."
-  [form name]
+  One use per path -- read in the base case, consumed in the step -- which is
+  linear exactly when alternatives are counted as alternatives."
+  [body param]
+  (linear? body param))
+
+(defn linear-let-thread?
+  "True when a `let` threads a vector through DISTINCT names, each consuming
+  the one before.
+
+      (let [a (vector-new 1 2 3)
+            b (vector-assoc a 0 9)]
+        (vector-at b 0))
+
+  ## Distinct names, because the language refuses the other shape
+
+  This was `linear-let-chain?` and looked for one name rebound over and over
+  -- `v`, then `v`, then `v` -- which is how the same idea is written in
+  Clojure. **Kotoba refuses it**: `amu check` answers `duplicate let binding`
+  (measured 2026-09-01, amu e96dd8c6). So the first version described a
+  program that cannot be written, and would have been a gate nothing could
+  ever pass. Found by compiling one."
+  [form names]
   (and (seq? form) (= 'let (first form)) (vector? (second form))
-       (let [pairs (binding-pairs (second form))
+       (<= 2 (count names))
+       (let [pairs (vec (binding-pairs (second form)))
              body (drop 2 form)
-             inits (map second pairs)
-             ;; Bindings OF this name. Two or more means at least one is a
-             ;; consuming update of the one before it, which is the only shape
-             ;; with anything to lower in place -- a single binding is a
-             ;; construction nobody has written to yet.
-             binds (filter #(= name (first %)) pairs)]
-         (and (<= 2 (count binds))
-              ;; Every initialiser that mentions the name must consume it, and
-              ;; must do so linearly.
-              (every? (fn [init]
-                        (or (zero? (sym-uses init name))
-                            (linear? init name)))
-                      inits)
-              (every? #(linear? % name) body)))))
+             bound (set (map first pairs))]
+         (and (every? bound names)
+              ;; Every name in the thread is used at most once across all the
+              ;; initialisers, only in vector-operation position, and linearly
+              ;; in the body. A name read after the update that consumed it is
+              ;; exactly what makes an in-place store visible to somebody who
+              ;; did not ask for it.
+              (every? (fn [n]
+                        (and (<= (reduce + 0 (map #(sym-uses (second %) n) pairs)) 1)
+                             (every? #(position-ok? (second %) n) pairs)))
+                      names)
+              ;; Every name but the last is consumed by some later initialiser,
+              ;; and is then DEAD -- zero uses in the body. `linear?` is not
+              ;; enough here: one read of a consumed name is still one use, and
+              ;; it is precisely the read that would see the in-place store.
+              (every? (fn [n]
+                        (and (some (fn [pair] (consuming-call? (second pair) n)) pairs)
+                             (every? #(zero? (sym-uses % n)) body)))
+                      (butlast names))
+              ;; The last name is the live one and may be read, linearly.
+              (let [live (last names)]
+                (every? #(linear? % live) body))))))
