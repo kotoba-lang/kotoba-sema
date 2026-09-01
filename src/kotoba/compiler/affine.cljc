@@ -40,6 +40,13 @@
             v (vector-assoc v 1 y)]
         (vector-at v 0))
 
+  Also admitted, as ONE use rather than two: a read and a write fused into a
+  single compound expression at the SAME index --
+  `(vector-assoc! v k (+ (vector-at v k) delta))`, `v[k] += delta` and the
+  only expression Kotoba has for it (`fused-rmw?` below; superproject
+  ADR-2609010500 is the program that needed this admitted and could not be
+  written without it).
+
   A binding that is READ after being consumed, referenced twice on one path,
   returned, passed to a function, or captured is refused. Escape analysis for
   literals already exists next door in `kotoba.native.vector-region`; this is
@@ -98,6 +105,12 @@
   [form]
   (and (seq? form) (= 'let (first form)) (vector? (second form))))
 
+;; `sym-uses` and `fused-rmw?` are mutually recursive: a fused call is
+;; recognised by asking `sym-uses` how many times `target` appears inside its
+;; own update expression, and `sym-uses` has to recognise a fused call before
+;; it falls through to counting the read and the write separately.
+(declare fused-rmw?)
+
 (defn- sym-uses
   "How many times `target` can be used on the WORST SINGLE PATH through
   `form`.
@@ -108,6 +121,14 @@
   [form target]
   (cond
     (= form target) 1
+    ;; `(vector-assoc! v k (+ (vector-at v k) delta))` -- v[k] += delta, the
+    ;; shape a struct-of-arrays hot path needs and the only one Kotoba has no
+    ;; OTHER expression for (superproject ADR-2609010500: `slab/add!` in
+    ;; `torihiki.book` is exactly this, at two call sites). Read then write,
+    ;; nothing between them, is ONE use of the handle, not two -- see
+    ;; `fused-rmw?` for why counting it as one does not weaken what this file
+    ;; exists to refuse.
+    (fused-rmw? form target) 1
     ;; A `let` BINDER is not a use. Without this clause the binding vector
     ;; `[v (vector-alloc 4) ...]` counts `v` once on its own, so every
     ;; let-bound handle reached two uses and the gate refused every linear
@@ -144,6 +165,62 @@
        (contains? reading (first form))
        (= target (second form))))
 
+(defn- fused-read-in-value
+  "The reading call on `target` at `idx` that `value` fuses with a write, if
+  `value` mentions `target` nowhere else.
+
+  `(some reading-call-at-idx? (rest value))` alone would admit
+  `(+ (vector-at v k) (vector-count v))` -- two different reads of `v`, one of
+  them at an unrelated index -- because it only asks whether a qualifying
+  read is PRESENT, not whether it is the ONLY mention. The `sym-uses` count
+  closes that: it counts every occurrence of `target` anywhere in `value`,
+  nested or not, so requiring it to equal 1 means the one occurrence the
+  `some` below finds is the only one there is."
+  [value target idx]
+  (and (seq? value)
+       (= 1 (sym-uses value target))
+       (boolean
+        (some #(and (reading-call? % target) (= idx (nth % 2 ::none)))
+              (rest value)))))
+
+(defn- fused-rmw?
+  "True when `form` is `(op! v idx (f (read v idx) & rest))` -- `v` read and
+  written at the SAME index inside ONE compound expression, with no other
+  mention of `v` in the update.
+
+  This is the fused read-modify-write shape a struct-of-arrays hot path
+  needs and Kotoba has no other expression for: `vector-assoc!` and
+  `vector-at` are two separate calls, and counting them separately is two
+  uses of the handle even though the second call only ever sees the value
+  the first one is about to replace.
+
+  Safe for the reason a bare `vector-assoc!` is safe: `v` is read exactly
+  once -- the value about to be overwritten, and (by `fused-read-in-value`'s
+  count) nothing else -- and written exactly once, with no syntax between
+  the read and the write through which another reference could reach the
+  old value. The index is required to be the SAME source form (not merely
+  the same runtime value) read and written, which `linear?` can decide
+  without evaluating anything: Kotoba expressions are pure, so one source
+  form written twice is one value computed twice, not two different reads.
+  A mismatched index (`(vector-assoc! v k1 (+ (vector-at v k2) d))`) does not
+  match this predicate and falls through to being counted as two uses, which
+  is correct -- a fused write at one index proves nothing about what a read
+  at a DIFFERENT index might alias.
+
+  Requiring `idx` itself to have zero uses of `target` rules out the
+  degenerate `(vector-assoc! v v (+ (vector-at v v) d))`, where the index
+  argument is the handle: `fused-read-in-value` alone would not catch this,
+  because the extra occurrence lives in the outer form's index position, not
+  inside `value`."
+  [form target]
+  (and (seq? form)
+       (contains? consuming (first form))
+       (= target (second form))
+       (= 4 (count form))
+       (let [idx (nth form 2) value (nth form 3)]
+         (and (zero? (sym-uses idx target))
+              (fused-read-in-value value target idx)))))
+
 (defn- position-ok?
   "`target` may appear only as the FIRST argument of a vector operation.
 
@@ -153,6 +230,10 @@
   [form target]
   (cond
     (= form target) false
+    ;; A fused read-modify-write is one vector-operation-position use, not an
+    ;; escape into its own update expression -- see `fused-rmw?`, which has
+    ;; already checked that the update mentions `target` nowhere else.
+    (fused-rmw? form target) true
     ;; Same reason as `sym-uses`: a binder is not an occurrence. A bare `v`
     ;; standing in the binding vector would otherwise read as an escape, so
     ;; this refused let-bound handles for a second, independent reason.

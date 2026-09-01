@@ -526,3 +526,65 @@
                           #"expected option-i64"
                           (sema/analyze
                            "(defn p [v :i64] :bool (option-some? v))\n(defn main [] 0)")))))
+
+(deftest fused-read-modify-write-is-admitted-end-to-end
+  ;; `lvl-qty[k] += qty` (superproject ADR-2609010500; `torihiki.book`'s
+  ;; `slab/add!`, two call sites) has no expression in Kotoba except
+  ;; `(vector-assoc! v k (+ (vector-at v k) delta))` -- read then write, at
+  ;; the same index, in one compound expression. `kotoba.compiler.affine`
+  ;; counted that as two uses of `v` and `check-affine-writes!` (the frontend
+  ;; gate `defn-parts` calls on every function) refused it, unconditionally,
+  ;; because two calls means two uses regardless of what either call does.
+  ;;
+  ;; This is `sema/analyze` -- the same public entry point every other test
+  ;; in this namespace goes through -- not the isolated predicate, so it
+  ;; exercises the actual decision `defn-parts` makes, not a stand-in for it.
+  (testing "admitted: read and write fused at the same index, one call site"
+    (let [result (sema/analyze
+                  "(defn add! [v :vector-i64 k :i64 delta :i64] :vector-i64
+                     (vector-assoc! v k (+ (vector-at v k) delta)))
+                   (defn main [] 0)")
+          add! (function-named result 'add!)]
+      (is (hir/valid? result))
+      (is (= :vector-i64 (:result add!)))
+      (is (= '(vector-assoc! v k (+ (vector-at v k) delta)) (:body add!)))))
+  (testing "admitted: the same fusion threaded through tail recursion"
+    (let [result (sema/analyze
+                  "(defn go [v :vector-i64 i :i64 n :i64 delta :i64] :i64
+                     (if (>= i n)
+                       (vector-at v 0)
+                       (go (vector-assoc! v i (+ (vector-at v i) delta)) (+ i 1) n delta)))
+                   (defn main [] 0)")]
+      (is (hir/valid? result))))
+  (testing "still refused: a fused write at k1 does not license a read at k2"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires a linear handle"
+         (sema/analyze
+          "(defn add! [v :vector-i64 k1 :i64 k2 :i64 delta :i64] :vector-i64
+             (vector-assoc! v k1 (+ (vector-at v k2) delta)))
+           (defn main [] 0)"))))
+  (testing "still refused: the handle read again after the fused write consumed it"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires a linear handle"
+         (sema/analyze
+          "(defn add-then-read! [v :vector-i64 k :i64 delta :i64] :i64
+             (do (vector-assoc! v k (+ (vector-at v k) delta))
+                 (vector-at v 0)))
+           (defn main [] 0)"))))
+  (testing "still refused: two fused writes to the same handle on one path"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires a linear handle"
+         (sema/analyze
+          "(defn add-twice! [v :vector-i64 k1 :i64 k2 :i64 d1 :i64 d2 :i64] :i64
+             (do (vector-assoc! v k1 (+ (vector-at v k1) d1))
+                 (vector-assoc! v k2 (+ (vector-at v k2) d2))
+                 0))
+           (defn main [] 0)"))))
+  (testing "unaffected regression: the plain bang-form still admits, no fusion involved"
+    (let [result (sema/analyze
+                  "(defn go [v :vector-i64 i :i64 n :i64] :i64
+                     (if (>= i n)
+                       (vector-at v 0)
+                       (go (vector-assoc! v 0 i) (+ i 1) n)))
+                   (defn main [] 0)")]
+      (is (hir/valid? result)))))

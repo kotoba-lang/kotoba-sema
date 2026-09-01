@@ -173,3 +173,76 @@
                                    a (vector-assoc! v 0 1)]
                                (keeper v)))
                         'v))))
+
+;; ── fused read-modify-write: `v[k] += delta` has no other expression ───────
+;;
+;; `lvl-qty[k] += qty` (superproject ADR-2609010500; `torihiki.book/slab/add!`,
+;; two call sites) has no expression in Kotoba except
+;; `(vector-assoc! v k (+ (vector-at v k) delta))` -- two separate calls,
+;; which `sym-uses` counted as two uses and `position-ok?` counted as an
+;; escape (the value argument mentions `v`). Both refused it correctly under
+;; the OLD rule, because the old rule could not tell this shape apart from an
+;; unrelated double use. Measured on unmodified `kotoba-sema` (2026-09-01,
+;; before this file's `fused-rmw?`): `kotoba.sema/analyze` on
+;;
+;;     (defn add! [v :vector-i64 k :i64 delta :i64] :vector-i64
+;;       (vector-assoc! v k (+ (vector-at v k) delta)))
+;;
+;; throws `vector-assoc! requires a linear handle: v is used more than once
+;; on some path through add!, or reaches somewhere this cannot see` --
+;; `sema/analyze` is the same entry point `kotoba.sema-test` uses, so this is
+;; the live path, not a hypothetical one.
+
+(deftest a-fused-read-then-write-at-the-same-index-is-one-use
+  (is (aff/linear? '(vector-assoc! v k (+ (vector-at v k) delta)) 'v))
+  (testing "the f64 sibling, since the rule is data-driven off consuming/reading"
+    (is (aff/linear? '(vector-f64-assoc! v k (+ (vector-f64-at v k) delta)) 'v)))
+  (testing "threaded through the tail-recursive parameter shape Kotoba uses"
+    (is (aff/linear-parameter?
+         '(if (>= i n)
+            (vector-at v 0)
+            (go (vector-assoc! v i (+ (vector-at v i) delta)) (+ i 1) n delta))
+         'v))))
+
+(deftest a-fused-write-at-one-index-does-not-license-a-read-at-another
+  ;; A fused write at k1 proves nothing about a read at a DIFFERENT index --
+  ;; admitting this would mean an in-place store at k1 could be visible
+  ;; through whatever the mismatched read at k2 feeds.
+  (is (not (aff/linear? '(vector-assoc! v k1 (+ (vector-at v k2) delta)) 'v))))
+
+(deftest a-second-mention-of-the-handle-inside-the-update-is-not-fused
+  ;; `fused-read-in-value` requires the qualifying read to be the ONLY
+  ;; mention of `v` in the value expression. `(some reading-call-at-idx? ...)`
+  ;; alone would have missed this: it only asks whether a qualifying read is
+  ;; PRESENT, not whether anything else also mentions `v`.
+  (is (not (aff/linear? '(vector-assoc! v k (+ (vector-at v k) (vector-count v))) 'v))))
+
+(deftest a-handle-read-after-a-fused-write-consumed-it-is-still-refused
+  (is (not (aff/linear? '(do (vector-assoc! v k (+ (vector-at v k) delta))
+                             (vector-at v 0))
+                        'v))))
+
+(deftest two-fused-writes-on-one-path-are-still-two-uses
+  ;; Each call is individually fused -- one use each -- but a path that runs
+  ;; both is two uses of the same live handle, which is exactly what the
+  ;; gate exists to refuse: the second write is unaware the first happened.
+  (is (not (aff/linear? '(do (vector-assoc! v k1 (+ (vector-at v k1) d1))
+                             (vector-assoc! v k2 (+ (vector-at v k2) d2)))
+                        'v))))
+
+(deftest the-index-argument-cannot-itself-be-the-handle
+  ;; Degenerate self-index: `fused-read-in-value` alone would not catch this,
+  ;; because the extra occurrence of `v` is in the OUTER form's index
+  ;; position, not inside the value expression it inspects.
+  (is (not (aff/linear? '(vector-assoc! v v (+ (vector-at v v) delta)) 'v))))
+
+(deftest a-fused-call-is-not-mistaken-for-a-plain-assoc-when-the-value-is-not-a-call
+  ;; `(vector-assoc! v 0 i)` -- the existing bang-form shape, value is a bare
+  ;; symbol, not a compound read+op expression. `fused-rmw?` must fall
+  ;; through to the plain count (which already admits this) rather than
+  ;; misfire on it.
+  (is (aff/linear-parameter?
+       '(if (>= i n)
+          (vector-at v 0)
+          (go (vector-assoc! v 0 i) (+ i 1) n))
+       'v)))
