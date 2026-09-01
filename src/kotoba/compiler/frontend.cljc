@@ -2554,11 +2554,17 @@
 
 (defn- match-conjunction
   "Nested `if` rather than `and` so the emitted KIR carries no chain temps and
-  stays gensym-stable for the drift gate."
+  stays gensym-stable for the drift gate.
+
+  A single test is emitted as itself. `(if t true false)` is the wrap this repo
+  already calls a stale self-restriction elsewhere -- every test here is
+  `:bool`-typed, so the wrap adds a node and says nothing. Most arms have
+  exactly one test (a literal pattern, or a one-key map pattern)."
   [tests]
-  (if (empty? tests)
-    true
-    (list 'if (first tests) (match-conjunction (rest tests)) false)))
+  (cond
+    (empty? tests) true
+    (empty? (rest tests)) (first tests)
+    :else (list 'if (first tests) (match-conjunction (rest tests)) false)))
 
 (defn- match-arm
   "One arm, with FALLBACK (the whole rest of the match) appearing exactly once."
