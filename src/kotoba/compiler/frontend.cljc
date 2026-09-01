@@ -6,6 +6,7 @@
   ;; for the fuller explanation). `#?@` (splicing) rather than `#?` here
   ;; because each branch below is more than one require-spec.
   (:require [clojure.set :as set]
+            [kotoba.compiler.affine :as affine]
             [kotoba.artifact.core :as artifact]
             [kotoba.compiler.schema :as schema]
             [kotoba.hir :as hir]
@@ -313,7 +314,7 @@
      typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal})
 (def record-operations '#{record-new record-get record-assoc record-equal})
 (def typed-vector-operations
-  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-conj 2})
+  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-assoc! 3 vector-conj 2})
 (def ^:private contextual-string-argument-indexes
   "Builtin argument positions whose declared type selects the closed string
   closure dispatcher. This is elaboration context, not dynamic overloading."
@@ -7157,6 +7158,43 @@
                             form))))
           ceiling)))
 
+(defn- in-place-targets
+  "Names written through `vector-assoc!` anywhere in `form`."
+  [form]
+  (cond
+    (seq? form)
+    (into (if (and (= 'vector-assoc! (first form)) (symbol? (second form)))
+            #{(second form)}
+            #{})
+          (mapcat in-place-targets form))
+    (coll? form) (into #{} (mapcat in-place-targets form))
+    :else #{}))
+
+(defn- check-affine-writes!
+  "Refuse `vector-assoc!` on a handle that is not provably dead afterwards.
+
+  `vector-assoc!` exists so a backend may lower an update to a STORE rather
+  than a copy, which is the difference between a struct of arrays that can be
+  written and one that costs O(length) per element (superproject
+  ADR-2609010200). That lowering is only indistinguishable from copying when
+  the handle being written is dead afterwards -- so the bang is a claim, and
+  this is where the claim is checked.
+
+  Whole-body, because linearity is not a property of one call: a name written
+  here and read three forms later is exactly the case an in-place store would
+  corrupt, and the single form cannot see it.
+
+  Unadmitted rather than unchecked. A program that writes a live handle is
+  refused at compile time; `vector-assoc` without the bang is always
+  available and always allocates."
+  [name body]
+  (doseq [target (in-place-targets body)]
+    (when-not (affine/linear? (cons 'do body) target)
+      (reject! (str "vector-assoc! requires a linear handle: " target
+                    " is used more than once on some path through " name
+                    ", or reaches somewhere this cannot see")
+               body))))
+
 (defn- defn-parts
   "Parse Kotoba's bounded function declaration shape. A docstring is inert
   metadata and is deliberately discarded before lowering. An optional result
@@ -7189,6 +7227,7 @@
     (when (and docstring (> (count docstring) max-function-docstring-chars))
       (reject! "function docstring exceeds admission limit" docstring))
     (when-not (= ::absent result) (validate-value-type! result))
+    (check-affine-writes! name body)
     (cond-> {:name name :raw-params raw-params
              :result (if (or (= ::absent result) (callable-type? result)) :i64 result)
              :body body}
