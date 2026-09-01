@@ -16,7 +16,8 @@
             [kotoba.compiler.host-nesting-test]
             [kotoba.compiler.oracle-reach-test]
             [kotoba.compiler.parameter-annotation-test]
-            [kotoba.compiler.defdesugar-test]))
+            [kotoba.compiler.defdesugar-test]
+            [kotoba.compiler.parameter-inference-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -28,4 +29,5 @@
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.oracle-reach-test
              'kotoba.compiler.parameter-annotation-test
-             'kotoba.compiler.defdesugar-test)
+             'kotoba.compiler.defdesugar-test
+             'kotoba.compiler.parameter-inference-test)

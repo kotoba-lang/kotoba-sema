@@ -794,8 +794,10 @@
   Prefer an explicit specific code via the 3-arity. The 2-arity defaults to
   `:kotoba.error/subset-reject` so no reject site is code-less."
   ([message form]
-   (reject! message form :kotoba.error/subset-reject))
+   (reject! message form :kotoba.error/subset-reject nil))
   ([message form code]
+   (reject! message form code nil))
+  ([message form code data]
    (let [m (meta form)
          span (or (when (map? form) (:span form))
                   (get m :span)
@@ -807,7 +809,8 @@
      (throw (ex-info message
                      (cond-> {:phase :subset :form form :kotoba.error/code code}
                        span (assoc :span span)
-                       operation (assoc :operation operation)))))))
+                       operation (assoc :operation operation)
+                       (map? data) (merge data)))))))
 
 (def pure-product-disallowed-heads
   "Control / ambient heads rejected under `:language-profile :pure-product`
@@ -4514,9 +4517,15 @@
 (defn- require-expression-type! [actual expected form]
   (when-not (same-expression-type? actual expected)
     (let [type-text #(if (keyword? %) (name %) (pr-str %))]
+      ;; The types travel as DATA as well as prose. `infer-absent-parameter-types`
+      ;; reads them from here rather than parsing the message, so refining a
+      ;; parameter cannot drift from what the checker actually requires -- there
+      ;; is no second table of operand types to keep in step, because there is
+      ;; no second table.
       (reject! (str "expression type mismatch: expected " (type-text expected)
                     ", got " (type-text actual))
-               form))))
+               form :kotoba.error/subset-reject
+               {:kotoba.error/expected expected :kotoba.error/actual actual}))))
 
 (declare infer-expression-type)
 
@@ -6095,6 +6104,108 @@
         ;; until validation, after the binding had unwound.
         (cons op (mapv #(rewrite-record-projection % locals signatures schemas) args)))))))
 
+(defn- refinable-value-type? [type]
+  (and (some? type)
+       (not= type :i64)
+       (try (do (validate-value-type! type) true)
+            (catch #?(:clj Exception :cljs :default) _ false))))
+
+(defn- infer-absent-parameter-types
+  "Give every unannotated parameter the type its body actually requires.
+
+  An absent annotation meant `:i64`, so any function touching a string had to
+  annotate EVERY parameter that was not one -- and after per-parameter
+  annotation landed, still had to annotate the string ones. `(defn digit [line i]
+  (string-substring line i (+ i 1)))` was rejected with `expected string, got
+  i64`, naming a constraint the frontend already knew and would not apply.
+
+  The constraint is read from the checker's own refusal rather than from a
+  table of operand types. `require-expression-type!` carries the expected and
+  actual types in its ex-data and the rejected form is the bare parameter
+  symbol, so what a parameter must be is whatever the type checker says it must
+  be. A second table would be a second thing to keep in step; there is none.
+
+  Conservative by construction, in three ways, so that no program admitted
+  before this means anything different after it:
+
+    - only parameters marked `:param-types-inferred` are touched, never a
+      written annotation;
+    - a refinement is applied only when the parameter is still provisional
+      `:i64` and the checker asked for something else, so a parameter used as
+      an i64 stays one;
+    - a parameter whose uses disagree is put back to `:i64` and never refined
+      again, which is exactly its behaviour before this pass existed -- the
+      program still fails, and it fails at the same place.
+
+  Iterated to a fixed point because one function's refined parameter changes
+  what its callers' arguments must be. The budget bounds it at parameters plus
+  functions; hitting it leaves the types as they are and the ordinary checker
+  reports."
+  [functions]
+  (let [signature-table
+        (fn [fs]
+          (into {} (map (fn [{:keys [name params param-types result]}]
+                          [name {:params params :param-types param-types :result result}]))
+                fs))
+        total-params (reduce + 0 (map #(count (:params %)) functions))]
+    (loop [fs functions
+           conflicted #{}
+           budget (+ 1 (count functions) total-params)]
+      (if (or (zero? budget) (not-any? :param-types-inferred fs))
+        fs
+        (let [table (signature-table fs)
+              refinement
+              (some (fn [{:keys [name params param-types body param-types-inferred]}]
+                      (when (seq param-types-inferred)
+                        (try
+                          (do (infer-expression-type body (zipmap params param-types) table)
+                              nil)
+                          (catch #?(:clj Exception :cljs :default) error
+                            (let [{:keys [form]
+                                   expected :kotoba.error/expected
+                                   actual :kotoba.error/actual} (ex-data error)
+                                  index (when (simple-symbol? form)
+                                          (first (keep-indexed
+                                                  (fn [index parameter]
+                                                    (when (= parameter form) index))
+                                                  params)))]
+                              (when (and index
+                                         (contains? param-types-inferred index)
+                                         (not (contains? conflicted [name index]))
+                                         (= :i64 (nth param-types index))
+                                         (= :i64 actual)
+                                         (refinable-value-type? expected))
+                                {:function name :index index :type expected}))))))
+                    fs)]
+          (if-not refinement
+            fs
+            (let [{:keys [function index type]} refinement
+                  applied (mapv (fn [f]
+                                  (if (= function (:name f))
+                                    (assoc f :param-types
+                                           (assoc (:param-types f) index type))
+                                    f))
+                                fs)
+                  ;; Did refining it move the disagreement onto the same
+                  ;; parameter? Then its uses do not agree, and the answer is
+                  ;; the one it had before: provisional i64, reported by the
+                  ;; ordinary checker at the site the source already named.
+                  regressed?
+                  (let [refined (first (filter #(= function (:name %)) applied))
+                        t (signature-table applied)]
+                    (try (do (infer-expression-type (:body refined)
+                                                    (zipmap (:params refined) (:param-types refined))
+                                                    t)
+                             false)
+                         (catch #?(:clj Exception :cljs :default) error
+                           (let [{:keys [form] actual :kotoba.error/actual} (ex-data error)]
+                             (and (simple-symbol? form)
+                                  (= form (nth (:params refined) index))
+                                  (= type actual))))))]
+              (if regressed?
+                (recur fs (conj conflicted [function index]) (dec budget))
+                (recur applied conflicted (dec budget))))))))))
+
 (defn- infer-absent-results
   "Give every unannotated `defn` the result type its body actually has.
 
@@ -7209,6 +7320,12 @@
         (recur (subvec items (if annotated? 2 1))
                (conj parts (cond-> {:pattern pattern
                                     :type (if (callable-type? type) :i64 type)}
+                             ;; `:i64` from an absent annotation is PROVISIONAL,
+                             ;; the same way an absent result type is. Written
+                             ;; `:i64` and inferred `:i64` are indistinguishable
+                             ;; downstream without this mark, and only the
+                             ;; second one may be refined.
+                             (not annotated?) (assoc :inferred? true)
                              (callable-type? type) (assoc :callable-contract type))))))))
 
 (defn- binding-symbols [pattern]
@@ -8394,6 +8511,10 @@
                                name+wraps (mapv #(param-name+wrap (:pattern %)) param-parts)
                                params (mapv first name+wraps)
                                param-types (mapv :type param-parts)
+                               param-types-inferred
+                               (into #{} (keep-indexed (fn [index part]
+                                                         (when (:inferred? part) index)))
+                                     param-parts)
                                callable-param-contracts
                                (into {}
                                      (keep-indexed (fn [index part]
@@ -8453,6 +8574,8 @@
                                              :result result :effects #{}
                                              :result-inferred? result-inferred?
                                              :body desugared}
+                                      (seq param-types-inferred)
+                                      (assoc :param-types-inferred param-types-inferred)
                                       (seq callable-param-contracts)
                                       (assoc :callable-param-contracts callable-param-contracts)
                                       callable-result-contract
@@ -8552,6 +8675,9 @@
         ;; captures a :string/:f64/record variable type-checks and lowers with
         ;; the correct local types instead of a spurious "expected i64" error.
         parsed (resolve-loop-helper-param-types parsed)
+        ;; Parameters before results: a result is inferred from a body whose
+        ;; locals include the parameters, so refining one changes the other.
+        parsed (infer-absent-parameter-types parsed)
         ;; ADR 0189: resolve `(record-get value :field)` to the canonical
         ;; 3-arity form. This must precede every later pass that runs type
         ;; inference — elaborate-named-abilities does, and its record-get case
@@ -8716,6 +8842,10 @@
                                            (get function-effects (:name function)))
                               (:effects-ceiling function)
                               (assoc :effects-ceiling (:effects-ceiling function))
+                              ;; A frontend-internal mark: which parameters were
+                              ;; written without a type. HIR has a closed key
+                              ;; set and this is not one of its keys.
+                              true (dissoc :param-types-inferred)
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
           main-result (some->> parsed (some #(when (= 'main (:name %)) (:result %))))
