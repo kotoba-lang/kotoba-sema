@@ -93,6 +93,11 @@
   that matters."
   '#{if cond case when when-not if-let when-let})
 
+(defn- let-form?
+  "A `let` with its binding vector present."
+  [form]
+  (and (seq? form) (= 'let (first form)) (vector? (second form))))
+
 (defn- sym-uses
   "How many times `target` can be used on the WORST SINGLE PATH through
   `form`.
@@ -103,6 +108,17 @@
   [form target]
   (cond
     (= form target) 1
+    ;; A `let` BINDER is not a use. Without this clause the binding vector
+    ;; `[v (vector-alloc 4) ...]` counts `v` once on its own, so every
+    ;; let-bound handle reached two uses and the gate refused every linear
+    ;; program that could be written -- measured 2026-09-01 by compiling one
+    ;; that should have passed. Initialisers all run; the body is one path.
+    ;; An inner `let` that shadows `target` still counts, which over-counts
+    ;; a name that is no longer reachable -- the safe direction.
+    (let-form? form)
+    (+ (reduce + 0 (map #(sym-uses (second %) target)
+                        (partition 2 (second form))))
+       (reduce + 0 (map #(sym-uses % target) (drop 2 form))))
     (and (seq? form) (contains? branching (first form)) (< 2 (count form)))
     ;; The test runs on every path; the arms are alternatives. This does not
     ;; separate `cond`/`case` tests from their arms, which over-counts a test
@@ -137,6 +153,13 @@
   [form target]
   (cond
     (= form target) false
+    ;; Same reason as `sym-uses`: a binder is not an occurrence. A bare `v`
+    ;; standing in the binding vector would otherwise read as an escape, so
+    ;; this refused let-bound handles for a second, independent reason.
+    (let-form? form)
+    (and (every? #(position-ok? (second %) target)
+                 (partition 2 (second form)))
+         (every? #(position-ok? % target) (drop 2 form)))
     (seq? form)
     (if (or (consuming-call? form target) (reading-call? form target))
       ;; The first argument is the vector; every other argument must not
