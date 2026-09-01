@@ -317,7 +317,7 @@
      typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal})
 (def record-operations '#{record-new record-get record-assoc record-equal})
 (def typed-vector-operations
-  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-assoc! 3 vector-conj 2})
+  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
 (def ^:private contextual-string-argument-indexes
   "Builtin argument positions whose declared type selects the closed string
   closure dispatcher. This is elaboration context, not dynamic overloading."
@@ -4603,6 +4603,17 @@
       (do (require-expression-type! (first types) :result-i64 (first args))
           (require-expression-type! (second types) :i64 (second args))
           :i64)
+
+      ;; `(vector-alloc n)` -- n zeros.
+      ;;
+      ;; `vector-new` is variadic, so a million-slot struct of arrays
+      ;; would need a million arguments, and the literal limit refuses
+      ;; that long before the item limit does. Correct -- nobody writes a
+      ;; book as a literal -- and it left no way to allocate one at all.
+      ;; This is the shape `torihiki.slab/alloc` has.
+      (= op 'vector-alloc)
+      (do (require-expression-type! (nth types 0) :i64 (nth args 0))
+          :vector-i64)
 
       (= op 'vector-new)
       (do (doseq [[arg type] (map vector args types)]
