@@ -212,11 +212,32 @@
            (get sema/source-operation-registry 'dataspace/transact)))
     (is (= (set (keys sema/capability-registry))
            (set (vals sema/source-operation-registry))))
-    ;; 25/26 are stream/accept and stream/send (root ADR-2608150900). The
-    ;; assertion is contiguity, not a fixed ceiling -- it moves when the
+    ;; The assertion is contiguity, not a fixed ceiling -- it moves when the
     ;; registry legitimately grows and fails when a gap is left.
-    (is (= (range 1 27) (sort (vals sema/capability-registry)))
+    (is (= (range 1 31) (sort (vals sema/capability-registry)))
         "wire ids stay contiguous from 1; a gap means named source will reject")))
+
+(deftest typed-eval-is-catalogued-and-contextually-typed
+  (is (= 30 (get sema/capability-registry :code/eval)))
+  (is (= :code/eval (get sema/source-operation-registry 'code/eval)))
+  (let [hir (sema/analyze
+             "(ns app (:capabilities #{:code/eval}))
+              (defn run [request :document] :i64 (eval request))
+              (defn main [] 0)")
+        run (->> (:functions hir) (filter #(= 'run (:name %))) first)]
+    (is (= #{[:cap/call 30]} (:effects hir)))
+    (is (= '(typed-cap-call 30 :document :i64 request) (:body run))))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"typed eval requires exactly one"
+       (sema/analyze
+        "(ns app (:capabilities #{:code/eval}))
+         (defn run [] :i64 (eval))
+         (defn main [] 0)")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"forbidden"
+       (sema/analyze "(defn main [] (load-string \"(+ 1 2)\"))"))))
 
 (deftest stream-ingress-is-catalog-wire-ids-25-and-26
   "root ADR-2608150900: a bidirectional frame stream, where http-ingress is one
@@ -367,7 +388,8 @@
     (is (hir/valid? result))))
 
 (deftest public-sema-facade-owns-consumer-entry-points
-  (is (contains? sema/forbidden-heads 'eval))
+  (is (not (contains? sema/forbidden-heads 'eval)))
+  (is (contains? sema/forbidden-heads 'load-string))
   (is (every? pos? [sema/max-functions sema/max-expression-nodes
                     sema/max-lowered-nodes sema/max-bindings
                     sema/max-list-items sema/max-namespace-capabilities

@@ -34,7 +34,8 @@
      :cljs #{}))
 
 (def forbidden-heads
-  (into '#{eval load load-file require use import ns-resolve resolve alter-var-root
+  (into '#{load load-file load-string read-string compile
+           require use import ns-resolve resolve alter-var-root
            future pmap agent send send-off new . .. set! defmacro throw try catch
            locking dosync atom ref volatile!}
         (load-catalog-forbidden)))
@@ -57,7 +58,9 @@
     ;; Stream ingress (root ADR-2608150900): frames in and frames out are
     ;; separate authorities -- hearing a stream is not permission to speak
     ;; into it.
-    :stream/accept 25 :stream/send 26})
+    :stream/accept 25 :stream/send 26
+    :net/datagram 27 :link/frame 28 :can/frame 29
+    :code/eval 30})
 
 (defn- load-capability-catalog []
   #?(:clj
@@ -2936,6 +2939,16 @@
                                         (desugar-expr trailing)
                                         (reverse fixed))]
               (list '__kotoba_closure_apply (desugar-expr closure) argument-list))))
+        eval
+        (if (contains? *function-arities* 'eval)
+          (apply list 'eval (map desugar-expr args))
+          (do
+            (when-not (= 1 (count args))
+              (reject! "typed eval requires exactly one :document request" form))
+            ;; Preserve the familiar Lisp spelling at the source surface while
+            ;; routing through the catalogued, host-bound code/eval ability.
+            ;; Neither source text nor a host namespace enters this path.
+            (elaborate-named-operation form 'code/eval :code/eval args)))
         lazy-cons
         (do
           (when-not (= 2 (count args))
