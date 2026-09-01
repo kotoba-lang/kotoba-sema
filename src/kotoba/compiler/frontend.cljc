@@ -2435,6 +2435,192 @@
     (coll? form) (some uses-map-without? form)
     :else false))
 
+;; ---------------------------------------------------------------------------
+;; `match` -- the authority's `:bounded-control-and-sugar` sugar, whose safety
+;; row reads `:single-evaluation-pure-desugar`.
+;;
+;; The scrutinee is bound ONCE, before any arm is tried, and every arm reads
+;; that binding. That is the safety claim, not an optimization: a scrutinee is
+;; an arbitrary expression, and a `match` that re-evaluated it per arm would
+;; call a capability once per arm.
+;;
+;; What is admitted is deliberately small and is listed in `match-pattern-plan`
+;; below. Everything outside it is refused by name rather than half-lowered:
+;; a `match` that silently ignores a pattern it does not understand is worse
+;; than one that does not exist.
+;;
+;; Refutability comes from two places and only two: an equality test against a
+;; literal, and a key-presence test on a map. Presence is a real test -- `get`
+;; on this profile's bounded map answers the default for an absent key, so a
+;; map pattern lowered as projection alone would be irrefutable and every
+;; `match` on a map would take its first arm.
+
+(def ^:private match-has-marker '__kotoba_match_has)
+
+(def max-match-arms 32)
+(def max-match-pattern-keys 8)
+
+(defn- match-literal-pattern? [value]
+  (or (kotoba-integer? value) (keyword? value) (boolean? value) (string? value)))
+
+(defn- match-pattern-plan
+  "Compile ONE pattern against SUBJECT (a symbol already bound to the value
+  being tested) into `{:temps [[sym expr] ...] :tests [...] :binds [[sym expr] ...]}`.
+
+  Admitted patterns, and nothing else:
+
+    `_`                     wildcard; matches anything, binds nothing
+    unqualified symbol      matches anything, binds it (irrefutable)
+    bounded literal         integer, keyword, boolean or string; equality test
+    `{:key sub-pattern ...}` every listed key must be PRESENT, and each
+                            sub-pattern must match the value at that key. A
+                            sub-pattern is `_`, an unqualified symbol, or a
+                            bounded literal -- not another map.
+
+  `:temps` are `__kotoba_`-prefixed, so wrapping the REST OF THE MATCH in them
+  cannot capture anything a program is able to write (`reject-reserved-source-
+  symbols!` refuses that prefix in source). `:binds` are the user's names and
+  are emitted only inside the arm that matched, so a later arm never sees them.
+
+  Every temp is a total, pure projection (`get` on an absent key answers the
+  default rather than trapping), which is what makes it sound to bind them all
+  before testing any of them. That keeps the lowering LINEAR in the number of
+  tests: the fallback appears once per arm rather than once per test."
+  [pattern subject form nested?]
+  (cond
+    (= '_ pattern)
+    {:temps [] :tests [] :binds []}
+
+    (symbol? pattern)
+    (do
+      (when (namespace pattern)
+        (reject! "match binding pattern must be an unqualified symbol" form))
+      {:temps [] :tests [] :binds [[pattern subject]]})
+
+    (match-literal-pattern? pattern)
+    ;; `=` is refused on `:string` by the safe value profile, so a string
+    ;; pattern tests through `string=?`. Without this a string pattern would
+    ;; be reported as `equality type is outside the safe value profile`, which
+    ;; names neither `match` nor the pattern that caused it.
+    {:temps []
+     :tests [(if (string? pattern)
+               (list 'string=? subject (desugar-expr pattern))
+               (list '= subject (desugar-expr pattern)))]
+     :binds []}
+
+    (map? pattern)
+    (do
+      ;; A map inside a map is refused rather than admitted-and-unreachable:
+      ;; this profile's bounded map literal checks its values as i64, so no
+      ;; source can currently build a map whose value is a map, and a pattern
+      ;; that can never match is a claim nothing can test.
+      (when nested?
+        (reject! "match map pattern values admit `_`, an unqualified symbol, or a bounded literal"
+                 form))
+      (when (empty? pattern)
+        (reject! "match map pattern requires at least one key" form))
+      (when (> (count pattern) max-match-pattern-keys)
+        (reject! "match map pattern key count exceeds admission limit" form))
+      (when-not (every? keyword? (keys pattern))
+        (reject! "match map pattern keys must be keywords" form))
+      ;; Sorted by key text so the same source always yields the same KIR --
+      ;; a literal map's own iteration order is not part of the source.
+      (reduce (fn [plan [key sub-pattern]]
+                (let [projection (synthetic "match-key")
+                      sub (match-pattern-plan sub-pattern projection form true)]
+                  (-> plan
+                      (update :temps conj [projection (list 'get subject key)])
+                      (update :temps into (:temps sub))
+                      (update :tests conj (list match-has-marker subject key))
+                      (update :tests into (:tests sub))
+                      (update :binds into (:binds sub)))))
+              {:temps [] :tests [] :binds []}
+              (sort-by (comp str key) pattern)))
+
+    (vector? pattern)
+    (reject! "match does not admit vector patterns" form)
+
+    (set? pattern)
+    (reject! "match does not admit set patterns" form)
+
+    (seq? pattern)
+    (reject! "match does not admit list patterns or guards" form)
+
+    :else
+    (reject! (str "match admits `_`, an unqualified symbol, a bounded integer, "
+                  "keyword, boolean or string literal, and a keyword-keyed map "
+                  "pattern")
+             form)))
+
+(defn- match-conjunction
+  "Nested `if` rather than `and` so the emitted KIR carries no chain temps and
+  stays gensym-stable for the drift gate."
+  [tests]
+  (if (empty? tests)
+    true
+    (list 'if (first tests) (match-conjunction (rest tests)) false)))
+
+(defn- match-arm
+  "One arm, with FALLBACK (the whole rest of the match) appearing exactly once."
+  [{:keys [temps tests binds]} result fallback]
+  (let [matched (if (seq binds)
+                  (list 'let (vec (apply concat binds)) result)
+                  result)
+        chosen (if (empty? tests)
+                 matched
+                 (list 'if (match-conjunction tests) matched fallback))]
+    (if (seq temps)
+      (list 'let (vec (apply concat temps)) chosen)
+      chosen)))
+
+(defn- desugar-match
+  "`(match scrutinee pattern result ... :else default?)` -> a single binding of
+  the scrutinee followed by left-to-right nested `let`/`if` tests.
+
+  With no `:else` a miss traps through quot-by-zero, the same convention
+  `case` and `condp` already use in this profile."
+  [args form]
+  (when (empty? args)
+    (reject! "match requires a scrutinee expression" form))
+  (let [[scrutinee & clauses] args]
+    (when (odd? (count clauses))
+      (reject! "match requires pattern/result pairs" form))
+    (when (empty? clauses)
+      (reject! "match requires at least one pattern/result pair" form))
+    (when (> (quot (count clauses) 2) max-match-arms)
+      (reject! "match clause count exceeds admission limit" form))
+    (let [pairs (vec (partition 2 clauses))
+          else-positions (vec (keep-indexed (fn [index [pattern _]]
+                                              (when (= :else pattern) index))
+                                            pairs))]
+      (when (> (count else-positions) 1)
+        (reject! "match admits at most one :else clause" form))
+      (when (and (seq else-positions)
+                 (not= (first else-positions) (dec (count pairs))))
+        (reject! "match :else clause must be last" form))
+      (let [else? (seq else-positions)
+            default (if else? (second (last pairs)) '(quot 1 0))
+            arms (if else? (subvec pairs 0 (dec (count pairs))) pairs)
+            subject (synthetic "match")
+            plans (mapv (fn [[pattern _]] (match-pattern-plan pattern subject form false))
+                        arms)]
+        ;; An arm with no tests always matches, so anything after it can never
+        ;; run. Dropping those clauses silently would make a typo in the last
+        ;; arm invisible; saying so is the whole difference.
+        (doseq [[index plan] (map-indexed vector plans)]
+          (when (and (empty? (:tests plan))
+                     (or else? (< index (dec (count plans)))))
+            (reject! "match clause after an irrefutable pattern is unreachable" form)))
+        (doseq [plan plans]
+          (let [names (mapv first (:binds plan))]
+            (when-not (= (count names) (count (distinct names)))
+              (reject! "match pattern binds the same symbol twice" form))))
+        (list 'let [subject (desugar-expr scrutinee)]
+              (reduce (fn [fallback [plan [_ result]]]
+                        (match-arm plan (desugar-expr result) fallback))
+                      (desugar-expr default)
+                      (reverse (map vector plans arms))))))))
+
 (defn- destructure-binding
   "Expands ONE `[pattern value-expr]` `let`/`defn`-param binding into a flat
   seq of `[symbol expr]` pairs (ADR-2607150000/ADR 0207). PATTERN is a plain
@@ -3200,6 +3386,7 @@
                             form))
                  (list 'if (desugar-bool-expr (first args)) 0 '(quot 1 0)))
         case (desugar-case args form)
+        match (desugar-match args form)
         if-let (desugar-binding-if args form false)
         when-let (desugar-binding-if args form true)
         if-some (desugar-binding-some args form false)
@@ -6020,6 +6207,36 @@
             :else
             (list 'map-get value key
                   (if (= 3 (count rewritten-args)) default 0))))
+
+        (= op match-has-marker)
+        ;; The key-presence scan is written against this profile's bounded map
+        ;; (a cons list of pairs). A canonical typed map or a record answers
+        ;; presence through a different primitive entirely, so say which one
+        ;; the pattern met rather than letting it surface as `expected i64`
+        ;; from somewhere inside the synthesized helper.
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              value-type (try (infer-expression-type (first rewritten-args)
+                                                     locals signatures)
+                              (catch #?(:clj Exception :cljs :default) _ nil))
+              descriptor (if (schema-ref-type? value-type)
+                           (get schemas (second value-type))
+                           value-type)]
+          (when (canonical-typed-map-type? value-type)
+            (reject! "match map patterns admit the bounded map only; this scrutinee is a canonical typed map"
+                     form))
+          (when (record-type? descriptor)
+            (reject! "match map patterns admit the bounded map only; this scrutinee is a record"
+                     form))
+          ;; Presence, on a value type with no presence primitive. `map-get`
+          ;; answers the DEFAULT for an absent key, so one lookup cannot tell
+          ;; an absent key from a key whose value happens to equal the
+          ;; default. Two lookups with different defaults can: a present value
+          ;; equals itself, and 0 never equals 1. Both are pure and total, and
+          ;; the receiver is always a symbol here (the scrutinee binding or a
+          ;; projection temp), so neither the map nor the key is re-evaluated.
+          (let [[value key] rewritten-args]
+            (list '= (list 'map-get value key 0) (list 'map-get value key 1))))
 
         (= op 'get)
         (let [rewritten-args

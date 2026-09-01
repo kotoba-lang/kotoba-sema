@@ -17,6 +17,7 @@
             [kotoba.compiler.oracle-reach-test]
             [kotoba.compiler.parameter-annotation-test]
             [kotoba.compiler.defdesugar-test]
+            [kotoba.compiler.match-test]
             [kotoba.compiler.parameter-inference-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
@@ -30,4 +31,5 @@
              'kotoba.compiler.oracle-reach-test
              'kotoba.compiler.parameter-annotation-test
              'kotoba.compiler.defdesugar-test
+             'kotoba.compiler.match-test
              'kotoba.compiler.parameter-inference-test)
