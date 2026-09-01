@@ -48,11 +48,19 @@
     (is (analyzes? "(defn f [a :i64 b :i64] :i64 (+ a b))"))
     (is (analyzes? "(defn f [a b] :i64 (+ a b))"))))
 
-(deftest an-unannotated-parameter-is-still-i64
-  (testing "the relaxation loosens the grammar, not the type"
-    ;; If absence started meaning "infer" or "any", this would analyze.
+(deftest an-unannotated-parameter-defaults-to-i64
+  (testing "with nothing to require otherwise"
+    ;; This test asserted that `(defn f [s :string i] :i64 (string-length i))`
+    ;; was REJECTED, because absence meant `:i64` and nothing could change it.
+    ;; `infer-absent-parameter-types` deliberately replaced that rule: absence
+    ;; now means provisional, and a use that requires a type supplies it. The
+    ;; claim this test still has to make is the part that did not change --
+    ;; absence with no requirement is `:i64`, and a WRITTEN annotation is never
+    ;; refined.
+    (is (analyzes? "(defn f [s :string i] :i64 (+ i (string-length s)))")))
+  (testing "and a written annotation still binds"
     (is (= "expression type mismatch: expected string, got i64"
-           (rejection-of "(defn f [s :string i] :i64 (string-length i))")))))
+           (rejection-of "(defn f [x :i64] :i64 (string-length x))")))))
 
 (deftest a-type-may-not-stand-where-a-name-goes
   (testing "a trailing type has nothing to annotate"
