@@ -135,3 +135,41 @@
   (is (not (aff/linear-parameter?
             '(+ (vector-at v 1) (vector-at (vector-assoc! v 0 i) 0))
             'v))))
+
+;; The gate calls `linear?`, not the two predicates above. Those were tested
+;; in isolation and passed, while `check-affine-writes!` -- the only caller --
+;; consulted neither, so nothing here covered the decision that is actually
+;; made. Measured 2026-09-01: `amu check` refused a correctly threaded
+;; program, naming the handle as "used more than once", because `sym-uses`
+;; counted the `let` BINDER as a use and `position-ok?` read the bare name in
+;; the binding vector as an escape. Two independent reasons, both of which
+;; made every let-bound handle unadmittable. These pin the live path.
+
+(deftest a-let-binder-is-not-a-use-of-the-name
+  (let [form '(do (let [v (vector-alloc 4)
+                        a (vector-assoc! v 0 1)
+                        b (vector-assoc! a 1 2)]
+                    (vector-at b 0)))]
+    (testing "the threaded handles are admitted"
+      (is (aff/linear? form 'v))
+      (is (aff/linear? form 'a)))))
+
+(deftest a-let-bound-handle-written-twice-is-refused
+  (is (not (aff/linear? '(do (let [v (vector-alloc 4)
+                                   a (vector-assoc! v 0 1)
+                                   b (vector-assoc! v 1 2)]
+                               (vector-at b 0)))
+                        'v))))
+
+(deftest a-let-bound-handle-read-after-being-consumed-is-refused
+  (is (not (aff/linear? '(do (let [v (vector-alloc 4)
+                                   a (vector-assoc! v 0 1)]
+                               (vector-at v 0)))
+                        'v))))
+
+(deftest a-let-bound-handle-that-escapes-is-refused
+  ;; Not a vector operation, so the analysis cannot see who keeps it.
+  (is (not (aff/linear? '(do (let [v (vector-alloc 4)
+                                   a (vector-assoc! v 0 1)]
+                               (keeper v)))
+                        'v))))
