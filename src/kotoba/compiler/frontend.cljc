@@ -561,6 +561,23 @@
     ;; site with four arguments would have to invent two, and "the callee
     ;; ignores the extra words" is a fact about the CALLEE.
     kernel-uefi-call4 6 kernel-uefi-call6 8
+    ;; boot-scratch: `(kernel-scratch-region)` -> the base of the writable
+    ;; area the image packager reserves inside the image's own `.data`
+    ;; (kotoba-gmir ADR-0013). Zero-arity, and an ADDRESS rather than a load.
+    ;;
+    ;; Every remaining UEFI boot service takes an OUT-POINTER --
+    ;; `AllocatePages(type, memtype, pages, &addr)`,
+    ;; `HandleProtocol(handle, &guid, &iface)`, `GetMemoryMap`'s five -- and
+    ;; until this existed a Kotoba UEFI application had no address it was
+    ;; allowed to write. The literal pool of the four heads below lives in
+    ;; `.text`, which the packager marks read+execute; `kernel-boot-info` and
+    ;; `kernel-system-table` answer with words the FIRMWARE handed over, not
+    ;; with the address of the context slot they were parked in.
+    ;;
+    ;; The LENGTH is not a second head. It is the window length the source
+    ;; already writes at every `kernel-load-*`/`kernel-store-*`, and
+    ;; `image-scratch-bytes` below is the ceiling this file enforces on one.
+    kernel-scratch-region 0
     ;; sysops: barriers, the timestamp counter and the GS-base swap
     ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
     ;;
@@ -665,6 +682,44 @@
 ;; that sees a target keyword next to a module.
 (def rodata-literal-operations
   '{ucs2 1 guid 1 bytes-literal 1 bytes-literal-length 1})
+
+;; boot-scratch: `(kernel-function-address f)` -> the address the layout pass
+;; gave `f` (kotoba-gmir ADR-0013). This is what `kernel-jump-to` has needed
+;; since it was admitted and never had: nothing produced the address of a
+;; Kotoba function.
+;;
+;; Its own family for the reason the four literal heads above are one: the
+;; argument is a piece of the SOURCE TEXT, not an expression. Every entry in
+;; `kernel-privileged-operations` takes i64 expressions and walks them; this
+;; takes a name, and walking it would report an unbound local for a program
+;; that is correct. `(kernel-function-address g)` where `g` is a parameter has
+;; no answer -- a function's address is decided by the layout pass, and a
+;; value that does not exist until the program runs has no label -- so it is
+;; refused at the source rather than lowered into something a backend has to
+;; refuse with a shape error.
+;;
+;; A different family from the literals rather than a fifth entry in it,
+;; because the two refusals differ in what they check: a literal's argument
+;; must DECODE under an encoding, and this one must NAME A FUNCTION THIS
+;; MODULE DEFINES. Nothing about a GUID's grammar bears on the second.
+(def image-symbol-operations
+  '{kernel-function-address 1})
+
+;; boot-scratch: the reservation, in bytes.
+;;
+;; This is one of TWO places the number lives -- the other is
+;; `kotoba.compiler.packaging.pe32plus`, which actually reserves the space --
+;; and amu's suite asserts the two are equal, because a frontend that admits
+;; a wider window than the packager reserves admits a write past the section.
+;;
+;; 16384 and not 4096: `package-embedded-kernel` in that same namespace has
+;; reserved exactly 16 KiB for a UEFI memory map since it was written, and a
+;; memory map is the largest thing a boot path puts in scratch. It is also
+;; the largest window tier the checked-memory family has (`-16k`), so no
+;; spelling of `kernel-load-*` can declare a window this ceiling does not
+;; already bound -- except the 64k tier, which is exactly what the refusal
+;; below is for.
+(def image-scratch-bytes 16384)
 
 (def rodata-literal-encodings
   "Which `kotoba.gmir` encoding each head names. `bytes-literal-length` is
@@ -942,6 +997,11 @@
              ;; become a call with a string argument to a function whose
              ;; parameter is declared i64.
              (set (keys rodata-literal-operations))
+             ;; boot-scratch: a function named `kernel-function-address` would
+             ;; shadow the head SILENTLY -- the call would become an ordinary
+             ;; call with a symbol argument to a function whose parameter is
+             ;; declared i64.
+             (set (keys image-symbol-operations))
              list-operations predicate-operations logical-operations map-operations typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
@@ -6083,6 +6143,23 @@
             (when-not (rodata-literal-content? op (first args))
               (reject! "rodata literal is malformed for its encoding" form)))
 
+        ;; boot-scratch: the argument is a NAME and is deliberately not
+        ;; validated as an expression. A bare symbol in argument position is
+        ;; a local reference everywhere else in this grammar, so the check
+        ;; that it names a FUNCTION has to happen here or the report will be
+        ;; about an unbound local.
+        (contains? image-symbol-operations op)
+        (do (when-not (= (get image-symbol-operations op) (count args))
+              (reject! "image symbol operation arity mismatch" form))
+            (when-not (symbol? (first args))
+              (reject! "kernel-function-address requires a function name" form))
+            (when (contains? locals (first args))
+              (reject! "kernel-function-address names a function, not a local"
+                       form))
+            (when-not (contains? functions (first args))
+              (reject! "kernel-function-address names no function in this module"
+                       form)))
+
         (contains? functions op)
         (let [expected (count (get functions op))]
           (when-not (= expected (count args))
@@ -7251,6 +7328,12 @@
           (require-expression-type! (infer-expression-type left locals signatures) type left)
           (require-expression-type! (infer-expression-type right locals signatures) type right)
           :i64)
+        ;; boot-scratch: an address is an i64, and its argument is a function
+        ;; NAME. Intercepted here rather than in `infer-call-type`, which
+        ;; types every argument before it looks at the head -- a symbol there
+        ;; is a local reference, so a correct program would be rejected as
+        ;; "unbound symbol has no value type" naming the callee.
+        kernel-function-address :i64
         (infer-call-type op args locals signatures)))
     :else (reject! "value has no admitted type" form)))
 
@@ -9386,6 +9469,14 @@
             (cond
               (integer? expr) true
               (and (seq? expr) (= 'kernel-boot-info (first expr))) true
+              ;; boot-scratch: a root beside `kernel-boot-info`, and a
+              ;; STRONGER one. `kernel-boot-info` answers with a word the
+              ;; firmware or the loader handed over, which this pass has to
+              ;; trust; the scratch region is a span the toolchain's own
+              ;; packager reserved, so both its base and its size are facts
+              ;; the compiler holds. The bound below is what makes that
+              ;; second fact worth having.
+              (and (seq? expr) (= 'kernel-scratch-region (first expr))) true
               ;; A checked sub-window. Its own parent base sits in argument
               ;; position 0 and is validated as a base in its own right by
               ;; `kernel-base-uses`, so recursing here would double-report.
@@ -9401,6 +9492,26 @@
                 :else false)
               :else false))]
     (clean? expr #{})))
+
+(defn- scratch-rooted?
+  "True when EXPR resolves to `(kernel-scratch-region)`, following ENV.
+
+  Deliberately narrower than `traceable-base?`: a `kernel-subregion` of the
+  scratch region is NOT reported here, because that narrowing carries its own
+  emitted check against the parent window, and the parent window is the one
+  this ceiling bounds. What this answers is 'is the window being declared
+  RIGHT NOW the reservation itself'."
+  [expr env]
+  (letfn [(rooted? [expr seen]
+            (cond
+              (and (seq? expr) (= 'kernel-scratch-region (first expr))) true
+              (symbol? expr)
+              (cond
+                (contains? seen expr) false
+                (contains? env expr) (rooted? (get env expr) (conj seen expr))
+                :else false)
+              :else false))]
+    (rooted? expr #{})))
 
 (defn- derived-base?
   "True when EXPR narrows a region to a sub-window. Now always a checked
@@ -9423,6 +9534,7 @@
         used-params (volatile! #{})
         literals (volatile! #{})
         derived (volatile! [])
+        overwide (volatile! [])
         calls (volatile! [])]
     (letfn [(base! [expr env]
               (cond
@@ -9474,7 +9586,24 @@
                           args (vec args)]
                       (doseq [i positions
                               :when (< i (count args))]
-                        (base! (nth args i) env))
+                        (base! (nth args i) env)
+                        ;; boot-scratch: the reservation is a span this
+                        ;; toolchain owns, so a window declared over it can be
+                        ;; checked at compile time -- which is the whole
+                        ;; benefit of the region being ours rather than the
+                        ;; firmware's. The LENGTH sits one position past every
+                        ;; base in this family. A non-literal length over the
+                        ;; scratch region is refused too: an expression cannot
+                        ;; be compared against the ceiling, and admitting it
+                        ;; would leave exactly the hole this check exists to
+                        ;; close.
+                        (when (scratch-rooted? (nth args i) env)
+                          (let [length (get args (inc i) ::missing)]
+                            (when (or (not (integer? length))
+                                      (> length image-scratch-bytes))
+                              (vswap! overwide conj
+                                      {:operation op :window length
+                                       :reserved image-scratch-bytes})))))
                       (doseq [arg args] (walk arg env)))
 
                     :else
@@ -9484,7 +9613,8 @@
                         (doseq [arg args] (walk arg env)))))))]
       (walk body {})
       {:problems @problems :params @used-params
-       :literals @literals :derived @derived :calls @calls})))
+       :literals @literals :derived @derived :overwide @overwide
+       :calls @calls})))
 
 (defn kernel-region-report
   "Static region provenance for FUNCTIONS: the literal physical bases the
@@ -9578,10 +9708,19 @@
                 functions)
       (let [{:keys [tainted]} (kernel-region-report functions)]
         (doseq [{:keys [name params body]} functions]
-          (let [{:keys [problems calls]} (kernel-base-uses body (set params) function-names)]
+          (let [{:keys [problems calls overwide]}
+                (kernel-base-uses body (set params) function-names)]
             (when-let [offender (first problems)]
               (reject! "kernel memory base must name a region, not compute one"
                        offender :kotoba.error/kernel-region-provenance))
+            ;; boot-scratch: the reservation is finite and the compiler knows
+            ;; how big it is. A window past it is a write past the section,
+            ;; and no emitted bounds check catches it -- the check compares
+            ;; against the length the SOURCE declared.
+            (when-let [offender (first overwide)]
+              (reject! (str "scratch region window exceeds the "
+                            image-scratch-bytes "-byte reservation")
+                       offender :kotoba.error/kernel-scratch-window))
             ;; an argument flowing into a base position must be traceable too,
             ;; or the caller becomes the hole the callee's own check closed
             (doseq [[callee i arg env] calls
