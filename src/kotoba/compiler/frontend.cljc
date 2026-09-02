@@ -1518,6 +1518,76 @@
               (desugar-expr form)))
           (range (count forms)) forms)))
 
+(defn- sequenced-body
+  "Collapse an implicit-`do` body into the ONE expression a core head takes.
+
+  Heads whose source body is a sequence of forms (`let` today; `when` and its
+  relatives reach `do` by their own desugaring) must hand exactly one
+  expression to the core form, because `let` in KIR is `(let [n v ...] body)`
+  with a single body -- every consumer in this file and in kotoba-kir
+  destructures it that way.
+
+  The collapse is `do`, never a nested `let`. `do` is kept as a first-class
+  head through desugaring for the reason stated at the `do` case below: a
+  nested-`let` encoding of sequencing makes an earlier subexpression an unused
+  binding, and an unused binding is exactly what a later pass is entitled to
+  drop. A kernel store or a `cap-call` in non-final position is the thing that
+  would be dropped.
+
+  An empty body is refused rather than collapsed. `(let [x 1])` has no value to
+  return, and returning `nil` from here put a literal `nil` into HIR where an
+  expression belongs."
+  [forms form head]
+  (cond
+    (empty? forms)
+    (reject! (str head " requires at least one body expression") form
+             :kotoba.error/let-body-empty)
+    (= 1 (count forms)) (first forms)
+    :else (list* 'do forms)))
+
+(defn- let-body
+  "The ONE body expression of a core `let`, refusing anything else.
+
+  `let` is a core special form that takes a binding vector and a single body
+  expression; sequencing is `do`'s job. Source `let` bodies with several forms
+  are collapsed into a `do` by `sequenced-body` during desugaring, so by the
+  time any later pass reads a `let` there is exactly one body form.
+
+  This exists because a single body form used to be an assumption rather
+  than a check. Six passes in this file destructured `(let [[bindings body] args] ...)`
+  and two of them REBUILT the form from `body` alone -- so a `let` that reached
+  them with several body forms came out with one, silently, and
+  `validate-expr`'s own one-result-expression check then measured the
+  truncated form and passed it. Every path that produces a `let` now goes
+  through `sequenced-body`; every path that consumes one goes through here, so
+  a future path that forgets gets a refusal instead of a shorter program."
+  [args form]
+  (let [body (rest args)]
+    (when-not (= 1 (count body))
+      (reject! (str "let requires one result expression; got " (count body)
+                    " (sequence with `do`)")
+               form :kotoba.error/let-body-multiple-forms))
+    (first body)))
+
+(defn- if-parts
+  "The THREE parts of a core `if`, refusing any other arity.
+
+  Found alongside the `let` body truncation and it is the same shape: `if`
+  survived desugaring with whatever arity the source wrote, a later pass
+  destructured `[test then else]` and REBUILT the form from those three, and
+  `validate-expr`'s own `if requires test, then, else` then measured the
+  rebuilt three-argument form and passed it. Measured 2026-09-02:
+
+      (defn run [n :i64] :i64 (if (> n 0) (+ n 10) (+ n 100) (+ n 1000)))
+
+  compiled to wasm32 with :ok true and answered 15, having dropped the fourth
+  argument without a word. In Clojure that source is an arity error."
+  [args form]
+  (when-not (= 3 (count args))
+    (reject! (str "if requires test, then, else; got " (count args) " arguments")
+             form :kotoba.error/if-arity))
+  args)
+
 (defn- closed-vector-literal-type
   "Infer only descriptors that are completely determined by a closed vector
   literal. Unknown expressions return nil and keep the established i64-vector
@@ -3468,7 +3538,7 @@
                                    contextual-result-type
                                    (desugar-result-expr contextual-result-type arg)
                                    :else (desugar-expr arg)))
-                               args))
+                               (if-parts args form)))
         fn-ref
         (if (contains? *function-arities* 'fn-ref)
           (apply list 'fn-ref (map desugar-expr args))
@@ -3668,13 +3738,37 @@
                   (let [[lowered-bindings body-env body-contracts]
                         (lower-bindings (partition 2 bindings)
                                         *lexical-bindings*
-                                        *lexical-callable-contracts* [])]
-                    (list* 'let lowered-bindings
-                           ;; `mapv`, not bare `map`: forcing must remain in
-                           ;; the dynamic extent of the compiler counters.
-                           (binding [*lexical-bindings* body-env
-                                     *lexical-callable-contracts* body-contracts]
-                             (desugar-tail-expressions contextual-result-type body)))))
+                                        *lexical-callable-contracts* [])
+                        ;; `mapv`, not bare `map`: forcing must remain in
+                        ;; the dynamic extent of the compiler counters.
+                        lowered-body
+                        (binding [*lexical-bindings* body-env
+                                  *lexical-callable-contracts* body-contracts]
+                          (desugar-tail-expressions contextual-result-type body))]
+                    ;; A `let` body is an implicit `do`, exactly like `when`,
+                    ;; `when-not`, `when-let` and `when-some` already are here.
+                    ;;
+                    ;; The core form `let` takes ONE body expression -- that is
+                    ;; the shape KIR documents (kotoba.kir:2246 "one body form")
+                    ;; and the shape every later pass in this file destructures.
+                    ;; So a multi-form source body has to become one expression
+                    ;; HERE, and the head that does that is `do`, which is kept
+                    ;; first-class through desugaring precisely so an earlier,
+                    ;; unused, side-effecting subexpression is not dropped.
+                    ;;
+                    ;; Until 2026-09-02 this emitted `(list* 'let bindings
+                    ;; body...)` -- every body form, on a head that takes one --
+                    ;; and `rewrite-record-projection` then destructured
+                    ;; `[bindings body]` and rebuilt the form from the FIRST
+                    ;; body form alone. `(let [x (f)] (store! a x) (+ x 1))`
+                    ;; compiled with :ok true, kept only `(store! a x)`, and
+                    ;; dropped the value. Measured on the QWEN-RUNTIME cursor,
+                    ;; where the dropped form carried the high word of a 64-bit
+                    ;; offset. `validate-expr`'s "let requires one result
+                    ;; expression" could never fire, because the truncation ran
+                    ;; first and handed it a body of exactly one.
+                    (list 'let lowered-bindings
+                          (sequenced-body lowered-body form 'let))))
                 ;; Preserve malformed input so validate-expr emits its
                 ;; established even-binding-vector diagnostic.
                 (list* 'let bindings (mapv desugar-expr body))))
@@ -4640,15 +4734,16 @@
                  form :kotoba.error/ambient-forbidden))
       (cond
         (= op 'let)
-        (let [[bindings & body] args]
-          (when-not (= 1 (count body)) (reject! "let requires one result expression" form))
-          (validate-expr (first body)
-                         (validate-bindings bindings locals functions depth budget)
-                         functions (inc depth) budget))
+        ;; One body form, one message. This used to carry its own copy of the
+        ;; rule and its own wording, and it was the copy nothing could reach:
+        ;; the rewrite passes truncated the body before validation measured it.
+        (validate-expr (let-body args form)
+                       (validate-bindings (first args) locals functions depth budget)
+                       functions (inc depth) budget)
 
         (= op 'if)
-        (do (when-not (= 3 (count args)) (reject! "if requires test, then, else" form))
-            (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
+        (doseq [arg (if-parts args form)]
+          (validate-expr arg locals functions (inc depth) budget))
 
         (= op 'do)
         (do (when (empty? args) (reject! "do requires at least one expression" form :kotoba.error/do-empty))
@@ -5729,7 +5824,7 @@
     (seq? form)
     (let [[op & args] form]
       (case op
-        let (let [[bindings body] args]
+        let (let [bindings (first args) body (let-body args form)]
               (loop [pairs (partition 2 bindings) current locals]
                 (if-let [[name value] (first pairs)]
                   (recur (next pairs)
@@ -6198,7 +6293,7 @@
              (list 'typed-cap-call id request-type expected request))))
 
         (= op 'let)
-        (let [[bindings body] args]
+        (let [bindings (first args) body (let-body args form)]
           (loop [pairs (partition 2 bindings)
                  current locals
                  out []]
@@ -6217,7 +6312,7 @@
                       body expected current signatures used))))))
 
         (= op 'if)
-        (let [[test then else] args]
+        (let [[test then else] (if-parts args form)]
           (preserve-form-meta
            form
            (list 'if
@@ -6468,7 +6563,7 @@
      (let [[op & args] form]
       (cond
         (= op 'let)
-        (let [[bindings body] args
+        (let [bindings (first args) body (let-body args form)
               [pairs locals']
               (reduce (fn [[acc cur] [nm value]]
                         (let [v (rewrite-record-projection value cur signatures schemas)]
@@ -7042,7 +7137,7 @@
                 (let [[op & args] form]
                   (cond
                     (= op 'let)
-                    (let [[bindings body] args]
+                    (let [bindings (first args) body (let-body args form)]
                       (loop [pairs (partition 2 bindings) current env]
                         (if-let [[name value] (first pairs)]
                           (let [status (expression-status function-name value current
@@ -7123,7 +7218,7 @@
                               (let [[op & args] form]
                                 (cond
                                   (= op 'let)
-                                  (let [[bindings body] args]
+                                  (let [bindings (first args) body (let-body args form)]
                                     (loop [pairs (partition 2 bindings) current env]
                                       (if-let [[name value] (first pairs)]
                                         (recur (next pairs)
@@ -7164,7 +7259,7 @@
                               (let [[op & args] form]
                                 (cond
                                 (= op 'let)
-                                (let [[bindings body] args]
+                                (let [bindings (first args) body (let-body args form)]
                                   (loop [pairs (partition 2 bindings) current env]
                                     (if-let [[name value] (first pairs)]
                                       (do (scan-calls! function-name value current

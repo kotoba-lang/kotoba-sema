@@ -14,6 +14,8 @@
   (:require [cljs.test :as t]
             [kotoba.compiler.case-uniqueness-test]
             [kotoba.compiler.host-nesting-test]
+            ;; a `let` body is an implicit `do`; the value is the last form
+            [kotoba.compiler.let-body-test]
             [kotoba.compiler.kernel-xgetbv-test]
             ;; isr: the interrupt entry name and signature rules
             [kotoba.compiler.interrupt-entry-test]
@@ -31,6 +33,7 @@
 
 (t/run-tests 'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.host-nesting-test
+             'kotoba.compiler.let-body-test
              'kotoba.compiler.kernel-xgetbv-test
              'kotoba.compiler.interrupt-entry-test
              'kotoba.compiler.oracle-reach-test
