@@ -61,7 +61,7 @@ repository is uniquely able to assert:
    heads named in the failure message rather than "the files differ". The
    frontend lives here, so this comparison can be made nowhere else.
 2. The vendored copy's sha256 equals the authority digest of the 2026-09-03
-   wave, `3e3f9748…`. The same literal is pinned in kotoba-lang, amu and
+   wave, `67561e57…`. The same literal is pinned in kotoba-lang, amu and
    kotoba, which makes the next authority edit a four-repository wave by
    construction.
 
@@ -101,7 +101,7 @@ Deliberately broken by deleting `"kernel-dot-f32"` from the vendored copy:
   2 failures, exit 1
   the frontend admits heads the authority does not name: ("kernel-dot-f32")
   vendored grammar drifted from the authority
-    expected 3e3f9748…  actual 0af2cc09…
+    expected 67561e57…  actual 0af2cc09…
 ```
 
 Both failures name the head. A run that could not open the resource fails on
