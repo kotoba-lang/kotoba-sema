@@ -317,6 +317,32 @@
     kernel-in-u8 1 kernel-in-u32 1
     kernel-read-msr 1 kernel-write-msr 2
     kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2
+    ;; simdprep: `(kernel-xgetbv index)` -> the extended control register at
+    ;; that index, its EDX:EAX halves joined into one i64. Arity 1, because
+    ;; `xgetbv` reads exactly one input, the XCR index in ECX.
+    ;;
+    ;; The `cpuid` four cannot express an AVX2 guard on their own, and that is
+    ;; the gap this closes. Leaf 1 ECX bit 28 says the CPU implements AVX; XCR0
+    ;; bits 1 and 2 say the OPERATING SYSTEM has agreed to save and restore the
+    ;; SSE and YMM register state across a context switch. A kernel that reads
+    ;; only the first and uses YMM anyway does not fault -- it computes wrong
+    ;; answers intermittently and only under load, because its vector registers
+    ;; are not preserved. aiueos asks both questions today, in inline asm
+    ;; (`kernel/qwen35_infer.c`), for want of this operator.
+    ;;
+    ;; Privileged and never oracled, for a reason one step stronger than the
+    ;; `cpuid` four's. A `cpuid` result is a property of the MACHINE. XCR0 is a
+    ;; property of the machine AND of the kernel running on it AT THE MOMENT OF
+    ;; THE READ: it changes when that kernel enables the YMM state bit, so the
+    ;; same expression yields different values five instructions apart. There
+    ;; is no compile-time answer, and the one the caller branches on is
+    ;; "may I use AVX2".
+    ;;
+    ;; ORDERING, which no arity check can enforce: `xgetbv` raises #UD when
+    ;; CR4.OSXSAVE is clear, and leaf 1 ECX bit 27 is what reports that bit. A
+    ;; guard must test 27 BEFORE it reads XCR0, or feature detection faults in
+    ;; the middle of itself. See kotoba-native docs/avx2-guard-sequence.md.
+    kernel-xgetbv 1
     ;; boot: the UEFI firmware boundary (kotoba-kir ADR-0229, kotoba-gmir
     ;; ADR-0008). A BOOTX64.EFI written in Kotoba needs to name four things
     ;; this family could not.

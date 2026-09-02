@@ -14,6 +14,7 @@
   (:require [cljs.test :as t]
             [kotoba.compiler.case-uniqueness-test]
             [kotoba.compiler.host-nesting-test]
+            [kotoba.compiler.kernel-xgetbv-test]
             [kotoba.compiler.oracle-reach-test]
             [kotoba.compiler.parameter-annotation-test]
             [kotoba.compiler.defdesugar-test]
@@ -28,6 +29,7 @@
 
 (t/run-tests 'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.host-nesting-test
+             'kotoba.compiler.kernel-xgetbv-test
              'kotoba.compiler.oracle-reach-test
              'kotoba.compiler.parameter-annotation-test
              'kotoba.compiler.defdesugar-test
