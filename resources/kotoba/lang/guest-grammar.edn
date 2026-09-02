@@ -536,9 +536,21 @@
    ;; ------------------------------------------------------------------
    ;; The kernel families. Admitted as builtins -- no host import, no
    ;; capability grant, no registration -- by `kotoba.compiler.frontend`
-   ;; (kotoba-sema), which is the only thing that decides admission. This set
-   ;; decides nothing; it DESCRIBES. Which is why it was able to be wrong for
-   ;; a long time without anything failing.
+   ;; (kotoba-sema), which is the only thing that decides what the COMPILER
+   ;; admits.
+   ;;
+   ;; This set is read in exactly one place: `kotoba.grammar/admitted-heads`
+   ;; in kotoba-lang/kotoba's vendored grammar loader, where it feeds
+   ;; `strict-problems`' known-head set. So a head missing from here is
+   ;; reported by that repository as `:unknown-form` even though the compiler
+   ;; admits it, and a head added here stops being reported there -- the
+   ;; compiler still decides whether it has a lowering. Nothing in
+   ;; kotoba-lang, kotoba-sema or amu reads it at all.
+   ;;
+   ;; (Measured 2026-09-03. The first draft of this comment said "this set
+   ;; decides nothing", from a grep that covered `src test scripts` in each
+   ;; repository and not `vendor/` -- which is where the one reader lives.
+   ;; Corrected before landing.)
    ;;
    ;; Measured 2026-09-03 against kotoba-sema `1afff23`:
    ;;

@@ -32,9 +32,13 @@
 
   Measured 2026-09-03: the authority named THREE kernel heads
   (`kernel-load-u8`, `kernel-store-u8`, `kernel-boot-info`) while this
-  frontend admitted 114. `:admitted-builtins` decides nothing -- nothing in
-  any of the four repositories reads it to admit anything -- which is exactly
-  how it stayed wrong through eight widenings of the tables it describes.
+  frontend admitted 114. Nothing here, in amu or in kotoba-lang reads
+  `:admitted-builtins`, and nothing anywhere reads it to decide what the
+  COMPILER admits -- the tables below do that. Its one reader is
+  `kotoba.grammar/admitted-heads` in kotoba-lang/kotoba's vendored loader,
+  where a missing head is reported as `:unknown-form`. So the understatement
+  cost one repository 111 false `:unknown-form` reports and nothing failed,
+  through eight widenings of the tables it describes.
 
   ## The one thing this file cannot do
 
@@ -53,7 +57,7 @@
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn` at the 2026-09-03 resync
   wave. Change it only as part of that wave, in all four repositories."
-  "9f4a779cbbb1f0d459107d4594e24d3f5d9009ce3319370e82141e879f7afee4")
+  "3e3f9748e245386fc2c89bbadabddfebb4bf02190e137494feacec6a12b4500a")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
