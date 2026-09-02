@@ -40,7 +40,7 @@
 (def forbidden-heads
   (into '#{load load-file load-string read-string compile
            require use import ns-resolve resolve alter-var-root
-           future pmap agent send send-off new . .. set! defmacro throw try catch
+           future pmap agent send send-off new . .. set! defmacro
            locking dosync atom ref volatile!}
         (load-catalog-forbidden)))
 
@@ -1206,7 +1206,7 @@
   "Control / ambient heads rejected under `:language-profile :pure-product`
   even when the general subset might admit them (see pure-product-profile.edn)."
   '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!
-     doseq dotimes defmulti defmethod
+     doseq dotimes defmulti defmethod throw try catch
      future pmap agent send send-off
      condp cond-> cond->> some-> some->> as-> -> ->>})
 
@@ -1368,6 +1368,83 @@
 (def ^:dynamic *uses-apply?* nil)
 (def ^:dynamic *uses-lazy?* nil)
 (def ^:dynamic *lifting-lazy-thunk?* false)
+
+;; Abort ability, slice 1 (kotoba-lang `lang/abort-ability.edn`). `throw` is
+;; refused inside the lexical contexts whose unwind is not checked yet -- a
+;; loop/doseq/dotimes body (which becomes a synthesized helper function), a
+;; lazy thunk, a fn literal. Bound to the context's tag while its body is
+;; desugared so the refusal can name it and cite the precondition it waits on.
+(def ^:dynamic *abort-lexical-context* nil)
+
+;; Bound to a volatile vector by whatever wants the types of the `throw`s a
+;; form can reach WITHOUT crossing a try body. `infer-expression-type`'s `try`
+;; case rebinds it around the body, so a throw inside a try is collected by
+;; that try and never reaches the outer collector; a throw in the handler is
+;; outside the body and does reach it. Unbound (nil) everywhere else, where a
+;; throw is typed and not recorded.
+(def ^:dynamic *abort-throw-types* nil)
+
+;; Function name -> the error type it aborts with, for the functions that do.
+;; Bound while the abort passes and their inference run; empty elsewhere.
+(def ^:dynamic *abort-error-types* {})
+
+;; The static type of `(throw e)`: it has no value, so it unifies with either
+;; branch of an `if`. It never reaches HIR -- an aborting function is lowered
+;; to `[:result T E]` before any pass that writes HIR sees it.
+(def ^:private abort-bottom :kotoba.abort/bottom)
+
+;; The catch binder's provisional type while a callee's error type is not yet
+;; known (the abort passes iterate to a fixed point). Nothing unifies with it,
+;; so a handler that reads the binder before its type is known refuses -- and
+;; the fixed point retries -- rather than reading it as anything.
+(def ^:private abort-unknown-error :kotoba.abort/unknown-error)
+
+(defn- abort-lexical-context
+  "The description of the lexical context that refuses `throw`, or nil."
+  []
+  (cond
+    *lifting-lazy-thunk?* "a lazy thunk"
+    (= :loop *abort-lexical-context*) "a loop/doseq/dotimes body"
+    (= :fn *abort-lexical-context*) "a fn literal"))
+
+(defn- try-clause-parts
+  "`(catch binder handler)` or `(catch error-type binder handler)` ->
+  `[error-type binder handler]`, error-type nil when the author left it to
+  inference. Shared by desugaring, inference and elaboration so the clause
+  has one shape."
+  [clause form]
+  (when-not (and (seq? clause) (= 'catch (first clause)))
+    (reject! "try requires a (catch [error-type] binder handler) clause"
+             form :kotoba.error/abort-shape))
+  (let [parts (rest clause)
+        [error-type binder handler]
+        (case (count parts)
+          2 (cons nil parts)
+          3 parts
+          (reject! "catch requires an optional error type, one binder, and one handler expression"
+                   form :kotoba.error/abort-shape))]
+    (when-not (and (symbol? binder) (nil? (namespace binder)))
+      (reject! "catch binder must be an unqualified symbol" form :kotoba.error/abort-shape))
+    [error-type binder handler]))
+
+(defn- abort-callee-error-types
+  "The error types of the aborting functions FORM calls with no try body in
+  between. A try's handler is walked -- what it throws leaves the try -- and
+  its body is not: that body's aborts are the try's own to catch."
+  [form]
+  (let [known *abort-error-types* out (volatile! [])]
+    (letfn [(walk [x]
+              (cond
+                (seq? x)
+                (let [[op & args] x]
+                  (if (= op 'try)
+                    (walk (last (second args)))
+                    (do (when-let [error-type (get known op)]
+                          (vswap! out conj error-type))
+                        (doseq [arg args] (walk arg)))))
+                (coll? x) (doseq [item x] (walk item))))]
+      (walk form)
+      (distinct @out))))
 (def ^:dynamic *lexical-bindings* #{})
 (def ^:dynamic *lexical-callable-contracts* {})
 (def ^:dynamic *function-callable-result-contracts* {})
@@ -1715,7 +1792,8 @@
                           (let [clause-result (get contract-results (count params))]
                           {:params params :contract-result clause-result
                            :body (binding [*lexical-bindings*
-                                           (into *lexical-bindings* params)]
+                                           (into *lexical-bindings* params)
+                                           *abort-lexical-context* :fn]
                                    (if-let [result (or clause-result expected-result)]
                                      (desugar-result-expr result body)
                                      (desugar-expr body)))}))
@@ -3180,12 +3258,19 @@
     (symbol? form) (if (contains? bound form) #{} #{form})
     (seq? form)
     (let [[op & args] form]
-      (if (= op 'let)
+      (case op
+        let
         (let [[bindings & body] args]
           (loop [pairs (partition 2 bindings) bound bound acc #{}]
             (if-let [[name value] (first pairs)]
               (recur (next pairs) (conj bound name) (set/union acc (form-free-symbols value bound)))
               (apply set/union acc (map #(form-free-symbols % bound) body)))))
+        ;; The catch binder is bound in the handler and nowhere else.
+        try
+        (let [[body clause] args
+              [_ binder handler] (try-clause-parts clause form)]
+          (set/union (form-free-symbols body bound)
+                     (form-free-symbols handler (conj bound binder))))
         (apply set/union #{} (map #(form-free-symbols % bound) args))))
     (coll? form) (apply set/union #{} (map #(form-free-symbols % bound) form))
     :else #{}))
@@ -3576,6 +3661,38 @@
                                    (desugar-result-expr contextual-result-type arg)
                                    :else (desugar-expr arg)))
                                (if-parts args form)))
+        ;; Abort ability, slice 1. The desugared shape is the source shape:
+        ;; `(throw e)` and `(try body (catch [E] binder handler))`. Both survive
+        ;; to `elaborate-aborts`, which lowers them to result values once every
+        ;; function's error type is known; no backend ever sees either head.
+        throw
+        (do (when-not (= 1 (count args))
+              (reject! "throw requires exactly one error value" form :kotoba.error/abort-shape))
+            (when-let [context (abort-lexical-context)]
+              (reject! (str "throw inside " context
+                            " is not admitted in abort slice 1: precondition "
+                            ":checked-lexical-facet-unwind is not met")
+                       form :kotoba.error/abort-precondition))
+            (list 'throw (desugar-expr (first args))))
+        try
+        (do (when-not (= 2 (count args))
+              (reject! "try requires exactly one body expression and one catch clause"
+                       form :kotoba.error/abort-shape))
+            (let [[body clause] args
+                  [error-type binder handler] (try-clause-parts clause form)]
+              (when-not (valid-name? binder)
+                (reject! "catch binder must be a bounded unqualified symbol" form :kotoba.error/abort-shape))
+              (when (some? error-type) (validate-value-type! error-type))
+              (let [handler* (binding [*lexical-bindings* (conj *lexical-bindings* binder)
+                                       *local-types* (cond-> *local-types*
+                                                       (some? error-type) (assoc binder error-type))]
+                               (desugar-expr handler))]
+                (list 'try (desugar-expr body)
+                      (if (some? error-type)
+                        (list 'catch error-type binder handler*)
+                        (list 'catch binder handler*))))))
+        catch
+        (reject! "catch is admitted only as the clause of a try" form :kotoba.error/abort-shape)
         fn-ref
         (if (contains? *function-arities* 'fn-ref)
           (apply list 'fn-ref (map desugar-expr args))
@@ -3845,7 +3962,8 @@
             (reject! "loop requires exactly one body expression (this profile has no `do`)" form))
           (let [loop-names (vec (take-nth 2 bindings))
                 loop-inits (mapv desugar-expr (take-nth 2 (rest bindings)))
-                desugared-body (desugar-expr (first body))
+                desugared-body (binding [*abort-lexical-context* :loop]
+                                 (desugar-expr (first body)))
                 captured (vec (sort-by str (form-free-symbols desugared-body (set loop-names))))
                 helper-name (symbol (str "__kotoba_loop_" (vswap! *loop-counter* inc)))
                 helper-params (into loop-names captured)]
@@ -3912,8 +4030,8 @@
         condp (desugar-condp args form)
         cond-> (desugar-cond-thread args form false)
         cond->> (desugar-cond-thread args form true)
-        dotimes (desugar-dotimes args form)
-        doseq (desugar-doseq args form)
+        dotimes (binding [*abort-lexical-context* :loop] (desugar-dotimes args form))
+        doseq (binding [*abort-lexical-context* :loop] (desugar-doseq args form))
         assert! (desugar-dataspace-form op args form)
         retract! (desugar-dataspace-form op args form)
         observe! (desugar-dataspace-form op args form)
@@ -4547,7 +4665,8 @@
                         (list 'let [a acc
                                     b item]
                               (binding [*lexical-bindings*
-                                        (into *lexical-bindings* params)]
+                                        (into *lexical-bindings* params)
+                                        *abort-lexical-context* :fn]
                                 (desugar-expr (first body))))))
 
                     ;; Named binary module function (fail-closed if unbound / wrong arity).
@@ -4622,7 +4741,8 @@
                   (let [[params body] inline-parts]
                     (list 'let (vec (mapcat vector params items))
                           (binding [*lexical-bindings*
-                                    (into *lexical-bindings* params)]
+                                    (into *lexical-bindings* params)
+                                    *abort-lexical-context* :fn]
                             (desugar-expr body))))
                   top-level? (apply list f-form items)
                   :else (apply list (invoke-dispatcher-name n-colls)
@@ -4675,7 +4795,8 @@
                       ;; Bind user param to element; desugar body in that scope.
                       (list 'let [px x]
                             (binding [*lexical-bindings*
-                                      (into *lexical-bindings* params)]
+                                      (into *lexical-bindings* params)
+                                      *abort-lexical-context* :fn]
                               (desugar-expr (first body))))))
 
                   named?
@@ -5274,6 +5395,14 @@
            (some? (nominal-type-identity actual)))))
 
 (defn- require-expression-type! [actual expected form]
+  ;; Bottom is only ever the type of a `throw`, and a throw whose value is
+  ;; REQUIRED to be something is a throw in a position slice 1 does not
+  ;; admit (an operand, a test, a loop init). Say that, rather than
+  ;; "expected i64, got bottom".
+  (when (= actual abort-bottom)
+    (reject! (str "abort slice 1 admits throw and calls to aborting functions "
+                  "only in tail position or as a let binding value; the throw is in neither")
+             form :kotoba.error/abort-position))
   (when-not (same-expression-type? actual expected)
     (let [type-text #(if (keyword? %) (name %) (pr-str %))]
       ;; The types travel as DATA as well as prose. `infer-absent-parameter-types`
@@ -5941,10 +6070,49 @@
                  else-type (infer-expression-type else locals signatures)]
              (when-not (contains? #{:i64 :bool} test-type)
                (reject! "if test must be bool or legacy i64" test))
-             (when-not (= then-type else-type)
-               (reject! "if branches must have the same value type" form))
-             then-type)
+             ;; A branch that aborts has no value, so the other branch's type is
+             ;; the `if`'s. Two aborting branches make the `if` itself bottom.
+             (cond
+               (= then-type abort-bottom) else-type
+               (= else-type abort-bottom) then-type
+               (= then-type else-type) then-type
+               :else (reject! "if branches must have the same value type" form)))
         do (last (mapv #(infer-expression-type % locals signatures) args))
+        throw
+        (let [[value] args]
+          (when-not (= 1 (count args))
+            (reject! "throw requires exactly one error value" form :kotoba.error/abort-shape))
+          (let [error-type (infer-expression-type value locals signatures)]
+            (when (= error-type abort-bottom)
+              (reject! "throw of a value that itself always aborts" form :kotoba.error/abort-shape))
+            (when *abort-throw-types*
+              (vswap! *abort-throw-types* conj error-type))
+            abort-bottom))
+        try
+        (let [[body clause] args
+              [explicit binder handler] (try-clause-parts clause form)
+              thrown (volatile! [])
+              body-type (binding [*abort-throw-types* thrown]
+                          (infer-expression-type body locals signatures))
+              candidates (distinct (into @thrown (abort-callee-error-types body)))
+              type-text #(if (keyword? %) (name %) (pr-str %))
+              error-type (cond
+                           (some? explicit) explicit
+                           (> (count candidates) 1)
+                           (reject! (str "try body aborts with two different error types: "
+                                         (type-text (first candidates)) " and "
+                                         (type-text (second candidates)))
+                                    form :kotoba.error/abort-error-type)
+                           (= 1 (count candidates)) (first candidates)
+                           :else abort-unknown-error)
+              handler-type (infer-expression-type handler (assoc locals binder error-type) signatures)]
+          (cond
+            (= body-type abort-bottom) handler-type
+            (= handler-type abort-bottom) body-type
+            (same-expression-type? body-type handler-type) body-type
+            :else (reject! (str "try body and catch handler must have the same value type: "
+                                (type-text body-type) " and " (type-text handler-type))
+                           form :kotoba.error/abort-value-type)))
         typed-cap-call
         (let [[_ request-type result-type request] args]
           (validate-value-type! request-type)
@@ -7227,6 +7395,355 @@
                     fs)))]
     (-> functions pass pass)))
 
+
+;; ── Abort ability, slice 1 ──────────────────────────────────────────────────
+;;
+;; Contract: kotoba-lang `lang/abort-ability.edn`. The permanent invariant is
+;; that no control effect is UNTRACKED. `throw`/`try` are admitted because the
+;; abort they express is tracked twice over: `:abort` appears in the inferred
+;; effect row of every function that can leave its caller this way, and the
+;; function's interface is lowered to `[:result T E]` before any backend sees
+;; it. Post-elaboration there is no `throw`, no `try`, no unwinding -- only the
+;; result values and matches this frontend already lowers.
+;;
+;; What slice 1 does NOT do, each refused with a message that says so:
+;; a throw inside a loop/doseq/dotimes body, a lazy thunk or a fn literal
+;; (precondition :checked-lexical-facet-unwind); an aborting function at an
+;; export boundary; a throw or aborting call anywhere but tail position or a
+;; let binding value; a call to an aborting function from a scope that neither
+;; catches it nor aborts with the same error type.
+
+(defn- abort-form-mentions?
+  "Does FORM contain a `throw` or a `try` anywhere? The cheap syntactic test
+  every abort pass makes first, so a module without either takes exactly the
+  path it took before the ability existed."
+  [form]
+  (boolean (some #(and (seq? %) (contains? '#{throw try} (first %)))
+                 (tree-seq coll? seq form))))
+
+(defn- abort-escapes?
+  "Does FORM abort past its own boundary -- a `throw`, or a call to a function
+  in ABORT-ERROR-TYPES, with no try body in between? A try's handler counts:
+  what it throws leaves the try. Pass `{}` to ask about own throws only."
+  [form abort-error-types]
+  (cond
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (= op 'throw) true
+        (= op 'try) (abort-escapes? (last (second args)) abort-error-types)
+        (contains? abort-error-types op) true
+        :else (boolean (some #(abort-escapes? % abort-error-types) args))))
+    (coll? form) (boolean (some #(abort-escapes? % abort-error-types) form))
+    :else false))
+
+(defn- first-aborting-call
+  "The name of the first aborting function FORM calls, for a refusal."
+  [form abort-error-types]
+  (some (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
+        (tree-seq coll? seq form)))
+
+(defn- abort-type-text [type]
+  (if (keyword? type) (name type) (pr-str type)))
+
+(defn- abort-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result result}]))
+        functions))
+
+(defn- infer-abort-error-types
+  "Result inference and abort-error-type inference, together, to a fixed point.
+
+  A function's error type E is the type of its OWN escaping throws -- the ones
+  no try body between them and the function boundary catches. Calls to other
+  aborting functions never make a function aborting (slice 1: such a call is
+  admitted only under a try, or in a function that throws the same E itself).
+  The two inferences feed each other: a throw's operand may be a call whose
+  result is inferred, and a try's binder type is a callee's error type. So
+  each round infers absent results with the error types known so far, then
+  reads every function's escaping throw types with those results; the loop
+  ends when a round adds nothing.
+
+  Returns `{:functions fs :abort-error-types {name E}}`. A module with no
+  `throw`/`try` returns exactly `(infer-absent-results functions)` and `{}`."
+  [functions]
+  (if-not (some #(abort-form-mentions? (:body %)) functions)
+    {:functions (infer-absent-results functions) :abort-error-types {}}
+    (loop [known {} fs functions]
+      (let [fs (binding [*abort-error-types* known]
+                 (infer-absent-results fs))
+            sigs (abort-signatures fs)
+            next-known
+            (reduce
+             (fn [acc {:keys [name source-name params param-types body]}]
+               (if (or (contains? acc name) (not (abort-escapes? body {})))
+                 acc
+                 (let [thrown (volatile! [])
+                       inferred? (binding [*abort-error-types* known
+                                           *abort-throw-types* thrown]
+                                   (try (do (infer-expression-type body (zipmap params param-types) sigs)
+                                            true)
+                                        (catch #?(:clj Exception :cljs :default) _ false)))
+                       types (distinct @thrown)]
+                   (cond
+                     (not inferred?) acc
+                     (> (count types) 1)
+                     (reject! (str "function " (or source-name name)
+                                   " throws two different error types: "
+                                   (abort-type-text (first types)) " and "
+                                   (abort-type-text (second types)))
+                              name :kotoba.error/abort-error-type)
+                     (= 1 (count types)) (assoc acc name (first types))
+                     :else acc))))
+             known fs)]
+        (if (= next-known known)
+          {:functions fs :abort-error-types known}
+          (recur next-known fs))))))
+
+(defn- elaborate-aborts
+  "Lower every `throw`/`try` to result values, and every aborting function to
+  one that returns `[:result T E]`.
+
+  In a RESULT SCOPE R = `[:result T E]` (an aborting function's body, or a try
+  body), a tail expression is produced as an R value: `(throw e)` is
+  `(result-err-of R e)`, a plain value is `(result-ok-of R v)`, a call to an
+  aborting function with the same E is itself already an R value, and `if`,
+  `do` and `let` push the scope into their tail. A `let` whose binding value
+  aborts binds it through `result-match-of`: the ok arm continues, the err arm
+  re-raises into R. A `try` is one `result-match-of` over its body's R value,
+  ok arm the value, err arm the handler with the binder bound to E.
+
+  Anywhere else an aborting form is refused: in a scope that is not a result
+  scope with `call to aborting function ... must be inside try or in a
+  function that aborts with the same error type`; in a result scope but not
+  in tail or let-binding position, with the slice-1 position refusal.
+
+  Every sub-walk is forced (`mapv`, never `map`) inside the `binding` that
+  makes the error types visible: a lazy seq realized after it unwinds would
+  read `*abort-error-types*` as empty and call a catchable body uncatchable.
+
+  Types are read from the ORIGINAL forms with `infer-expression-type` (which
+  types `throw` as bottom and `try` as its join) against the pre-elaboration
+  signatures, never from lowered forms, so the two views never disagree."
+  [functions abort-error-types]
+  (if-not (or (seq abort-error-types)
+              (some #(abort-form-mentions? (:body %)) functions))
+    functions
+    (let [sigs (abort-signatures functions)]
+      (binding [*abort-error-types* abort-error-types
+                *synthetic-counter* (volatile! 0)]
+        (letfn [(type-of [form env] (infer-expression-type form env sigs))
+                (thrown-types [form env]
+                  (let [thrown (volatile! [])]
+                    (binding [*abort-throw-types* thrown] (type-of form env))
+                    @thrown))
+                (keep-meta [form result]
+                  (if (seq (meta form)) (with-meta result (meta form)) result))
+                (scope-error-type [scope] (nth scope 2))
+                (refuse-position! [form scope]
+                  (if scope
+                    (reject! (str "abort slice 1 admits throw and calls to aborting functions "
+                                  "only in tail position or as a let binding value; "
+                                  (if-let [callee (first-aborting-call form abort-error-types)]
+                                    (str "the call to `" callee "`")
+                                    "the throw")
+                                  " is in neither")
+                             form :kotoba.error/abort-position)
+                    (let [callee (first-aborting-call form abort-error-types)]
+                      (reject! (str "call to aborting function `" callee
+                                    "` must be inside try or in a function that aborts "
+                                    "with the same error type")
+                               form :kotoba.error/abort-unhandled-call))))
+                (lower-try [form env scope tail?]
+                  (let [[body clause] (rest form)
+                        [explicit binder handler] (try-clause-parts clause form)
+                        candidates (distinct (into (vec (thrown-types body env))
+                                                   (abort-callee-error-types body)))
+                        disagreeing (when (some? explicit)
+                                      (first (remove #(same-expression-type? % explicit) candidates)))
+                        error-type (cond
+                                     disagreeing
+                                     (reject! (str "try catches " (abort-type-text explicit)
+                                                   " but its body aborts with "
+                                                   (abort-type-text disagreeing))
+                                              form :kotoba.error/abort-error-type)
+                                     (some? explicit) explicit
+                                     (empty? candidates)
+                                     (reject! "try body cannot abort; there is nothing to catch"
+                                              form :kotoba.error/abort-nothing-to-catch)
+                                     (> (count candidates) 1)
+                                     (reject! (str "try body aborts with two different error types: "
+                                                   (abort-type-text (first candidates)) " and "
+                                                   (abort-type-text (second candidates)))
+                                              form :kotoba.error/abort-error-type)
+                                     :else (first candidates))
+                        value-type (type-of form env)
+                        _ (when (= value-type abort-bottom)
+                            (reject! "try body and catch handler both always abort; the try has no value"
+                                     form :kotoba.error/abort-value-type))
+                        try-scope [:result value-type error-type]
+                        body* (walk body env try-scope true)
+                        handler-env (assoc env binder error-type)
+                        ok (synthetic "abort_ok")]
+                    (keep-meta
+                     form
+                     (if (and tail? scope)
+                       (list 'result-match-of try-scope body*
+                             ok (list 'result-ok-of scope ok)
+                             binder (walk handler handler-env scope true))
+                       (list 'result-match-of try-scope body*
+                             ok ok
+                             binder (walk-plain handler handler-env scope))))))
+                (walk-plain [form env scope]
+                  ;; Value position: FORM must not abort past itself.
+                  (cond
+                    (not (seq? form)) form
+                    (abort-escapes? form abort-error-types) (refuse-position! form scope)
+                    (not (abort-form-mentions? form)) form
+                    :else
+                    (let [[op & args] form]
+                      (keep-meta
+                       form
+                       (case op
+                         try (lower-try form env scope false)
+                         let (let [bindings (first args) body (let-body args form)]
+                               (loop [pairs (partition 2 bindings) env env out []]
+                                 (if-let [[name value] (first pairs)]
+                                   (recur (rest pairs)
+                                          (assoc env name (type-of value env))
+                                          (conj out name (walk-plain value env scope)))
+                                   (list 'let out (walk-plain body env scope)))))
+                         result-match-of
+                         (let [[type value ok-name ok-body err-name err-body] args]
+                           (list 'result-match-of type (walk-plain value env scope)
+                                 ok-name (walk-plain ok-body (assoc env ok-name (second type)) scope)
+                                 err-name (walk-plain err-body (assoc env err-name (nth type 2)) scope)))
+                         option-match
+                         (let [[type value none-body some-name some-body] args]
+                           (list 'option-match type (walk-plain value env scope)
+                                 (walk-plain none-body env scope)
+                                 some-name (walk-plain some-body (assoc env some-name (second type)) scope)))
+                         variant-match
+                         (let [[type value branches] args
+                               cases (nth (canonical-closure-result-type type) 2)
+                               lowered (mapv (fn [[[_tag payload-type] [tag binder body :as branch]]]
+                                              (let [body* (walk-plain body (assoc env binder payload-type) scope)]
+                                                (if (vector? branch) [tag binder body*] (list tag binder body*))))
+                                            (mapv vector cases branches))]
+                           (list 'variant-match type (walk-plain value env scope)
+                                 (if (vector? branches) (vec lowered) (apply list lowered))))
+                         (cons op (mapv #(walk-plain % env scope) args)))))))
+                (walk [form env scope tail?]
+                  ;; Tail position of SCOPE (when both are given): produce an R value.
+                  (cond
+                    (not (and tail? scope)) (walk-plain form env scope)
+                    (not (abort-escapes? form abort-error-types))
+                    (list 'result-ok-of scope (walk-plain form env scope))
+                    :else
+                    (let [[op & args] form]
+                      (keep-meta
+                       form
+                       (case op
+                         throw
+                         (let [[value] args
+                               thrown-type (type-of value env)
+                               wanted (scope-error-type scope)]
+                           (when-not (same-expression-type? thrown-type wanted)
+                             (reject! (str "throw of " (abort-type-text thrown-type)
+                                           " inside a scope whose error type is "
+                                           (abort-type-text wanted))
+                                      form :kotoba.error/abort-error-type))
+                           (list 'result-err-of scope (walk-plain value env scope)))
+                         if
+                         (let [[test then else] (if-parts args form)]
+                           (list 'if (walk-plain test env scope)
+                                 (walk then env scope true)
+                                 (walk else env scope true)))
+                         do
+                         (list* 'do (concat (mapv #(walk-plain % env scope) (butlast args))
+                                            [(walk (last args) env scope true)]))
+                         let
+                         (let [bindings (first args) body (let-body args form)]
+                           ((fn continue [pairs env]
+                              (if-let [[name value] (first pairs)]
+                                (let [value-type (type-of value env)]
+                                  (if (abort-escapes? value abort-error-types)
+                                    (let [_ (when (= value-type abort-bottom)
+                                              (reject! "a let binding value that always aborts binds nothing"
+                                                       value :kotoba.error/abort-position))
+                                          value-scope [:result value-type (scope-error-type scope)]
+                                          err (synthetic "abort_err")]
+                                      (list 'result-match-of value-scope (walk value env value-scope true)
+                                            name (continue (rest pairs) (assoc env name value-type))
+                                            err (list 'result-err-of scope err)))
+                                    (list 'let [name (walk-plain value env scope)]
+                                          (continue (rest pairs) (assoc env name value-type)))))
+                                (walk body env scope true)))
+                            (partition 2 bindings) env))
+                         try (lower-try form env scope true)
+                         (if (contains? abort-error-types op)
+                           (let [callee-error (get abort-error-types op)
+                                 wanted (scope-error-type scope)]
+                             (when-not (same-expression-type? callee-error wanted)
+                               (reject! (str "call to aborting function `" op "` inside a scope "
+                                             "whose error type is " (abort-type-text wanted)
+                                             " but it aborts with " (abort-type-text callee-error))
+                                        form :kotoba.error/abort-error-type))
+                             (cons op (mapv #(walk-plain % env scope) args)))
+                           (refuse-position! form scope)))))))]
+          (mapv (fn [{:keys [name source-name params param-types result body] :as function}]
+                  (let [env (zipmap params param-types)
+                        error-type (get abort-error-types name)]
+                    (cond
+                      (some? error-type)
+                      (do (when (= result abort-bottom)
+                            (reject! (str "function " (or source-name name)
+                                          " always aborts; annotate the result type it would return")
+                                     name :kotoba.error/abort-result))
+                          (let [scope [:result result error-type]]
+                            (assoc function
+                                   :result scope
+                                   :abort-error-type error-type
+                                   :body (walk body env scope true))))
+                      ;; Escaping throws whose type never resolved: run the
+                      ;; inference uncaught so the real refusal is the one seen.
+                      (abort-escapes? body {})
+                      (do (type-of body env)
+                          (reject! (str "function " (or source-name name)
+                                        " throws but its error type could not be inferred")
+                                   name :kotoba.error/abort-error-type))
+                      (or (abort-escapes? body abort-error-types)
+                          (abort-form-mentions? body))
+                      (cond-> (assoc function :body (walk body env nil true))
+                        (abort-form-mentions? body) (assoc :abort-catches? true))
+                      :else function)))
+                functions))))))
+
+(def ^:private dataspace-capability-ids
+  "The wire IDs of every `:dataspace/*` capability -- the facet operations
+  whose unwind the abort ability has no checked form for yet."
+  (into #{} (keep (fn [[name id]] (when (= "dataspace" (namespace name)) id)))
+        capability-registry))
+
+(defn- check-abort-facet-unwind!
+  "Precondition :checked-lexical-facet-unwind, refused where it would be
+  needed: a function that throws, or catches, while its inferred effect row
+  carries a dataspace facet operation. An abort leaving such a scope would
+  skip the `facet-leave!` obligation, and slice 1 has no unwind that runs it.
+  The row is the interprocedural one, so a facet operation in a callee counts."
+  [functions function-effects]
+  (doseq [{:keys [name source-name abort-error-type abort-catches?]} functions
+          :when (or abort-error-type abort-catches?)]
+    (let [row (get function-effects name #{})
+          facet-effects (filter #(and (vector? %) (contains? dataspace-capability-ids (second %))) row)]
+      (when (seq facet-effects)
+        (reject! (str (if abort-error-type "throw" "try") " in function " (or source-name name)
+                      " whose effect row has a dataspace facet operation "
+                      (pr-str (into #{} (map #(get capability-id->name (second %))) facet-effects))
+                      " is not admitted in abort slice 1: precondition "
+                      ":checked-lexical-facet-unwind is not met")
+                 name :kotoba.error/abort-precondition)))))
+
 (defn- closure-dispatcher-function?
   "The synthetic entry points whose first physical i64 word is a closure pair."
   [function-name]
@@ -8050,15 +8567,24 @@
       (walk form)
       {:effects @effects :calls @calls})))
 
-(defn- infer-effects [functions]
+(defn- infer-effects
+  "Every function's effect row. Capability effects propagate through calls:
+  what a callee exercises, its caller exercises. `:abort` does not -- it is
+  the mark of a function that ITSELF aborts (`elaborate-aborts` put
+  `:abort-error-type` on it), and a caller either catches that with `try`
+  (no `:abort`) or aborts with the same error type in its own right (`:abort`
+  from its own mark). A call is never what puts `:abort` on a row."
+  [functions]
   (let [names (set (map :name functions))
-        direct (into {} (map (fn [{:keys [name body]}]
-                               [name (direct-facts body names)])) functions)]
+        direct (into {} (map (fn [{:keys [name body abort-error-type]}]
+                               [name (cond-> (direct-facts body names)
+                                       abort-error-type (update :effects conj :abort))]))
+                     functions)]
     (loop [inferred (into {} (map (fn [[name facts]] [name (:effects facts)]) direct))]
       (let [next-effects
             (into {} (map (fn [[name {direct-effects :effects calls :calls}]]
                             [name (reduce set/union direct-effects
-                                          (map #(get inferred % #{}) calls))])
+                                          (map #(disj (get inferred % #{}) :abort) calls))])
                           direct))]
         (if (= inferred next-effects) inferred (recur next-effects))))))
 
@@ -8491,6 +9017,17 @@
                                     [bindings' bound'] (substitute-bindings op bindings constants bound)]
                                 (list* op bindings'
                                        (map #(substitute-constants % constants bound') body)))
+                   ;; The catch binder shadows a constant of the same name in
+                   ;; the handler, exactly as a let binding would.
+                   try (let [[body clause] args]
+                         (if (and (seq? clause) (= 'catch (first clause))
+                                  (symbol? (last (butlast clause))))
+                           (let [binder (last (butlast clause))
+                                 handler (last clause)]
+                             (list 'try (substitute-constants body constants bound)
+                                   (concat (butlast clause)
+                                           [(substitute-constants handler constants (conj bound binder))])))
+                           (list* op (map #(substitute-constants % constants bound) args))))
                    (list* op (map #(substitute-constants % constants bound) args)))]
       (if (seq (meta form)) (with-meta result (meta form)) result))
     (vector? form) (mapv #(substitute-constants % constants bound) form)
@@ -9725,7 +10262,15 @@
         ;; inference — elaborate-named-abilities does, and its record-get case
         ;; destructures [type value field], so a 2-arity form reaching it puts
         ;; the value symbol in the type slot and `(nth type 2)` throws.
-        parsed (infer-absent-results parsed)
+        ;;
+        ;; Abort ability, slice 1: result inference and abort-error-type
+        ;; inference feed each other (a throw's operand may be a call; a try's
+        ;; binder type is a callee's error type), so they run together to a
+        ;; fixed point. A module with no `throw`/`try` takes the unchanged
+        ;; single `infer-absent-results` path.
+        {parsed :functions abort-error-types :abort-error-types}
+        (infer-abort-error-types parsed)
+        parsed (elaborate-aborts parsed abort-error-types)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
         ;; `option-or` intentionally survives syntactic desugaring until the
@@ -9770,6 +10315,13 @@
       (reject! "main must take zero arguments" 'main))
     (when (and entry (not (some #{entry} exports)))
       (reject! "main entrypoint must be exported" exports))
+    ;; Abort ability, slice 1: an aborting function's interface is
+    ;; `[:result T E]`, which the wire ABI does not carry across an export
+    ;; boundary yet. It stays inside the module until a caller catches it.
+    (doseq [name (cond-> (vec exports) entry (conj entry))
+            :when (contains? abort-error-types name)]
+      (reject! (str "unhandled abort at export boundary; catch it with try: " name)
+               name :kotoba.error/abort-unhandled-export))
     (check-namespace-capabilities! (:capabilities namespace-info)
                                    used-capability-names)
     (let [declared (set (keys (:schemas namespace-info)))
@@ -9855,6 +10407,7 @@
                                            (tree-seq coll? seq body))))
                                parsed)))
           function-effects (infer-effects parsed)
+          _ (check-abort-facet-unwind! parsed function-effects)
           _ (doseq [{:keys [name lazy-thunk?]} parsed
                     :when (and lazy-thunk? (seq (get function-effects name)))]
               (reject! "lazy sequence thunks must be effect-free because forcing is non-memoized"
@@ -9865,8 +10418,10 @@
                       excess (set/difference inferred effects-ceiling)]
                   (when (seq excess)
                     (let [ops (into #{}
-                                    (keep (fn [[_tag id]]
-                                            (get capability-id->name id)))
+                                    (keep (fn [effect]
+                                            (if (vector? effect)
+                                              (get capability-id->name (second effect))
+                                              effect)))
                                     excess)
                           span (or (get (meta body) :span) (form-span body))]
                       (throw (ex-info
@@ -9888,7 +10443,7 @@
                               ;; A frontend-internal mark: which parameters were
                               ;; written without a type. HIR has a closed key
                               ;; set and this is not one of its keys.
-                              true (dissoc :param-types-inferred)
+                              true (dissoc :param-types-inferred :abort-error-type :abort-catches?)
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
           main-result (some->> parsed (some #(when (= 'main (:name %)) (:result %))))
