@@ -281,7 +281,44 @@
     kernel-out-u8 2 kernel-out-u32 2
     kernel-in-u8 1 kernel-in-u32 1
     kernel-read-msr 1 kernel-write-msr 2
-    kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2})
+    kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2
+    ;; boot: the UEFI firmware boundary (kotoba-kir ADR-0229, kotoba-gmir
+    ;; ADR-0008). A BOOTX64.EFI written in Kotoba needs to name four things
+    ;; this family could not.
+    ;;
+    ;; `(kernel-system-table)` -> the EFI_SYSTEM_TABLE* UEFI passed the image
+    ;; entry point. Zero-arity, and the twin of `kernel-boot-info`: the entry
+    ;; shim parks RCX at context+0x50 and RDX at +0x58, and the two operations
+    ;; read those two slots. Under the UEFI entry contract v2 that makes
+    ;; `kernel-boot-info` the ImageHandle -- the same instruction, a meaning
+    ;; the target profile fixes.
+    ;;
+    ;; `(kernel-load-ptr base byte-offset)` -> the 64-bit word there. UNCHECKED,
+    ;; unlike every `kernel-load-*` above, and that is the decision rather than
+    ;; an omission: the checked family takes a window LENGTH from the guest,
+    ;; and a guest has no length for EFI_SYSTEM_TABLE or for a protocol
+    ;; structure hanging off it. The firmware owns both. A declared length
+    ;; would be invented, and a bounds check against an invented length is
+    ;; worse than none because it reads as a guarantee. This reads the boundary
+    ;; the way `kernel-in-u8` reads a device; everything past the boundary uses
+    ;; the checked family.
+    ;;
+    ;; `(kernel-uefi-call2 base slot-offset a b)` -> the status returned by the
+    ;; Microsoft x64 function pointer at `[base+slot-offset]`, called with `a`
+    ;; and `b`. FOUR operands and exactly two UEFI arguments, because the
+    ;; register allocator hands a privileged operation the scratch tier and
+    ;; that tier is four registers wide. Two arguments is what a bootloader's
+    ;; first calls need -- the ConOut methods, ExitBootServices. GetMemoryMap's
+    ;; five and OpenProtocol's six need an argument channel that does not fit
+    ;; in registers at all, which is a separate decision, not a wider version
+    ;; of this one.
+    ;;
+    ;; `(kernel-jump-to address boot-info)` does not return. It enters a kernel
+    ;; with the SysV first argument set -- the handoff the UEFI loader
+    ;; hand-assembles today. Its declared result is i64 because every operation
+    ;; here has one; nothing ever reads it.
+    kernel-system-table 0 kernel-load-ptr 2
+    kernel-uefi-call2 4 kernel-jump-to 2})
 (def list-operations '#{list cons first second rest empty?})
 (def predicate-operations '#{not zero? pos? neg?})
 ;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
