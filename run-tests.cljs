@@ -15,6 +15,8 @@
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
             [kotoba.compiler.case-uniqueness-test]
+            ;; boot-scratch: the writable region and a function's address
+            [kotoba.compiler.boot-scratch-test]
             [kotoba.compiler.host-nesting-test]
             ;; a `let` body is an implicit `do`; the value is the last form
             [kotoba.compiler.let-body-test]
@@ -40,6 +42,7 @@
 
 (t/run-tests 'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
+             'kotoba.compiler.boot-scratch-test
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.let-body-test
              'kotoba.compiler.kernel-xgetbv-test
