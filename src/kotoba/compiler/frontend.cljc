@@ -199,6 +199,41 @@
     ;; the arena's design is one u32 lock word at offset 0 of an RW/NX page,
     ;; with everything else mutated only while it is held. amu#625.
     kernel-try-lock-u32 3 kernel-unlock-u32 3
+    ;; sysops: the general atomics (kotoba-gmir ADR 0007). Everything the long
+    ;; note above says about a LOCK stands -- and it is precisely why the
+    ;; general form is now here beside it rather than instead of it.
+    ;;
+    ;; That note recorded a measurement: across the five aiueos value-runtime
+    ;; objects, all eleven call sites were the same binary try-lock at offset
+    ;; zero, so a general compare-exchange would have widened the surface to
+    ;; cover no observed use. The measurement was right and it was about the
+    ;; value runtime. A NIC's descriptor ring is a different program, and it
+    ;; has exactly the uses that measurement did not find: a producer index the
+    ;; guest advances by its own delta, an ownership word it swaps for its own
+    ;; value, a doorbell claimed against its own comparand. Fixing the
+    ;; comparand and the replacement makes those inexpressible.
+    ;;
+    ;; The two costs the note names are paid where it said they would be, and
+    ;; in the backend rather than here: x86-64 saves and restores RAX around a
+    ;; fixed sequence (`kotoba.native.machine-ir`), and the AArch64 retry stays
+    ;; inside one selection rather than becoming guest control flow.
+    ;;
+    ;;   (kernel-atomic-add-u32 base length index delta)     -> the old word
+    ;;   (kernel-xchg-u32       base length index new)       -> the old word
+    ;;   (kernel-cmpxchg-u32    base length index want new)  -> the old word
+    ;;
+    ;; and the u64 spelling of each. All six answer with the word memory held
+    ;; BEFORE the operation, which is what the machine leaves in the
+    ;; destination register; a compare-exchange answering with a success flag
+    ;; would force the caller to re-read on failure, which is the race it
+    ;; exists to close.
+    ;;
+    ;; Bounds-checked exactly like the loads and stores -- same `base length
+    ;; index` prefix, same taint analysis on `base`, and a tail requirement of
+    ;; the operation's own width.
+    kernel-atomic-add-u32 4 kernel-atomic-add-u64 4
+    kernel-xchg-u32 4 kernel-xchg-u64 4
+    kernel-cmpxchg-u32 5 kernel-cmpxchg-u64 5
     ;; (kernel-subregion base length offset sublen) -> base+offset, trapping
     ;; unless offset+sublen fits inside length. Listed here so its first
     ;; argument is checked as a base like every other kernel op's: a derived
@@ -281,7 +316,27 @@
     kernel-out-u8 2 kernel-out-u32 2
     kernel-in-u8 1 kernel-in-u32 1
     kernel-read-msr 1 kernel-write-msr 2
-    kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2})
+    kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2
+    ;; sysops: barriers, the timestamp counter and the GS-base swap
+    ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
+    ;;
+    ;; `(kernel-fence-store)` before a doorbell write and
+    ;; `(kernel-fence-load)` after a status read are the ordering half of a
+    ;; device driver: a descriptor written before a doorbell is rung only if
+    ;; something says so, and on x86 that something is `sfence`/`lfence`.
+    ;; `(kernel-fence-full)` is the two-way barrier.
+    ;;
+    ;; `(kernel-rdtsc)` and `(kernel-rdtscp)` answer with the 64-bit timestamp
+    ;; counter. `(kernel-swapgs)` exchanges GS.base with KERNEL_GS_BASE and
+    ;; answers 0 -- the one instruction a ring-0 entry path cannot express any
+    ;; other way.
+    ;;
+    ;; They are privileged rather than memory operations because none of them
+    ;; names a region: there is no base, no length and no index to bound, so
+    ;; the region-provenance rule below has nothing to say about them.
+    kernel-fence-load 0 kernel-fence-store 0 kernel-fence-full 0
+    kernel-rdtsc 0 kernel-rdtscp 0
+    kernel-swapgs 0})
 (def list-operations '#{list cons first second rest empty?})
 (def predicate-operations '#{not zero? pos? neg?})
 ;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
