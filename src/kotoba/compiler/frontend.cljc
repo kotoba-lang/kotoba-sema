@@ -458,6 +458,21 @@
     ;; here has one; nothing ever reads it.
     kernel-system-table 0 kernel-load-ptr 2
     kernel-uefi-call2 4 kernel-jump-to 2
+    ;; boot-lit: the two wider firmware calls (kotoba-gmir ADR-0011). The
+    ;; paragraph above says GetMemoryMap's five and OpenProtocol's six "need an
+    ;; argument channel that does not fit in registers at all". That was wrong
+    ;; about WHICH registers: kotoba-mir now draws privileged operands from the
+    ;; scratch tier FOLLOWED BY the preserved tier, and the preserved tier is
+    ;; callee-saved under Microsoft x64 as well as under the internal ABI -- so
+    ;; an operand parked there survives the call it is an operand to.
+    ;;
+    ;;   (kernel-uefi-call4 base slot a b c d)      -> four UEFI arguments
+    ;;   (kernel-uefi-call6 base slot a b c d e f)  -> six
+    ;;
+    ;; Two heads rather than one six-argument head used for everything: a call
+    ;; site with four arguments would have to invent two, and "the callee
+    ;; ignores the extra words" is a fact about the CALLEE.
+    kernel-uefi-call4 6 kernel-uefi-call6 8
     ;; sysops: barriers, the timestamp counter and the GS-base swap
     ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
     ;;
@@ -532,6 +547,85 @@
       (let [vector (#?(:clj Long/parseLong :cljs js/parseInt)
                     (subs text (count interrupt-entry-prefix)))]
         (when (< vector interrupt-entry-vector-limit) vector)))))
+;; boot-lit: read-only literals (kotoba-gmir ADR-0011).
+;;
+;; Each takes ONE argument and that argument must be a STRING LITERAL, which is
+;; what makes this its own family rather than four more entries in the
+;; privileged map above. Every operation there takes i64 EXPRESSIONS; these
+;; take a piece of the source text, and the compiler places bytes for it in the
+;; image.
+;;
+;;   (ucs2 "AIUEOS")     -> address of UCS-2 code units, little endian, NUL
+;;                          terminated. What UEFI calls a `CHAR16 *`.
+;;   (guid "5B1B31A1-9562-11D2-8E3F-00A0C969723B")
+;;                       -> address of the 16-byte EFI_GUID. The first three
+;;                          fields are little-endian INTEGERS, which is why a
+;;                          hex decode of the canonical text is the wrong
+;;                          answer and why the shape is checked here.
+;;   (bytes-literal "48656c6c6f")        -> address of those five bytes
+;;   (bytes-literal-length "48656c6c6f") -> 5
+;;
+;; The last pair is two heads over the SAME literal text rather than one head
+;; returning a pair, because this language has no multi-value return and the
+;; value runtime's `pair` does not exist on a firmware target. Deriving both
+;; from one string is what keeps them together: there is no way to take the
+;; address of one literal and the length of another without writing two
+;; different strings, which a reader sees.
+;;
+;; All four are admitted target-independently here, exactly as
+;; `kernel-write-cr3` is. The target gate lives in amu, which is the only layer
+;; that sees a target keyword next to a module.
+(def rodata-literal-operations
+  '{ucs2 1 guid 1 bytes-literal 1 bytes-literal-length 1})
+
+(def rodata-literal-encodings
+  "Which `kotoba.gmir` encoding each head names. `bytes-literal-length` is
+  absent: it produces a count, not an address, and no pool entry."
+  '{ucs2 :utf-16le-nul guid :guid-mixed-endian bytes-literal :hex-bytes})
+
+(defn- hex-text? [text]
+  (and (even? (count text))
+       (every? (fn [character]
+                 (let [code #?(:clj (int character)
+                               :cljs (.charCodeAt character 0))]
+                   (or (<= 48 code 57) (<= 97 code 102) (<= 65 code 70))))
+               text)))
+
+(defn rodata-literal-content?
+  "True when TEXT is a well-formed literal for OP.
+
+  This duplicates `kotoba.gmir/rodata-content?` on purpose and is not allowed
+  to disagree with it -- the suite compares the two on the same corpus. It
+  exists because the refusals differ in KIND: this one names a source form and
+  a line, and the one in kotoba-gmir names an instruction. A malformed GUID has
+  no failure mode downstream (sixteen bytes get placed either way and the
+  firmware answers EFI_UNSUPPORTED, which is what a machine without that
+  protocol answers), so the shape has to be refused, and it should be refused
+  where the author can see what they wrote."
+  [op text]
+  (and (string? text)
+       (case op
+         ;; UCS-2, so a surrogate is refused rather than encoded: emitting the
+         ;; pair renders as two replacement glyphs, a wrong answer that looks
+         ;; like a working one.
+         ucs2 (not-any? (fn [character]
+                          (let [code #?(:clj (int character)
+                                        :cljs (.charCodeAt character 0))]
+                            (<= 0xd800 code 0xdfff)))
+                        text)
+         guid (let [fields (reduce (fn [out character]
+                                     (if (= \- character)
+                                       (conj out "")
+                                       (conj (pop out) (str (peek out) character))))
+                                   [""]
+                                   text)]
+                (and (= 5 (count fields))
+                     (= [8 4 4 4 12] (mapv count fields))
+                     (every? hex-text? fields)))
+         (bytes-literal bytes-literal-length) (hex-text? text)
+         false)))
+;; boot-lit: end
+
 (def list-operations '#{list cons first second rest empty?})
 (def predicate-operations '#{not zero? pos? neg?})
 ;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
@@ -713,6 +807,11 @@
              (set (keys kgraph-operations))
              (set (keys kernel-memory-operations))
              (set (keys kernel-privileged-operations))
+             ;; boot-lit: a function named `guid` would shadow the literal
+             ;; head, and the shadowing would be silent -- `(guid "...")` would
+             ;; become a call with a string argument to a function whose
+             ;; parameter is declared i64.
+             (set (keys rodata-literal-operations))
              list-operations predicate-operations logical-operations map-operations typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
@@ -5091,6 +5190,20 @@
               (reject! "kernel privileged operation arity mismatch" form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
+        ;; boot-lit: the argument is a piece of the SOURCE, not an expression,
+        ;; and the args are deliberately not walked. `(ucs2 s)` for a
+        ;; parameter `s` has no answer -- there is no runtime here that could
+        ;; place bytes for a string that does not exist until the program
+        ;; runs -- so it is refused at the source rather than lowered into
+        ;; something the backend has to refuse with a shape error.
+        (contains? rodata-literal-operations op)
+        (do (when-not (= (get rodata-literal-operations op) (count args))
+              (reject! "rodata literal arity mismatch" form))
+            (when-not (string? (first args))
+              (reject! "rodata literal requires a string literal" form))
+            (when-not (rodata-literal-content? op (first args))
+              (reject! "rodata literal is malformed for its encoding" form)))
+
         (contains? functions op)
         (let [expected (count (get functions op))]
           (when-not (= expected (count args))
@@ -5421,6 +5534,15 @@
           (contains? kernel-privileged-operations op))
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :i64 arg))
+          :i64)
+
+      ;; boot-lit: the argument is a `:string` and the result is an address or
+      ;; a count, which are both i64. This clause has to sit BEFORE the
+      ;; privileged one would have matched -- it does, because these heads are
+      ;; not in that map -- and it requires `:string` rather than `:i64`, which
+      ;; is the whole reason they are a separate family.
+      (contains? rodata-literal-operations op)
+      (do (require-expression-type! (first types) :string (first args))
           :i64)
 
       (= op 'cap-call)
