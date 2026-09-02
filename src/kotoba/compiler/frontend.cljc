@@ -779,6 +779,15 @@
 ;; keyword key until the bounded typed-map ABI is implemented.
 (def logical-operations '#{and or when})
 (def map-operations '#{get assoc})
+;; `contains?` and `dissoc` are declared admitted heads by the language
+;; authority (`lang/guest-grammar.edn`: "bounded set membership scan",
+;; "persistent bounded map filter") and had no implementation here at all --
+;; `(contains? m k)` reached validation as an unknown call and was refused
+;; with `operation has no admitted lowering`, which says nothing about maps.
+;; They are RESERVED as well as implemented: a `(defn contains? ...)` would
+;; otherwise be shadowed silently, because the rewrite dispatches on the head
+;; name before signatures are consulted.
+(def map-presence-operations '#{contains? dissoc})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
@@ -1001,7 +1010,8 @@
              ;; call with a symbol argument to a function whose parameter is
              ;; declared i64.
              (set (keys image-symbol-operations))
-             list-operations predicate-operations logical-operations map-operations typed-map-operations
+             list-operations predicate-operations logical-operations map-operations
+             map-presence-operations typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
              variant-operations
@@ -1226,8 +1236,23 @@
          (validate-value-type! (second type) (inc depth) nodes)
          type)
      (canonical-typed-map-type? type)
-     (do (when (some #{:f32 :f64} [(second type) (nth type 2)])
-           (reject! "direct floating map keys or values are outside the structured scalar ABI" type :kotoba.error/floating-map-kv))
+     ;; Said as two refusals because they are two different facts. A floating
+     ;; VALUE is outside the structured scalar ABI; a floating KEY additionally
+     ;; has no identity to be a key BY -- NaN compares unequal to itself, and
+     ;; +0.0 and -0.0 are equal while differing in bits, so neither the total
+     ;; order the entry chain is kept in nor duplicate-key detection is
+     ;; decidable. One message covering both told the reader neither.
+     (do (when (contains? #{:f32 :f64} (second type))
+           (reject! (str "map key type " (second type) " has no portable key "
+                         "identity: NaN compares unequal to itself, and +0.0 "
+                         "and -0.0 are equal while differing in bits, so "
+                         "neither the entry order nor duplicate-key detection "
+                         "is decidable")
+                    type :kotoba.error/floating-map-kv))
+         (when (contains? #{:f32 :f64} (nth type 2))
+           (reject! (str "map value type " (nth type 2)
+                         " is outside the structured scalar ABI")
+                    type :kotoba.error/floating-map-kv))
          (validate-value-type! (second type) (inc depth) nodes)
          (validate-value-type! (nth type 2) (inc depth) nodes)
          type)
@@ -2522,10 +2547,22 @@
 
                         (apply list op (map #(walk-form % env) args))))
                     (vector? form) (mapv #(walk-form % env) form)
-                    (map? form) (into {} (map (fn [[k v]]
-                                                [(walk-form k env)
-                                                 (walk-form v env)]))
-                                      form)
+                    ;; `(into {} …)` here was two defects at once, and both
+                    ;; only appear on `:cljs`. `{}` is a PersistentArrayMap
+                    ;; that promotes to a hashed map above EIGHT entries, and
+                    ;; a `.kotoba` integer literal is a JS bigint, which
+                    ;; ClojureScript cannot hash -- so a nine-entry
+                    ;; integer-keyed map literal died here, before desugaring
+                    ;; could say anything about it, with `Cannot create
+                    ;; property 'closure_uid_…' on bigint '0'`. It also
+                    ;; discarded the comparator `kotoba-reader/reader-map`
+                    ;; installs for exactly that reason. Rebuilding from
+                    ;; `(empty form)` keeps both: no key is hashed, and the
+                    ;; reader's sorted map stays sorted.
+                    (map? form) (reduce-kv (fn [out k v]
+                                             (assoc out (walk-form k env)
+                                                    (walk-form v env)))
+                                           (empty form) form)
                     (set? form) (set (map #(walk-form % env) form))
                     :else form)]
               (if (and (seq (meta form))
@@ -2951,18 +2988,120 @@
             (list 'let [tmp (desugar-expr (first args))]
                   (desugar-do (rest args))))))
 
+(defn- integer-literal-compare
+  "Numeric order over `.kotoba` integer literals on BOTH runtimes.
+
+  `compare` cannot do this on `:cljs`: a literal read from `.kotoba` source is
+  a JS bigint, which is neither `number?` nor `IComparable`, so
+  `cljs.core/compare` throws rather than ordering it. `<` and `>` are JS
+  operators and do work on bigint (`kotoba.kir.cljs-i64` already relies on
+  that), so the order is spelled with those."
+  [left right]
+  #?(:clj (compare left right)
+     :cljs (let [left (i64/->bigint left) right (i64/->bigint right)]
+             (cond (< left right) -1 (> left right) 1 :else 0))))
+
+(defn- f64-literal-key?
+  "A floating literal in either of its two read forms: a host double on `:clj`,
+  and the JVM-free reader's exact-bits `(f64-from-bits <i64>)` on `:cljs`."
+  [form]
+  (or (value/f64-value? form)
+      (and (seq? form)
+           (true? (:kotoba.reader/f64-literal (meta form))))))
+
+(def ^:private map-literal-key-types
+  "The key types a BARE map literal may carry, and the value type each of them
+  gets. A literal has no annotation, so both halves have to be read off the
+  source: the key type from the key literals, and the value type from nowhere
+  at all -- the values are arbitrary expressions whose types are not known
+  until inference, which runs after this. `:i64` is what the keyword-keyed
+  literal has always meant by a value, so that is what the other key types
+  mean by one too. A literal wanting any other value type is written with
+  `typed-map-new`, which says both halves."
+  {:keyword :i64 :i64 :i64 :string :i64})
+
+(defn- map-literal-key-kind [key]
+  (cond (keyword? key) :keyword
+        (kotoba-integer? key) :i64
+        (string? key) :string
+        :else nil))
+
+(defn- map-literal-key-order [kind]
+  (case kind
+    :keyword (fn [left right] (compare (str left) (str right)))
+    :string compare
+    :i64 integer-literal-compare))
+
+(defn- map-literal-key-description
+  "What a refused key IS, said in source terms. `(pr-str key)` alone would
+  print `1.5` for a JVM double and `(f64-from-bits …)` for the same literal
+  read JVM-free, so the KIND is named rather than the value shown."
+  [key]
+  (cond (f64-literal-key? key) "floating point"
+        (boolean? key) "boolean"
+        (seq? key) "expression"
+        (symbol? key) "symbol"
+        (vector? key) "vector"
+        (map? key) "map"
+        (set? key) "set"
+        (nil? key) "nil"
+        :else "unrecognized"))
+
 (defn- desugar-map
-  "Lower a bounded literal into the owned typed-map KIR operation. Keys are
-  canonical keywords only; values are checked i64 expressions. Sorting by
-  canonical keyword text makes KIR reproducible without hashing identity."
+  "Lower a bounded literal into an owned map KIR operation.
+
+  KEYWORD keys keep the legacy untagged pair-map (`map-new`) they have always
+  had, byte for byte -- that is the representation `map-get` / `map-assoc` and
+  every `match` map pattern are written against.
+
+  `:i64` and `:string` keys lower to the canonical typed map instead. Until
+  2026-09-02 they were refused here (`map keys must be bounded keywords`) and
+  `kotoba-lang`'s stdlib recorded `frequencies` and `get-in` as unwritable for
+  exactly that reason, even though `typed-map-new` had been generic in its key
+  type the whole time -- the refusal was in the LITERAL, not in the map.
+
+  Entries are emitted in the key type's total order (`compare-typed-values` in
+  `kotoba.kir.value` is the same order the runtime keeps the entry chain in),
+  so the KIR is reproducible without hashing identity. A key kind with no
+  portable identity is refused BY NAME rather than falling through a generic
+  arm, because `1.5` and `:a` fail here for entirely different reasons."
   [form]
   (when (> (count form) max-list-items)
     (reject! "map entry count exceeds admission limit" form))
-  (when-not (every? keyword? (keys form))
-    (reject! "map keys must be bounded keywords" form))
-  (apply list 'map-new
-         (mapcat (fn [[k v]] [k (desugar-expr v)])
-                 (sort-by (comp str key) form))))
+  (let [kinds (into #{} (map map-literal-key-kind) (keys form))]
+    (cond
+      (contains? kinds nil)
+      (let [offender (first (remove map-literal-key-kind (keys form)))]
+        (if (f64-literal-key? offender)
+          (reject! (str "map literal keys must be keywords, integers or strings; "
+                        "this literal has a floating point key, which has no "
+                        "portable key identity -- NaN compares unequal to "
+                        "itself, and +0.0 and -0.0 are equal while differing "
+                        "in bits, so neither the entry order nor duplicate-key "
+                        "detection is decidable")
+                   form :kotoba.error/map-literal-key)
+          (reject! (str "map literal keys must be keywords, integers or strings; "
+                        "this literal has a key of kind: "
+                        (map-literal-key-description offender))
+                   form :kotoba.error/map-literal-key)))
+
+      (> (count kinds) 1)
+      (reject! (str "map literal keys must all be one kind; this literal mixes "
+                    (str/join " and " (sort (map name kinds))))
+               form :kotoba.error/map-literal-key)
+
+      :else
+      (let [kind (or (first kinds) :keyword)
+            item-type (get map-literal-key-types kind)
+            entries (sort-by key (map-literal-key-order kind) form)
+            pairs (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)]
+        (if (= :keyword kind)
+          (apply list 'map-new pairs)
+          (do (when (> (count form) max-typed-map-entries)
+                (reject! (str "map literal with " (name kind)
+                              " keys exceeds the typed map entry limit")
+                         form :kotoba.error/map-literal-key))
+              (apply list 'typed-map-new [:map kind item-type] pairs)))))))
 
 (defn- document-reader-f64-form?
   "The JVM reader represents an f64 literal as a Double. The JVM-free reader
@@ -4316,6 +4455,16 @@
                     (apply list 'map-assoc (desugar-expr m)
                            (mapcat (fn [[k v]] [(desugar-expr k) (desugar-expr v)])
                                    (partition 2 kvs)))))
+        ;; Kept on the authored head for the same reason `get` is: which
+        ;; primitive answers depends on the receiver's type, which is not
+        ;; known until `rewrite-record-projection` runs. Arity is checked
+        ;; here, where the authored form is still in hand.
+        contains? (do (when-not (= 2 (count args))
+                        (reject! "contains? requires a map and one key" form))
+                      (list* 'contains? (mapv desugar-expr args)))
+        dissoc (do (when-not (>= (count args) 2)
+                     (reject! "dissoc requires a map and at least one key" form))
+                   (list* 'dissoc (mapv desugar-expr args)))
         some (do (when-not (= 1 (count args)) (reject! "some requires one i64 operand" form))
                  (list 'option-some (desugar-expr (first args))))
         some? (do (when-not (= 1 (count args)) (reject! "some? requires one option operand" form))
@@ -7969,6 +8118,90 @@
             :else
             (list 'map-get value key
                   (if (= 3 (count rewritten-args)) default 0))))
+
+        ;; `assoc` / `contains?` / `dissoc` on a canonical typed map.
+        ;;
+        ;; `get` has selected `typed-map-get` from the receiver's type since
+        ;; the typed map landed; the other three had not been written, so a
+        ;; `[:map K V]` could be READ through the friendly surface and not
+        ;; written, and `(assoc m :a 1)` on one was refused with `expected
+        ;; map, got [:map :keyword :i64]` -- for every key type, keyword
+        ;; included. These three arms are that half.
+        (= op 'map-assoc)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              [receiver & pairs] rewritten-args
+              value-type (try (infer-expression-type receiver locals signatures)
+                              (catch #?(:clj Exception :cljs :default) _ nil))
+              ;; An EMPTY map literal carries no key type of its own: `{}`
+              ;; desugars to `(map-new)`, whose type is the legacy `:map`
+              ;; whatever the program goes on to put in it. `(assoc {} 1 10)`
+              ;; -- the shape the defect was reported as -- therefore has to
+              ;; take its key type from the first key. Only the two key types
+              ;; a literal may carry are retyped, so a keyword-keyed `(assoc
+              ;; {} :a 1)` still lowers to the legacy map it always did.
+              retyped-key (when (and (= :map value-type)
+                                     (= '(map-new) receiver)
+                                     (seq pairs))
+                            (let [key-type
+                                  (try (infer-expression-type (first pairs)
+                                                              locals signatures)
+                                       (catch #?(:clj Exception :cljs :default) _ nil))]
+                              (when (contains? #{:i64 :string} key-type) key-type)))
+              descriptor (cond
+                           (canonical-typed-map-type? value-type) value-type
+                           retyped-key [:map retyped-key
+                                        (get map-literal-key-types retyped-key)]
+                           :else nil)]
+          (if descriptor
+            (reduce (fn [accumulated [key item]]
+                      (list 'typed-map-assoc descriptor accumulated key item))
+                    (if (canonical-typed-map-type? value-type)
+                      receiver
+                      (list 'typed-map-new descriptor))
+                    (partition 2 pairs))
+            (cons 'map-assoc rewritten-args)))
+
+        (= op 'contains?)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              [receiver key] rewritten-args
+              ;; Unlike `get`, this arm REFUSES when the receiver is not a
+              ;; typed map, so swallowing the receiver's own refusal would
+              ;; replace a precise message (`map key type :f64 has no portable
+              ;; key identity …`) with `got nil`. The exception is carried out
+              ;; of the `try` and rethrown instead.
+              inferred (try {:type (infer-expression-type receiver locals signatures)}
+                            (catch #?(:clj Exception :cljs :default) e {:refusal e}))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)]
+          (when-not (canonical-typed-map-type? value-type)
+            (reject! (str "contains? requires a canonical typed map "
+                          "[:map key-type value-type]; got " (pr-str value-type)
+                          ". A typed set answers to typed-set-contains, and the "
+                          "bounded keyword map has no presence primitive at all")
+                     form :kotoba.error/map-presence-receiver))
+          (list 'typed-map-contains value-type receiver key))
+
+        (= op 'dissoc)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              [receiver & keys] rewritten-args
+              ;; See `contains?` above: this arm refuses, so it rethrows the
+              ;; receiver's own refusal rather than reporting `got nil`.
+              inferred (try {:type (infer-expression-type receiver locals signatures)}
+                            (catch #?(:clj Exception :cljs :default) e {:refusal e}))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)]
+          (when-not (canonical-typed-map-type? value-type)
+            (reject! (str "dissoc requires a canonical typed map "
+                          "[:map key-type value-type]; got " (pr-str value-type)
+                          ". A typed set answers to typed-set-disj, and the "
+                          "bounded keyword map has no removal primitive at all")
+                     form :kotoba.error/map-dissoc-receiver))
+          (reduce (fn [accumulated key]
+                    (list 'typed-map-dissoc value-type accumulated key))
+                  receiver keys))
 
         (= op 'vector-drop)
         (let [rewritten-args
