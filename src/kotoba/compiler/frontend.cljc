@@ -1343,6 +1343,24 @@
                        operation (assoc :operation operation)
                        (map? data) (merge data)))))))
 
+(defn- reject-call-arity!
+  "One sentence for a wrong argument count at a call to a module function, in
+  BOTH directions.
+
+  Two sites raise it and they must agree: `elaborate-named-ability`, which is
+  where the surplus used to be dropped, and `validate-expr`, which sees calls
+  that elaboration does not walk (a call nested inside a vector literal, for
+  one). A caller reading one message must not have to know which pass produced
+  it, so the count is named rather than merely asserted -- `arity mismatch`
+  alone does not say which way it points, and the direction is the whole
+  content of the report when the surplus argument was previously answered."
+  [op expected supplied form]
+  (reject! (str "function call arity mismatch: " op " takes " expected
+                (if (= 1 expected) " argument" " arguments")
+                "; got " supplied)
+           form :kotoba.error/call-arity
+           {:function op :expected expected :supplied supplied}))
+
 (def pure-product-disallowed-heads
   "Control / ambient heads rejected under `:language-profile :pure-product`
   even when the general subset might admit them (see pure-product-profile.edn)."
@@ -6068,7 +6086,7 @@
         (contains? functions op)
         (let [expected (count (get functions op))]
           (when-not (= expected (count args))
-            (reject! "function call arity mismatch" form))
+            (reject-call-arity! op expected (count args) form))
           (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         :else (reject! "operation has no admitted lowering" form))
@@ -7364,15 +7382,33 @@
                  (elaborate-named-ability
                   request request-type locals signatures used))))
 
+        ;; The measured hole (2026-09-02). This walked arguments with
+        ;; `(map f args expected-arg-types)`, and two-collection `map` stops at
+        ;; the SHORTER collection: a call carrying more arguments than the
+        ;; callee has parameters came out of this branch SHORTER than it went
+        ;; in, and `validate-expr`'s own arity check -- which is correct --
+        ;; then measured the shortened form and passed it. `(two 1 2 3)`
+        ;; against `(defn- two [a b] ...)` compiled with :ok true and answered
+        ;; 3. Same shape as the `let` body and `if` truncations closed the same
+        ;; day: a pass rebuilds a form from a destructuring that cannot express
+        ;; the surplus, so nothing downstream can see what was dropped.
+        ;;
+        ;; The count is now checked here, where the fact is known, and the walk
+        ;; is indexed rather than zipped so no future disagreement between
+        ;; `:params` and `:param-types` can shorten a form again.
         (contains? signatures op)
-        (let [expected-args (:param-types (get signatures op))]
+        (let [{:keys [params param-types]} (get signatures op)
+              expected (count params)]
+          (when-not (= (count args) expected)
+            (reject-call-arity! op expected (count args) form))
           (preserve-form-meta
            form
            (list* op
-                  (map (fn [argument argument-type]
-                         (elaborate-named-ability
-                          argument argument-type locals signatures used))
-                       args expected-args))))
+                  (map-indexed
+                   (fn [index argument]
+                     (elaborate-named-ability
+                      argument (nth param-types index nil) locals signatures used))
+                   args))))
 
         :else
         (preserve-form-meta
@@ -10111,6 +10147,13 @@
           (mapv #(assoc % :name (abi-arity-name source-name (:logical-arity %))) clauses))))))
 
 (defn- resolve-overloaded-calls
+  "Resolve a call to an overloaded source name to the clause's ABI name.
+
+  The refusal's TEXT is pinned verbatim outside this repository -- amu's nbb
+  project suite compares it with `=`, not a regex -- so the arities the name
+  does admit and the count that was written are carried in ex-data rather than
+  appended to the sentence. Widening the sentence is a coordinated change with
+  amu, not a local one."
   [form overloads overloaded-sources]
   (cond
     (seq? form)
@@ -10121,7 +10164,14 @@
                             (get overloads [op (count args)] op)
                             op)
               _ (when (and (contains? overloaded-sources op) (= resolved-op op))
-                  (reject! "no matching multi-arity clause" form))
+                  (reject! "no matching multi-arity clause" form
+                           :kotoba.error/call-arity
+                           {:function op
+                            :expected (into (sorted-set)
+                                            (keep (fn [[[overload-name arity] _]]
+                                                    (when (= overload-name op) arity)))
+                                            overloads)
+                            :supplied (count args)}))
               result (list* resolved-op
                             (map #(resolve-overloaded-calls % overloads overloaded-sources) args))]
           (if (seq (meta form)) (with-meta result (meta form)) result))))
@@ -10459,7 +10509,14 @@
       (if-let [template (and (symbol? head) (get templates head))]
         (do
           (when-not (= (count arguments) (count (:params template)))
-            (reject! "desugar template call arity does not match its parameters" form))
+            ;; Text pinned by defdesugar-test; the code and the counts are
+            ;; carried in ex-data so a caller can report the same facts a
+            ;; function call reports.
+            (reject! "desugar template call arity does not match its parameters" form
+                     :kotoba.error/call-arity
+                     {:function head
+                      :expected (count (:params template))
+                      :supplied (count arguments)}))
           (when (> (vswap! counter inc) max-desugar-expansions)
             (reject! "desugar expansion count exceeds limit" form))
           (let [index @counter
