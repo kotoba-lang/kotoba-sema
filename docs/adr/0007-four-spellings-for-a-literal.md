@@ -1,4 +1,4 @@
-# ADR-0004: Four spellings for a literal, and two wider firmware calls
+# ADR-0007: Four spellings for a literal, and two wider firmware calls
 
 - Status: accepted
 - Date: 2026-09-02
