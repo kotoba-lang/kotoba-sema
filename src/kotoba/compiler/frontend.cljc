@@ -303,7 +303,20 @@
     ;; It types as `:i64` like every other operation here, because the word it
     ;; answers with IS an i64; the f32 reading of it is what `f32-from-bits`
     ;; is for.
-    kernel-dot-f32 5})
+    kernel-dot-f32 5
+    ;; dequant: the fused dequantize-and-dot family (superproject
+    ;; ADR-2609021900).
+    ;;
+    ;;   (kernel-dequant-dot-q8-0 w-base w-length x-base x-length blocks)
+    ;;
+    ;; Same shape and same base positions as the f32 dot product, so the
+    ;; taint analysis needs nothing new. What differs is the last operand:
+    ;; it counts BLOCKS, because a quantized row is a vector of blocks whose
+    ;; byte stride and element stride are different numbers (34 bytes carry
+    ;; 32 elements in Q8_0). Both spans are derived from it downstream.
+    kernel-dequant-dot-q8-0 5
+    kernel-dequant-dot-q4-k 5
+    kernel-dequant-dot-q6-k 5})
 
 ;; slice-value: the CARRIED form of the slice family (amu ADR 0285).
 ;;
@@ -351,7 +364,11 @@
 ;; read the way a caller thinks (region, then that region's length), not the
 ;; way a scanner finds convenient.
 (def kernel-base-positions
-  '{kernel-dot-f32 [0 2]})
+  '{kernel-dot-f32 [0 2]
+    ;; dequant: the packed row at 0, the activations at 2.
+    kernel-dequant-dot-q8-0 [0 2]
+    kernel-dequant-dot-q4-k [0 2]
+    kernel-dequant-dot-q6-k [0 2]})
 
 (defn kernel-base-argument-positions
   "The argument positions of OP that name a region. Every operation in

@@ -9,7 +9,7 @@
          :git/sha "ac8e70514ee3c9b87ae71324e6e714447acc971c"}
         io.github.kotoba-lang/kotoba-kir
         {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
-         :git/sha "061283e9cb7d819bf96ae0c28d0afbbd52195b6a"}}
+         :git/sha "c64a93daec5fad3b6a04701adabb7938c478c5fe"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner
