@@ -670,3 +670,12 @@
                  kernel-rdtsc kernel-rdtscp kernel-swapgs]]
     (is (contains? @#'kotoba.compiler.frontend/reserved-function-names head)
         head)))
+
+(deftest selected-boundary-controls-main-arity
+  (is (hir/valid?
+       (sema/analyze "(defn main [image system-table] (+ image (* 0 system-table)))"
+                     {:main-arity 2})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"main must take 0 arguments"
+        (sema/analyze "(defn main [image system-table] image)")))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"main must take 2 arguments"
+        (sema/analyze "(defn main [] 0)" {:main-arity 2}))))

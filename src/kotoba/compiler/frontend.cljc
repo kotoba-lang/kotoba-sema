@@ -8893,6 +8893,9 @@
     :language-profile  when `:pure-product`, enforce pure-product-profile.edn
                        admission (T2.1): no capabilities/cap-call/disallowed sugar,
                        empty effects.
+    :main-arity        exact entry arity required by the selected execution
+                       boundary; defaults to zero. Firmware profiles use two
+                       for UEFI ImageHandle and SystemTable.
     :admit-linked-synthetics?  when true, skip reject-reserved-source-symbols!
                        (T8.3 multi-file project monomorph: project/link-source
                        re-emits HIR bodies that already contain desugared
@@ -8904,6 +8907,9 @@
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
+        main-arity (or (when (map? opts) (:main-arity opts)) 0)
+        _ (when-not (contains? #{0 2} main-arity)
+            (reject! "main arity policy must be zero or two" main-arity))
         forms (mapv annotate-doseq-collection-kinds (read-forms source))
         _ (when-not admit-linked-synthetics?
             (reject-reserved-source-symbols! forms))
@@ -9273,8 +9279,8 @@
       (reject! "entryless library requires an explicit non-empty namespace export list" defs))
     (when (and (nil? entry) (empty? exports))
       (reject! "entryless library requires at least one exported function" exports))
-    (when (and entry (not (empty? (get signatures entry))))
-      (reject! "main must take zero arguments" 'main))
+    (when (and entry (not= main-arity (count (get signatures entry))))
+      (reject! (str "main must take " main-arity " arguments") 'main))
     (when (and entry (not (some #{entry} exports)))
       (reject! "main entrypoint must be exported" exports))
     (check-namespace-capabilities! (:capabilities namespace-info)
