@@ -2,6 +2,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
+            [kotoba.compiler.frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))
 
@@ -588,3 +589,84 @@
                        (go (vector-assoc! v 0 i) (+ i 1) n)))
                    (defn main [] 0)")]
       (is (hir/valid? result)))))
+
+;; ---------------------------------------------------------------------------
+;; sysops: the general atomics and the x86 system operations.
+;; ---------------------------------------------------------------------------
+
+(def ^:private sysops-atomic-calls
+  ;; source form -> declared arity
+  {"(kernel-atomic-add-u32 base 4096 0 1)" 4
+   "(kernel-atomic-add-u64 base 4096 0 1)" 4
+   "(kernel-xchg-u32 base 4096 0 1)" 4
+   "(kernel-xchg-u64 base 4096 0 1)" 4
+   "(kernel-cmpxchg-u32 base 4096 0 1 2)" 5
+   "(kernel-cmpxchg-u64 base 4096 0 1 2)" 5})
+
+(defn- sysops-module
+  "`main` must take zero arguments, so a base parameter lives on a helper."
+  [body]
+  (str "(defn go [base] " body ") (defn main [] (go 4096))"))
+
+(deftest general-atomics-are-admitted-with-sealed-arities
+  (doseq [[call _] sysops-atomic-calls]
+    (testing call
+      (let [result (sema/analyze (sysops-module call))]
+        (is (= :i64 (:result result)))
+        (is (hir/valid? result)))))
+  (testing "a wrong arity is refused by name"
+    (doseq [[call arity] sysops-atomic-calls
+            :let [head (subs call 1 (.indexOf call " "))]
+            wrong [(str "(" head " base 4096 0)")
+                   (str "(" head " base 4096 0 1 2 3)")]
+            :when (not= arity (dec (count (re-seq #"\S+" wrong))))]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"kernel memory operation arity mismatch"
+           (sema/analyze (sysops-module wrong)))
+          wrong))))
+
+(deftest general-atomics-carry-the-region-provenance-rule
+  ;; They take a base, so the base must NAME a region rather than compute one.
+  ;; Nothing here is specific to the atomics -- it falls out of listing them in
+  ;; `kernel-memory-operations` -- which is exactly why it is asserted: putting
+  ;; them anywhere else would have exempted them from it silently.
+  (doseq [[call _] sysops-atomic-calls
+          ;; the same call with its base replaced by a value nothing rooted
+          :let [head (subs call 1 (.indexOf call " "))
+                after-base (subs call (inc (.indexOf call " " (inc (.indexOf call " ")))))
+                unrooted (str "(" head " (kernel-load-u8 buf 512 0) " after-base)]]
+    (testing unrooted
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"kernel memory base must name a region, not compute one"
+           (sema/analyze
+            (str "(defn go [buf] " unrooted ") (defn main [] (go 4096))")))
+          unrooted)))
+  (testing "and a parameter base is admitted, as it is for every other one"
+    (is (hir/valid?
+         (sema/analyze
+          (sysops-module "(kernel-cmpxchg-u32 base 4096 0 1 2)"))))))
+
+(deftest system-operations-are-sealed-zero-arity-privileged-operations
+  (doseq [head ["kernel-fence-load" "kernel-fence-store" "kernel-fence-full"
+                "kernel-rdtsc" "kernel-rdtscp" "kernel-swapgs"]]
+    (testing head
+      (let [result (sema/analyze (str "(defn main [] (" head "))"))]
+        (is (= :i64 (:result result)))
+        (is (hir/valid? result)))
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"kernel privileged operation arity mismatch"
+           (sema/analyze (str "(defn main [] (" head " 1))")))))))
+
+(deftest the-new-operation-names-are-reserved
+  ;; A module that defines its own `kernel-rdtsc` would otherwise shadow the
+  ;; operation and compile into a call to itself.
+  (doseq [head '[kernel-atomic-add-u32 kernel-atomic-add-u64
+                 kernel-xchg-u32 kernel-xchg-u64
+                 kernel-cmpxchg-u32 kernel-cmpxchg-u64
+                 kernel-fence-load kernel-fence-store kernel-fence-full
+                 kernel-rdtsc kernel-rdtscp kernel-swapgs]]
+    (is (contains? @#'kotoba.compiler.frontend/reserved-function-names head)
+        head)))
