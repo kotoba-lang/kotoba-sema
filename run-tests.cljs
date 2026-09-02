@@ -12,6 +12,8 @@
 ;; the superproject measures this file against the directory.
 (ns run-tests
   (:require [cljs.test :as t]
+            ;; a wrong argument count is refused in both directions
+            [kotoba.compiler.call-arity-test]
             [kotoba.compiler.case-uniqueness-test]
             [kotoba.compiler.host-nesting-test]
             ;; a `let` body is an implicit `do`; the value is the last form
@@ -33,7 +35,8 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.compiler.case-uniqueness-test
+(t/run-tests 'kotoba.compiler.call-arity-test
+             'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.let-body-test
              'kotoba.compiler.kernel-xgetbv-test
