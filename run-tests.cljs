@@ -33,6 +33,10 @@
             ;; boot-lit: the read-only literal heads, and (loader) the rule
             ;; that makes one of their addresses a bounded load's region root
             [kotoba.compiler.rodata-literal-test]
+            ;; `[:map K V]` reached through the friendly surface: an integer
+            ;; or string key, the order the entry chain is walked in, and the
+            ;; byte-identity control on the keyword-keyed literal
+            [kotoba.compiler.typed-map-key-types-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
             [kotoba.compiler.loop-accumulator-type-test]))
 
@@ -56,4 +60,5 @@
              'kotoba.compiler.match-test
              'kotoba.compiler.parameter-inference-test
              'kotoba.compiler.rodata-literal-test
+             'kotoba.compiler.typed-map-key-types-test
              'kotoba.compiler.loop-accumulator-type-test)
