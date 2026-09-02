@@ -304,8 +304,7 @@
     ;; answers with IS an i64; the f32 reading of it is what `f32-from-bits`
     ;; is for.
     kernel-dot-f32 5
-    ;; dequant: the fused dequantize-and-dot family (superproject
-    ;; ADR-2609021900).
+    ;; dequant: the fused dequantize-and-dot family (kotoba-gmir ADR 0023).
     ;;
     ;;   (kernel-dequant-dot-q8-0 w-base w-length x-base x-length blocks)
     ;;

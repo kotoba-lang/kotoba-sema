@@ -1,4 +1,4 @@
-# ADR 0009: a second base, in a second family
+# ADR 0023: a second base, in a second family
 
 Status: accepted. Date: 2026-09-02.
 
@@ -9,7 +9,7 @@ kernel memory operation whose base was not argument 0 — and the provenance wal
 was the literal `(first args)`, so its second base would have flowed past
 `traceable-base?` entirely.
 
-The fused dequantize-and-dot family (kotoba-gmir ADR 0013) has the same shape,
+The fused dequantize-and-dot family (kotoba-gmir ADR 0023) has the same shape,
 three times.
 
 ## Decision
