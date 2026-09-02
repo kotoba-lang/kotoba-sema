@@ -297,6 +297,39 @@
     ;; is for.
     kernel-dot-f32 5})
 
+;; slice-value: the CARRIED form of the slice family (amu ADR 0285).
+;;
+;; These are deliberately NOT in `kernel-memory-operations`. That table is the
+;; machine layer: every entry there takes `base length index [value]` as three
+;; or four separate i64 words, and the provenance rule reads argument 0 of
+;; each. These eight take a `[:slice T]` VALUE instead, and are erased into
+;; that machine layer by `erase-slice-values` before anything downstream --
+;; type inference, `validate-expr`, the provenance check, HIR, KIR, both
+;; backends, the verifier -- ever runs. So the two families are the same
+;; operations written at two altitudes, and only the lower one has a lowering.
+;;
+;;   (slice-of-u8 base length)   -> [:slice :u8]    length counts ELEMENTS
+;;   (slice-length s)            -> :i64            elements, not bytes
+;;   (slice-get s index)         -> :i64            the element, zero-extended
+;;   (slice-set! s index value)  -> :i64            the value, per ADR 0049
+;;   (slice-sub s offset count)  -> [:slice T]      a CHECKED narrowing
+;;
+;; `slice-sub` lowers to `kernel-subregion`, which is why the narrowing is
+;; checked at runtime rather than trusted: the offset must lie inside the
+;; parent and the count inside the remainder, or the machine traps before it
+;; addresses anything. The element scale is applied here, in the erasure, so
+;; the narrowing arithmetic is in bytes exactly where `kernel-subregion`
+;; expects bytes and in elements everywhere a Kotoba author reads it.
+(def slice-value-operations
+  '{slice-of-u8 2 slice-of-u16 2 slice-of-u32 2 slice-of-u64 2
+    slice-length 1 slice-get 2 slice-set! 3 slice-sub 3})
+
+;; `slice-of-<width>` -> the element type it constructs. One map rather than a
+;; string suffix parse, so a new width is one entry in two tables and not a
+;; naming convention a reader has to reverse.
+(def ^:private slice-constructor-elements
+  '{slice-of-u8 :u8 slice-of-u16 :u16 slice-of-u32 :u32 slice-of-u64 :u64})
+
 ;; simd: which ARGUMENT POSITIONS of a kernel memory operation name a region.
 ;;
 ;; This existed as the literal `(first args)` until an operation had two
@@ -873,6 +906,11 @@
              (set (keys heap-operations))
              (set (keys kgraph-operations))
              (set (keys kernel-memory-operations))
+             ;; slice-value: a function named `slice-get` would shadow the
+             ;; carrier's own head, and the shadowing would be silent -- the
+             ;; erasure pass rewrites by head name, so a user function with
+             ;; that name would have its calls rewritten into memory accesses.
+             (set (keys slice-value-operations))
              (set (keys kernel-privileged-operations))
              ;; boot-lit: a function named `guid` would shadow the literal
              ;; head, and the shadowing would be silent -- `(guid "...")` would
@@ -975,12 +1013,39 @@
   (and (vector? type) (= 2 (count type)) (= :ref (first type))
        (keyword? (second type)) (namespace (second type))))
 
+;; slice-value: `[:slice T]`, the ADR 0285 bulk carrier.
+;;
+;; The element widths, in BYTES. The map is the authority for two facts at
+;; once -- which element types exist, and what each one scales by -- because
+;; the scale is the only thing that distinguishes an element index from a byte
+;; offset, and a second table would let the two drift.
+(def ^:private slice-element-widths
+  {:u8 1 :u16 2 :u32 4 :u64 8})
+
+;; `:f32` is DECLARED here and admitted nowhere. Naming it is the point: the
+;; carrier is intended to reach binary32 elements (that is the Qwen weight
+;; case ADR 0285 exists for), and there is no `slice-load-f32` on either
+;; native ISA to reach them with. Recording it as available before the load
+;; exists would be the defect amu ADR 0284 named, in miniature -- an admission
+;; that admits what nothing can lower. So it is refused BY NAME, with a
+;; message that says which half is missing, rather than falling through the
+;; generic "unknown element type" arm where a reader would learn nothing.
+(def ^:private slice-declared-unadmitted-elements
+  #{:f32})
+
+(defn- slice-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :slice (first type))))
+
+(defn- slice-element-type [type]
+  (when (slice-type? type) (second type)))
+
 (defn- structured-type? [type]
   (or (parametric-result-type? type) (variant-type? type) (generic-option-type? type)
       (canonical-list-type? type)
       (stream-type? type) (task-type? type)
       (heterogeneous-vector-type? type) (typed-set-type? type)
       (canonical-typed-map-type? type) (record-type? type) (schema-ref-type? type)
+      (slice-type? type)
       (callable-type? type)))
 
 (defn- validate-value-type!
@@ -1019,6 +1084,23 @@
      type
      (schema-ref-type? type)
      type
+     ;; slice-value: `[:slice T]`. The element type is a closed set, not a
+     ;; recursive value type -- a slice names host memory, and the only thing
+     ;; that can live in host memory here is a machine integer of a width the
+     ;; ISAs can load. So this arm does NOT recurse: `[:slice [:slice :u8]]`
+     ;; and `[:slice :string]` are refused by the same clause that refuses
+     ;; `[:slice :banana]`, which is what keeps the carrier two words wide.
+     (slice-type? type)
+     (let [element (slice-element-type type)]
+       (when (contains? slice-declared-unadmitted-elements element)
+         (reject! (str "slice element type is declared but not admitted: no native element load exists for "
+                       element)
+                  type :kotoba.error/slice-element-not-admitted))
+       (when-not (contains? slice-element-widths element)
+         (reject! (str "slice element type must be one of "
+                       (pr-str (vec (sort (keys slice-element-widths)))))
+                  type :kotoba.error/slice-element-type))
+       type)
      (parametric-result-type? type)
      (do (validate-value-type! (second type) (inc depth) nodes)
          (validate-value-type! (nth type 2) (inc depth) nodes)
@@ -8575,6 +8657,298 @@
                 (reject! "kernel memory base must name a region, not compute one"
                          arg :kotoba.error/kernel-region-provenance)))))))))
 
+
+;; ---------------------------------------------------------------------------
+;; slice-value: erasing the ADR 0285 carrier.
+;;
+;; WHERE THE TYPE STOPS EXISTING. `[:slice T]` is a type of this frontend's
+;; source syntax and of nothing else. This pass runs immediately after
+;; parameter types are settled and BEFORE every later pass -- loop-helper
+;; type resolution, absent-parameter and absent-result inference, abort
+;; elaboration, `validate-expr`, `check-value-types!`,
+;; `check-kernel-region-provenance!`, `check-lowering-budget!`, and the HIR
+;; construction that follows all of them. Downstream of this line the program
+;; contains only `:i64` words and the `slice-load-*`/`slice-store-*`/
+;; `kernel-subregion` operations the machine already had, so HIR, KIR, GMIR,
+;; MIR, codegen, both native ISAs and `kotoba.verifier` need no slice value,
+;; no register pair and no new IR key.
+;;
+;; WHAT ENFORCES THE BOUNDARY. Three independent things, in this order:
+;;
+;;   1. This pass refuses, by name, every position a two-word value cannot
+;;      cross: a slice as a result type, inside any structured type, as an
+;;      argument to anything but a declared slice parameter, or bound and then
+;;      mentioned anywhere else. A slice-typed parameter on an exported
+;;      function (or on `main`) is refused where the export list is known,
+;;      because a kernel object's callers spell one machine word per argument
+;;      and there is no ABI in which they could spell two.
+;;   2. If this pass ever failed to erase one, `kotoba.kir`'s
+;;      `native-function-boundary-type?` refuses a `[:slice T]` in
+;;      `:param-types` -- named explicitly there rather than by absence, so
+;;      the message says which invariant broke.
+;;   3. `kotoba.verifier` refuses it again, independently, from its own table.
+;;
+;; WHY ERASURE AND NOT A REGISTER PAIR. kotoba-native's
+;; `docs/lang-authority-diff.md` lists four routes to a carried slice and
+;; names this one -- its route 3 -- as the cheapest. Its routes 1 and 2 (a
+;; second `pilot-expression?` shape and a two-slot spill in the x86-64
+;; fallback) turn out not to be needed AT ALL rather than merely to be
+;; dearer: `pilot-expression?` already answers `:scalar` for a four-operand
+;; `slice-load-u8`, because `kir-kernel-memory-ops` has carried the slice
+;; family since the lowering landed. A pair-shaped SSA value would have been
+;; a second representation for something both backends can already hold.
+(def ^:private slice-escape-message
+  "a slice value can only be indexed, narrowed, measured, or passed to a slice parameter")
+
+(defn- slice-erased-base-name [sym]
+  (symbol (str "__kotoba_slice_" (name sym) "_base")))
+
+(defn- slice-erased-length-name [sym]
+  (symbol (str "__kotoba_slice_" (name sym) "_len")))
+
+(defn- slice-scale
+  "ELEMENTS to BYTES. Folded when the operand is a literal, so a carried
+  traversal and the same traversal written with the machine operations emit
+  the same bytes rather than merely equivalent ones."
+  [expr width]
+  (cond
+    (= 1 width) expr
+    (integer? expr) (* expr width)
+    :else (list '* expr width)))
+
+(defn- slice-access-operation [kind element]
+  (symbol (str "slice-" kind "-" (name element))))
+
+(defn- uses-slice-values? [body slice-parameters]
+  (boolean (some #(and (seq? %)
+                       (or (contains? slice-value-operations (first %))
+                           ;; A caller that merely PASSES a slice on has no
+                           ;; slice operation of its own. Without this arm it
+                           ;; would be left untouched and its call would reach
+                           ;; `validate-expr` with the callee's pre-erasure
+                           ;; arity -- a refusal that names arity and not the
+                           ;; slice that caused it.
+                           (contains? slice-parameters (first %))))
+                 (tree-seq coll? seq body))))
+
+(defn- erase-slice-values
+  "Rewrite every `[:slice T]` parameter, binding and operation into the two
+  i64 words the machine carries. Returns FUNCTIONS with slice parameters
+  expanded in place; `slice-parameter-functions` is a volatile the caller
+  reads once the export list is known, because the export boundary refusal
+  cannot be made until then.
+
+  A function with no slice parameter and no slice operation in its body is
+  returned untouched -- identical object, not an equal one -- so a module that
+  does not use the carrier cannot change bytes because of it."
+  [functions slice-parameter-functions]
+  (let [slice-parameters
+        (into {}
+              (keep (fn [{:keys [name param-types]}]
+                      (let [indexed (into (sorted-map)
+                                          (keep-indexed
+                                           (fn [i t]
+                                             (when (slice-type? t)
+                                               [i (slice-element-type t)]))
+                                           (or param-types [])))]
+                        (when (seq indexed) [name indexed]))))
+              functions)
+        source-arity (into {} (map (juxt :name (comp count :params))) functions)]
+    (vswap! slice-parameter-functions into (keys slice-parameters))
+    (mapv
+     (fn [{:keys [name source-name params param-types result body] :as function}]
+       (if-not (or (contains? slice-parameters name)
+                   (uses-slice-values? body slice-parameters))
+         function
+         (let [reported (or source-name name)
+               _ (when (slice-type? result)
+                   (reject! (str "a slice value cannot be returned: " reported
+                                 " declares " (pr-str result))
+                            result :kotoba.error/slice-result-type))
+               pairs (map vector params (or param-types (repeat :i64)))
+               expanded
+               (reduce (fn [acc [p t]]
+                         (if (slice-type? t)
+                           (-> acc
+                               (update :params conj
+                                       (slice-erased-base-name p)
+                                       (slice-erased-length-name p))
+                               (update :param-types conj :i64 :i64)
+                               (assoc-in [:env p]
+                                         {:element (slice-element-type t)
+                                          :base (slice-erased-base-name p)
+                                          :len (slice-erased-length-name p)}))
+                           (-> acc
+                               (update :params conj p)
+                               (update :param-types conj t))))
+                       {:params [] :param-types [] :env {}}
+                       pairs)
+               _ (when (> (count (:params expanded)) max-parameters)
+                   (reject! (str "function parameters exceed ABI-supported arity after slice erasure: "
+                                 reported " needs " (count (:params expanded))
+                                 " machine words for " (count params) " parameters")
+                            params :kotoba.error/slice-erased-max-parameters))
+               root-params (set params)]
+           (letfn
+               [(slice-of [expr env scalars]
+                  ;; -> {:element T :base <expr> :len <expr>} or nil when EXPR
+                  ;; is not slice-valued. Never rewrites in place: the caller
+                  ;; decides where the two words go.
+                  (cond
+                    (and (symbol? expr) (contains? env expr)) (get env expr)
+
+                    (and (seq? expr) (contains? slice-constructor-elements (first expr)))
+                    (let [[op & args] expr]
+                      (when-not (= 2 (count args))
+                        (reject! "slice constructor arity mismatch" expr
+                                 :kotoba.error/slice-arity))
+                      (let [[base length] args]
+                        ;; The provenance rule, applied to the base BEFORE it
+                        ;; is buried inside a value. After erasure
+                        ;; `check-kernel-region-provenance!` would catch this
+                        ;; too, by following the `let` it is about to be bound
+                        ;; by -- but it would report the synthesised binding
+                        ;; and the machine operation, naming neither the
+                        ;; constructor nor the slice. This refuses first and
+                        ;; says which.
+                        (when-not (traceable-base? base scalars root-params)
+                          (reject! "slice base must name a region, not compute one"
+                                   expr :kotoba.error/slice-region-provenance))
+                        {:element (get slice-constructor-elements op)
+                         :base (rewrite base env scalars)
+                         :len (rewrite length env scalars)}))
+
+                    (and (seq? expr) (= 'slice-sub (first expr)))
+                    (let [[_ parent offset count'] expr]
+                      (when-not (= 4 (count expr))
+                        (reject! "slice-sub arity mismatch" expr :kotoba.error/slice-arity))
+                      (let [{:keys [element base len]}
+                            (or (slice-of parent env scalars)
+                                (reject! "slice-sub narrows a slice value" expr
+                                         :kotoba.error/slice-operand))
+                            width (get slice-element-widths element)
+                            offset' (rewrite offset env scalars)
+                            count'' (rewrite count' env scalars)]
+                        ;; A CHECKED narrowing: `kernel-subregion` traps
+                        ;; unless the offset lies inside the parent and the
+                        ;; count inside the remainder. The scale is applied
+                        ;; here, so the arithmetic is bytes where
+                        ;; `kernel-subregion` reads bytes and elements
+                        ;; everywhere it is written.
+                        {:element element
+                         :base (list 'kernel-subregion
+                                     base
+                                     (slice-scale len width)
+                                     (slice-scale offset' width)
+                                     (slice-scale count'' width))
+                         :len count''}))
+
+                    :else nil))
+
+                (bind-slice [binder info bindings env scalars]
+                  ;; Give a slice binding two real bindings so neither half is
+                  ;; ever evaluated twice, whatever the initialiser was.
+                  (let [b (slice-erased-base-name binder)
+                        l (slice-erased-length-name binder)]
+                    {:bindings (conj bindings b (:base info) l (:len info))
+                     :env (assoc env binder (assoc info :base b :len l))
+                     :scalars (assoc scalars b (:base info) l (:len info))}))
+
+                (require-slice [expr env scalars what]
+                  (or (slice-of expr env scalars)
+                      (reject! (str what " requires a slice value")
+                               expr :kotoba.error/slice-operand)))
+
+                (rewrite [expr env scalars]
+                  (cond
+                    (and (symbol? expr) (contains? env expr))
+                    (reject! slice-escape-message expr :kotoba.error/slice-escape)
+
+                    (not (seq? expr)) expr
+
+                    :else
+                    (let [[op & args] expr]
+                      (cond
+                        (= op 'let)
+                        (let [[raw & tail] args
+                              _ (when-not (and (vector? raw) (even? (count raw)))
+                                  (reject! "let bindings must be an even-length vector" expr))
+                              {:keys [bindings env scalars]}
+                              (reduce
+                               (fn [acc [binder init]]
+                                 (if-let [info (slice-of init (:env acc) (:scalars acc))]
+                                   (bind-slice binder info (:bindings acc)
+                                               (:env acc) (:scalars acc))
+                                   (let [value (rewrite init (:env acc) (:scalars acc))]
+                                     {:bindings (conj (:bindings acc) binder value)
+                                      ;; a non-slice binding SHADOWS an outer
+                                      ;; slice of the same name
+                                      :env (dissoc (:env acc) binder)
+                                      :scalars (assoc (:scalars acc) binder init)})))
+                               {:bindings [] :env env :scalars scalars}
+                               (partition 2 raw))]
+                          (list* 'let bindings
+                                 (map #(rewrite % env scalars) tail)))
+
+                        (= op 'slice-length)
+                        (do (when-not (= 1 (count args))
+                              (reject! "slice-length arity mismatch" expr
+                                       :kotoba.error/slice-arity))
+                            (:len (require-slice (first args) env scalars "slice-length")))
+
+                        (= op 'slice-get)
+                        (let [_ (when-not (= 2 (count args))
+                                  (reject! "slice-get arity mismatch" expr
+                                           :kotoba.error/slice-arity))
+                              {:keys [element base len]}
+                              (require-slice (first args) env scalars "slice-get")]
+                          (list (slice-access-operation "load" element)
+                                base len (rewrite (second args) env scalars)))
+
+                        (= op 'slice-set!)
+                        (let [_ (when-not (= 3 (count args))
+                                  (reject! "slice-set! arity mismatch" expr
+                                           :kotoba.error/slice-arity))
+                              {:keys [element base len]}
+                              (require-slice (first args) env scalars "slice-set!")]
+                          (list (slice-access-operation "store" element)
+                                base len
+                                (rewrite (second args) env scalars)
+                                (rewrite (nth args 2) env scalars)))
+
+                        (or (contains? slice-constructor-elements op) (= op 'slice-sub))
+                        (reject! slice-escape-message expr :kotoba.error/slice-escape)
+
+                        (contains? slice-parameters op)
+                        (let [positions (get slice-parameters op)
+                              expected (get source-arity op)]
+                          (when-not (= expected (count args))
+                            (reject! "call arity does not match the callee's declared parameters"
+                                     expr :kotoba.error/slice-call-arity))
+                          (cons op
+                                (mapcat
+                                 (fn [[i arg]]
+                                   (if-let [element (get positions i)]
+                                     (let [info (require-slice
+                                                 arg env scalars
+                                                 (str "parameter " i " of " op))]
+                                       (when-not (= element (:element info))
+                                         (reject! (str "slice element type mismatch: parameter "
+                                                       i " of " op " takes [:slice "
+                                                       element "], not [:slice "
+                                                       (:element info) "]")
+                                                  expr :kotoba.error/slice-element-mismatch))
+                                       [(:base info) (:len info)])
+                                     [(rewrite arg env scalars)]))
+                                 (map-indexed vector args))))
+
+                        :else (cons op (map #(rewrite % env scalars) args))))))]
+             (assoc function
+                    :params (:params expanded)
+                    :param-types (:param-types expanded)
+                    :body (rewrite body (:env expanded) {}))))))
+     functions)))
+
 (defn- direct-facts [form function-names]
   (let [effects (volatile! #{}) calls (volatile! #{})]
     (letfn [(walk [x]
@@ -10283,6 +10657,17 @@
         ;; captured outer variables from each helper's call site so a loop that
         ;; captures a :string/:f64/record variable type-checks and lowers with
         ;; the correct local types instead of a spurious "expected i64" error.
+        ;; slice-value: erase the ADR 0285 carrier into the two i64 words the
+        ;; machine carries, BEFORE any pass that reasons about types. Every
+        ;; later stage -- the two inference passes below, abort elaboration,
+        ;; `validate-expr`, `check-value-types!`, the provenance check, HIR,
+        ;; KIR, both backends, the verifier -- sees a program made of `:i64`
+        ;; and of the `slice-load-*`/`slice-store-*`/`kernel-subregion`
+        ;; operations that already had a lowering. It runs AFTER
+        ;; `resolve-overloaded-calls` because it changes arities, and after
+        ;; the `:param-types` defaulting above because it reads them.
+        slice-parameter-functions (volatile! #{})
+        parsed (erase-slice-values parsed slice-parameter-functions)
         parsed (resolve-loop-helper-param-types parsed)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
@@ -10352,6 +10737,17 @@
             :when (contains? abort-error-types name)]
       (reject! (str "unhandled abort at export boundary; catch it with try: " name)
                name :kotoba.error/abort-unhandled-export))
+    ;; slice-value: a slice parameter is TWO machine words, and an export's
+    ;; callers spell one word per argument. Refused here rather than in the
+    ;; erasure pass because the export list is not known until now, and
+    ;; refusing every slice parameter would forbid the only shape the carrier
+    ;; is for -- an internal traversal handed a region by the module's own
+    ;; entry point.
+    (doseq [name (cond-> (vec exports) entry (conj entry))
+            :when (contains? @slice-parameter-functions name)]
+      (reject! (str "a slice parameter cannot cross an export boundary: " name
+                    " carries two machine words per slice and its callers spell one")
+               name :kotoba.error/slice-export-boundary))
     (check-namespace-capabilities! (:capabilities namespace-info)
                                    used-capability-names)
     (let [declared (set (keys (:schemas namespace-info)))
