@@ -57,7 +57,7 @@
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn` at the 2026-09-03 resync
   wave. Change it only as part of that wave, in all four repositories."
-  "3e3f9748e245386fc2c89bbadabddfebb4bf02190e137494feacec6a12b4500a")
+  "67561e57ad2b135d848eac75b46ab430d4404a463159f43775e01134e569988f")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
