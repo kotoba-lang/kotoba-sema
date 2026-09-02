@@ -9503,6 +9503,25 @@
               ;; position 0 and is validated as a base in its own right by
               ;; `kernel-base-uses`, so recursing here would double-report.
               (and (seq? expr) (= 'kernel-subregion (first expr))) true
+              ;; An address in this image's own read-only literal pool.
+              ;; `ucs2`, `guid` and `bytes-literal` are the three heads that
+              ;; produce one (`bytes-literal-length` produces a count and is
+              ;; correctly absent from `rodata-literal-encodings`). The pool
+              ;; is laid out by the backend at a fixed offset in `.text`, so
+              ;; the address is a compile-time constant of a compile-time
+              ;; known length -- the same standing as the integer literal
+              ;; above, and strictly better than it, because an integer base
+              ;; names an address the compiler has never seen while this one
+              ;; names bytes it emitted itself.
+              ;;
+              ;; A caller still has to spell the WINDOW LENGTH, and for
+              ;; `bytes-literal` it can spell the true one:
+              ;; `(bytes-literal-length H)` over the same text. Nothing here
+              ;; forces that pairing, exactly as nothing forces an integer
+              ;; base to be paired with the right length; what this admits is
+              ;; the ROOT, and the bounds check the backend emits is unchanged.
+              (and (seq? expr) (contains? rodata-literal-encodings (first expr)))
+              true
               ;; one of two rooted origins is still rooted
               (and (seq? expr) (= 'if (first expr)) (= 4 (count expr)))
               (and (clean? (nth expr 2) seen) (clean? (nth expr 3) seen))
