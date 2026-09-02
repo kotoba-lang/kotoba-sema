@@ -421,6 +421,36 @@
     ;; guard must test 27 BEFORE it reads XCR0, or feature detection faults in
     ;; the middle of itself. See kotoba-native docs/avx2-guard-sequence.md.
     kernel-xgetbv 1
+    ;; xsave: the WRITE half of the same feature check (kotoba-gmir ADR 0012,
+    ;; kotoba-kir ADR 0239). The paragraph above says a guard must test
+    ;; CR4.OSXSAVE before it reads XCR0; it does not say who SETS
+    ;; CR4.OSXSAVE, and until these three existed the answer was a C function.
+    ;;
+    ;; `(kernel-read-cr4)` and `(kernel-write-cr4 value)` take what
+    ;; `kernel-read-cr0` and `kernel-write-cr0` take, because a control
+    ;; register is one machine word read whole and written whole. CR4 is where
+    ;; the extended-state bits live: OSFXSR (9), OSXMMEXCPT (10), OSXSAVE (18).
+    ;;
+    ;; `(kernel-xsetbv index value)` takes what `kernel-write-msr` takes --
+    ;; index in ECX, value split across EDX:EAX -- because at the machine level
+    ;; it IS `wrmsr` with a different opcode. Arity 2 rather than 1: XCR0 is
+    ;; index 0, but the architecture reserves an index space, and an `xsetbv`
+    ;; whose index was whatever the previous expression left in ECX would write
+    ;; a register nobody named.
+    ;;
+    ;; There is NO `kernel-write-cr2`, and the absence is a decision: CR2 is
+    ;; written by the CPU when a page fault is taken, so a kernel that wrote it
+    ;; would be lying to its own handler about the faulting address.
+    ;;
+    ;; TWO THINGS NO ARITY CHECK CAN SEE, both faults rather than wrong
+    ;; answers. (1) A sequence: `xsetbv` needs CR4.OSXSAVE already set, so the
+    ;; order is `cpuid` leaf 1 ECX bit 26 (XSAVE) -> set CR4 bit 18 -> `xsetbv`
+    ;; -> `xgetbv`. (2) A value: `xsetbv` raises #GP for a bit XCR0 does not
+    ;; define, for bit 0 clear, and for bit 2 (YMM) without bit 1 (SSE) --
+    ;; and `(kernel-xsetbv 0 6)` and `(kernel-xsetbv 0 4)` have the same shape.
+    ;; Both live in kotoba-native docs/avx2-guard-sequence.md.
+    kernel-read-cr4 0 kernel-write-cr4 1
+    kernel-xsetbv 2
     ;; boot: the UEFI firmware boundary (kotoba-kir ADR-0229, kotoba-gmir
     ;; ADR-0008). A BOOTX64.EFI written in Kotoba needs to name four things
     ;; this family could not.
