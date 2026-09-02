@@ -27,7 +27,9 @@
             [kotoba.compiler.parameter-annotation-test]
             [kotoba.compiler.defdesugar-test]
             [kotoba.compiler.match-test]
-            [kotoba.compiler.parameter-inference-test]))
+            [kotoba.compiler.parameter-inference-test]
+            ;; a loop's accumulator may be any admitted type, not only an i64
+            [kotoba.compiler.loop-accumulator-type-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -46,4 +48,5 @@
              'kotoba.compiler.parameter-annotation-test
              'kotoba.compiler.defdesugar-test
              'kotoba.compiler.match-test
-             'kotoba.compiler.parameter-inference-test)
+             'kotoba.compiler.parameter-inference-test
+             'kotoba.compiler.loop-accumulator-type-test)

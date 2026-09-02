@@ -1493,9 +1493,33 @@
 ;; per `loop` occurrence) rather than one fixed shared name.
 (def ^:dynamic *pending-loop-helpers* nil)
 
-;; Optional override for synthesized loop-helper return type (default :i64).
-;; T4.5 map/filter bind this to :vector-i64 so the accumulator can exit as a vector.
-(def ^:dynamic *loop-result-type* :i64)
+;; ADR 0027: helper name -> {:bindings n :declared-result t-or-nil} for every
+;; synthesized loop-helper, bound ONCE per `analyze` beside `*loop-counter*`.
+;; It is a SIDE table on purpose. The obvious place for these two facts is the
+;; helper's own function map, and putting them there changed the emitted HIR:
+;; the map crossed the eight-entry array-map threshold and printed its keys in
+;; a different order, so every loop-using module's HIR text moved without one
+;; value in it changing. Byte-identical output for an unchanged program is the
+;; measurement this pass had to keep, so what the passes need travels here and
+;; the function map is left exactly as it was.
+(def ^:dynamic *loop-helper-shapes* nil)
+
+;; Optional override for the synthesized loop-helper's return type.
+;;
+;; nil -- the ordinary case -- means "read it from the loop's own exits", which
+;; `infer-loop-helper-results` does once the helper's parameter types are known.
+;; It used to default to `:i64`, which made the helper's result a CONSTANT with
+;; two hard-coded values: every loop returned an i64 unless it was one of the
+;; two T4.5 desugarings below, so `(loop [i 0 acc 0.0] ... acc)` was refused
+;; with "expected f64, got i64" at the loop's own call site (ADR 0027).
+;;
+;; T4.5 map/filter still bind it, and the binding is now a redundancy check
+;; rather than the only source of the answer: inference derives `:vector-i64`
+;; for those two loops on its own (their accumulator is initialised to
+;; `(vector-i64)` and their sole exit is that accumulator), and
+;; `infer-loop-helper-results` refuses a declared result its exits disagree
+;; with, so the two cannot drift apart silently.
+(def ^:dynamic *loop-result-type* nil)
 
 ;; A synthesized loop-helper carries no param-type annotations (its captured
 ;; outer variables have types only knowable at its call site). During the
@@ -4141,13 +4165,39 @@
                 helper-name (symbol (str "__kotoba_loop_" (vswap! *loop-counter* inc)))
                 helper-params (into loop-names captured)]
             (when (> (count helper-params) max-parameters)
-              (reject! "loop bindings plus captured outer variables exceed this compiler's ABI-supported arity" form))
+              ;; Name the arithmetic. The helper is not written down anywhere the
+              ;; author can see, so "exceeds ABI-supported arity" was a refusal
+              ;; about a function they never wrote: the ceiling on loop BINDINGS
+              ;; is max-parameters MINUS however many outer variables the body
+              ;; happens to mention, which is not `max-parameters` and is not a
+              ;; constant.
+              (reject! (str "loop bindings plus captured outer variables exceed this "
+                            "compiler's ABI-supported arity: " (count loop-names)
+                            " binding" (when (not= 1 (count loop-names)) "s")
+                            " plus " (count captured) " captured outer variable"
+                            (when (not= 1 (count captured)) "s")
+                            " is " (count helper-params) ", and the limit is " max-parameters
+                            (when (seq captured)
+                              (str "; the captured variables are "
+                                   (str/join ", " (map str captured)))))
+                       form :kotoba.error/loop-parameter-ceiling
+                       {:kotoba.error/loop-bindings (count loop-names)
+                        :kotoba.error/loop-captured (vec captured)
+                        :kotoba.error/max-parameters max-parameters}))
             (when *pending-loop-helpers*
               (swap! *pending-loop-helpers* conj
                      {:name helper-name :params helper-params
+                      ;; :i64 is a PLACEHOLDER here, not an answer -- the real
+                      ;; result is read from the loop's exits by
+                      ;; `infer-loop-helper-results`, which needs parameter
+                      ;; types this pass does not have yet.
                       :result (or *loop-result-type* :i64) :effects #{}
                       :loop-helper? true
                       :body (replace-recur desugared-body helper-name loop-names captured)}))
+            (when *loop-helper-shapes*
+              (vswap! *loop-helper-shapes* assoc helper-name
+                      {:bindings (count loop-names)
+                       :declared-result *loop-result-type*}))
             (list* helper-name (concat loop-inits captured))))
         cons (do (when-not (= 2 (count args)) (reject! "cons requires two operands" form))
                  (list 'pair (desugar-expr (first args)) (desugar-expr (second args))))
@@ -7535,6 +7585,257 @@
                         f))
                     functions)
               (recur next-resolved))))))))
+
+;; ── loop/recur accumulator types (ADR 0027) ─────────────────────────────────
+;;
+;; A synthesized loop-helper's RESULT was a constant with exactly two possible
+;; values: `:i64`, or `:vector-i64` when the T4.5 map/filter desugarings bound
+;; `*loop-result-type*`. Nothing read the loop body. So an ordinary
+;; Clojure-shaped loop over anything but an integer was refused --
+;;
+;;   (loop [i 0 acc 0.0] (if (< i 3) (recur (+ i 1) (f64-add acc x)) acc))
+;;
+;; -- with "expression type mismatch: expected f64, got i64" pointing at the
+;; loop's own call site, even though the accumulator's type WAS known:
+;; `resolve-loop-helper-param-types` above recovers it from the loop's inits.
+;; Only the result type did not read it.
+;;
+;; It is read here. A loop leaves through its non-`recur` tail exits, so the
+;; helper's result is the type those exits agree on. After `replace-recur` a
+;; `recur` is a self-call, so "not a recur" is "not a call to this helper".
+
+(def ^:private loop-recur-marker
+  "The symbol a self-call stands in as while a loop-helper's exits are typed.
+  A self-call in TAIL position is a `recur` and is not an exit, so the walker
+  drops it; one anywhere else (inside a `variant-match` branch, say) is typed
+  from this symbol's binding in `locals`, which is the result type the fixed
+  point currently believes -- so such a loop keeps exactly the meaning it had
+  before this pass existed."
+  '__kotoba_recur_position__)
+
+(defn- replace-loop-self-calls
+  "BODY with every call to HELPER-NAME replaced by `loop-recur-marker`."
+  [form helper-name]
+  (cond
+    (and (seq? form) (= helper-name (first form))) loop-recur-marker
+    (seq? form) (with-meta (apply list (map #(replace-loop-self-calls % helper-name) form))
+                  (meta form))
+    (vector? form) (mapv #(replace-loop-self-calls % helper-name) form)
+    :else form))
+
+(defn- loop-exit-forms
+  "The tail exits of a marked loop-helper body, as `[form locals]` pairs.
+
+  `if`, `do` and `let` are tail-transparent -- `let` is the only binding form
+  that survives desugaring, so threading it is threading all of them -- and a
+  marker in tail position is a `recur`, which leaves the loop's next iteration
+  rather than the loop. Everything else is a leaf and is typed whole."
+  [form locals signatures]
+  (cond
+    (= form loop-recur-marker) []
+
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (and (= op 'if) (= 3 (count args)))
+        (into (loop-exit-forms (second args) locals signatures)
+              (loop-exit-forms (nth args 2) locals signatures))
+
+        (and (= op 'do) (seq args))
+        (loop-exit-forms (last args) locals signatures)
+
+        (and (= op 'let) (vector? (first args)) (= 2 (count args))
+             (even? (count (first args))))
+        (loop-exit-forms (second args)
+                         (reduce (fn [current [name value]]
+                                   (assoc current name
+                                          (infer-expression-type value current signatures)))
+                                 locals
+                                 (partition 2 (first args)))
+                         signatures)
+
+        :else [[form locals]]))
+
+    :else [[form locals]]))
+
+(defn- loop-type-text [type] (if (keyword? type) (name type) (pr-str type)))
+
+(defn- loop-exit-text
+  "A tail exit named short enough to read in a one-line refusal."
+  [form]
+  (let [text (pr-str form)]
+    (if (> (count text) 48) (str (subs text 0 45) "...") text)))
+
+(defn- loop-helper-exit-type
+  "The type a loop-helper leaves through, or nil when nothing here can say.
+
+  Iterated to a fixed point over the marker's own binding, so a loop whose only
+  self-call is in tail position (every loop this pass is for) settles in one
+  round, and one with a self-call in a non-tail position starts from the result
+  it had before and stays there."
+  [{:keys [name params param-types body]} signatures]
+  (let [marked (replace-loop-self-calls body name)
+        environment (zipmap params param-types)]
+    (loop [provisional :i64 rounds 0]
+      (let [locals (assoc environment loop-recur-marker provisional)
+            typed (into []
+                        (comp (map (fn [[form form-locals]]
+                                     [form (infer-expression-type form form-locals signatures)]))
+                              (remove #(= abort-bottom (second %))))
+                        (loop-exit-forms marked locals signatures))
+            first-type (second (first typed))
+            disagreeing (first (remove #(same-expression-type? (second %) first-type) typed))]
+        (cond
+          ;; Every tail is a `recur`: the loop has no exit to read a type from.
+          (empty? typed) nil
+
+          disagreeing
+          (reject! (str "loop exits with two different value types: "
+                        (loop-type-text first-type) " from " (loop-exit-text (first (first typed)))
+                        " and " (loop-type-text (second disagreeing))
+                        " from " (loop-exit-text (first disagreeing)))
+                   (first disagreeing)
+                   :kotoba.error/loop-exit-type
+                   {:kotoba.error/expected first-type
+                    :kotoba.error/actual (second disagreeing)})
+
+          (or (= first-type provisional) (>= rounds 4)) first-type
+          :else (recur first-type (inc rounds)))))))
+
+(defn- loop-helper-result
+  "The result type for one loop-helper, refusing a type that cannot be one.
+
+  Every rejection this raises other than its own two is swallowed: a loop body
+  with an independent type error must fail where every other body does, in
+  `check-value-types!`, with that error's own message -- not as an unreadable
+  consequence of typing its exits."
+  [helper declared-result signatures]
+  (let [own-codes #{:kotoba.error/loop-exit-type :kotoba.error/loop-result-type}
+        inferred (try (loop-helper-exit-type helper signatures)
+                      (catch #?(:clj Exception :cljs :default) e
+                        (if (contains? own-codes (:kotoba.error/code (ex-data e)))
+                          (throw e)
+                          ::unknown)))]
+    (cond
+      (= ::unknown inferred) (:result helper)
+      (nil? inferred) (:result helper)
+      :else
+      (do
+        ;; A loop is lowered to a real function, so its accumulator has to be a
+        ;; value that can be a function RESULT. Name the type and say so rather
+        ;; than quietly handing back :i64 -- a silent fallback here is the
+        ;; defect this pass exists to remove.
+        (try (validate-value-type! inferred)
+             (catch #?(:clj Exception :cljs :default) _
+               (reject! (str "a loop is lowered to a function and its exits have the type "
+                             (loop-type-text inferred)
+                             ", which cannot cross a function boundary in this profile")
+                        (:body helper) :kotoba.error/loop-result-type
+                        {:kotoba.error/actual inferred})))
+        (when (and (some? declared-result)
+                   (not (same-expression-type? inferred declared-result)))
+          (reject! (str "loop result was declared " (loop-type-text declared-result)
+                        " and its exits have the type " (loop-type-text inferred))
+                   (:body helper) :kotoba.error/loop-result-type
+                   {:kotoba.error/expected declared-result
+                    :kotoba.error/actual inferred}))
+        inferred))))
+
+(defn- loop-helper-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result (or result :i64)}]))
+        functions))
+
+(defn- infer-loop-helper-results
+  "Give every synthesized loop-helper the result type its exits have.
+
+  Runs AFTER `resolve-loop-helper-param-types` (the exits are typed in the
+  helper's own parameter environment) and to a fixed point, because a nested
+  loop's helper is called from the enclosing loop's body: the inner result has
+  to settle before the outer body can be read. The rounds up to the last are
+  permissive -- an intermediate disagreement is usually a placeholder that has
+  not settled yet -- and the last one refuses."
+  [functions shapes]
+  (if-not (some :loop-helper? functions)
+    functions
+    (letfn [(result-of [f fs]
+              (loop-helper-result f (:declared-result (get shapes (:name f)))
+                                  (loop-helper-signatures fs)))
+            (round [fs strict?]
+              (mapv (fn [f]
+                      (if (:loop-helper? f)
+                        (assoc f :result
+                               (if strict?
+                                 (result-of f fs)
+                                 (try (result-of f fs)
+                                      (catch #?(:clj Exception :cljs :default) _ (:result f)))))
+                        f))
+                    fs))]
+      (loop [fs functions rounds 0]
+        (let [next-fs (round fs false)]
+          (if (or (= (mapv :result next-fs) (mapv :result fs)) (>= rounds 4))
+            (round next-fs true)
+            (recur next-fs (inc rounds))))))))
+
+(defn- check-loop-recur-argument-types!
+  "A `recur` argument must have the type of the binding it rebinds.
+
+  `check-value-types!` would catch this too -- a `recur` is a self-call and its
+  arguments are checked against the helper's parameter types -- but it would
+  report it as a mismatch in a call to `__kotoba_loop_3`, a function the author
+  never wrote, at a parameter index they cannot map back to a name. Say which
+  loop binding, at which `recur` argument position, instead.
+
+  Every inference here is best-effort: an argument whose type cannot be read
+  (because the body has an independent error) is left for `check-value-types!`
+  rather than guessed at."
+  [functions shapes]
+  (let [signatures (loop-helper-signatures functions)]
+    (letfn [(infer [form locals]
+              (try (infer-expression-type form locals signatures)
+                   (catch #?(:clj Exception :cljs :default) _ ::unknown)))
+            (walk [helper-name binding-names param-types form locals]
+              (when (seq? form)
+                (let [[op & args] form]
+                  (cond
+                    (= op helper-name)
+                    (do (doseq [[index argument] (map-indexed vector
+                                                              (take (count binding-names) args))]
+                          (let [expected (nth param-types index)
+                                actual (infer argument locals)]
+                            (when-not (or (= ::unknown actual)
+                                          (= abort-bottom actual)
+                                          (same-expression-type? actual expected))
+                              (reject! (str "recur argument " (inc index) " rebinds the loop binding `"
+                                            (nth binding-names index) "`, which is "
+                                            (loop-type-text expected) ", with an expression of type "
+                                            (loop-type-text actual))
+                                       argument :kotoba.error/loop-recur-type
+                                       {:kotoba.error/expected expected
+                                        :kotoba.error/actual actual
+                                        :kotoba.error/loop-binding (nth binding-names index)
+                                        :kotoba.error/loop-recur-argument (inc index)}))))
+                        (doseq [argument args]
+                          (walk helper-name binding-names param-types argument locals)))
+
+                    (and (= op 'let) (vector? (first args)) (= 2 (count args))
+                         (even? (count (first args))))
+                    (let [pairs (partition 2 (first args))]
+                      (doseq [[_ value] pairs]
+                        (walk helper-name binding-names param-types value locals))
+                      (walk helper-name binding-names param-types (second args)
+                            (reduce (fn [current [name value]]
+                                      (assoc current name (infer value current)))
+                                    locals pairs)))
+
+                    :else (doseq [argument args]
+                            (walk helper-name binding-names param-types argument locals))))))]
+      (doseq [{:keys [name params param-types body loop-helper?]} functions
+              :let [bindings (:bindings (get shapes name))]
+              :when (and loop-helper? (pos? (or bindings 0)))]
+        (walk name (vec (take bindings params)) (vec param-types) body
+              (zipmap params param-types)))))
+  functions)
 
 (def ^:dynamic *record-protocol-dispatch* {})
 
@@ -11424,7 +11725,9 @@
         uses-apply? (volatile! false)
         uses-lazy? (volatile! false)
         required-dispatchers (volatile! #{})
+        loop-helper-shapes (volatile! {})
         parsed (binding [*loop-counter* (volatile! 0)
+                          *loop-helper-shapes* loop-helper-shapes
                           *lambda-counter* (volatile! lambda-id-base)
                           *pending-lambdas* lambda-infos
                           *uses-apply?* uses-apply?
@@ -11643,6 +11946,12 @@
         slice-parameter-functions (volatile! #{})
         parsed (erase-slice-values parsed slice-parameter-functions)
         parsed (resolve-loop-helper-param-types parsed)
+        ;; ADR 0027: and then the loop-helper's RESULT, from the exits of the
+        ;; loop it was made from. Immediately after its parameter types and
+        ;; before anything reads its signature, so no later pass ever sees the
+        ;; `:i64` placeholder the desugar had to write.
+        parsed (infer-loop-helper-results parsed @loop-helper-shapes)
+        parsed (check-loop-recur-argument-types! parsed @loop-helper-shapes)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
         parsed (infer-absent-parameter-types parsed)
