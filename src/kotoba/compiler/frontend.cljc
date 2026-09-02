@@ -274,7 +274,45 @@
     ;; unless offset+sublen fits inside length. Listed here so its first
     ;; argument is checked as a base like every other kernel op's: a derived
     ;; window is only as good as the window it was derived from.
-    kernel-subregion 4})
+    kernel-subregion 4
+    ;; simd: the f32 dot product (kotoba-gmir ADR 0010).
+    ;;
+    ;;   (kernel-dot-f32 a-base a-length b-base b-length count) -> the sum
+    ;;
+    ;; The one entry in this table with TWO regions, and therefore the one
+    ;; whose provenance is not "argument 0". `kernel-base-positions` below
+    ;; carries that; it is a separate table rather than a widening of this
+    ;; one because arity and base positions are different facts, and folding
+    ;; them together would make every existing entry restate a fact it shares.
+    ;;
+    ;; The lengths count BYTES and the count counts ELEMENTS. The result is
+    ;; the binary32 pattern of the sum, sign-extended from bit 31 -- the
+    ;; canonical f32 word, so `(f32-from-bits (kernel-dot-f32 ...))` is total.
+    ;; It types as `:i64` like every other operation here, because the word it
+    ;; answers with IS an i64; the f32 reading of it is what `f32-from-bits`
+    ;; is for.
+    kernel-dot-f32 5})
+
+;; simd: which ARGUMENT POSITIONS of a kernel memory operation name a region.
+;;
+;; This existed as the literal `(first args)` until an operation had two
+;; regions. Reading only argument 0 of `kernel-dot-f32` would leave the second
+;; base unchecked -- an untraceable pointer in a position the taint analysis
+;; never looked at, which is precisely the hole `traceable-base?` exists to
+;; close, reopened for one operation.
+;;
+;; Fixed by naming the positions per operation rather than by reshaping the
+;; operation to put both bases first: an operation's argument order should
+;; read the way a caller thinks (region, then that region's length), not the
+;; way a scanner finds convenient.
+(def kernel-base-positions
+  '{kernel-dot-f32 [0 2]})
+
+(defn kernel-base-argument-positions
+  "The argument positions of OP that name a region. Every operation in
+  `kernel-memory-operations` has at least argument 0."
+  [op]
+  (get kernel-base-positions op [0]))
 ;; `kernel-in-u8`/`kernel-in-u32` are the READ half of x86 port I/O, and take
 ;; only the port -- `(kernel-in-u8 port)` -> the byte that port yields,
 ;; zero-extended to i64. Their absence, next to a write half that had been
@@ -7369,8 +7407,21 @@
                     ;; here let a narrowing launder an untraceable base --
                     ;; `(kernel-subregion (kernel-load-u8 buf len 0) ...)`
                     ;; passed until a test went looking for it.
-                    (do (base! (first args) env)
-                        (doseq [arg args] (walk arg env)))
+                    ;;
+                    ;; simd: and EVERY base position, not argument 0. An
+                    ;; operation with two regions has a second base, and
+                    ;; reading only the first would leave it untraced -- the
+                    ;; same hole, reopened for one operation. Short argument
+                    ;; lists are left alone: an arity mismatch is
+                    ;; `validate-expr`'s rejection to make, and reporting a
+                    ;; missing argument as an untraceable base would name the
+                    ;; wrong defect.
+                    (let [positions (kernel-base-argument-positions op)
+                          args (vec args)]
+                      (doseq [i positions
+                              :when (< i (count args))]
+                        (base! (nth args i) env))
+                      (doseq [arg args] (walk arg env)))
 
                     :else
                     (do (when (contains? function-names op)
