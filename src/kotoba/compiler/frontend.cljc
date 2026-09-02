@@ -1275,7 +1275,18 @@
            (reject! "callable result type is outside the admitted dispatcher profile"
                     type :kotoba.error/callable-result-type)))
        type)
-     (contains? value-types type)
+     ;; `keyword?` first, and it is not redundant. `value-types` is a set of
+     ;; keywords, so the membership test can only ever succeed for one -- but
+     ;; ClojureScript HASHES the argument to answer it, and a `.kotoba`
+     ;; integer literal is a JS bigint, which cannot carry the property the
+     ;; hasher writes. So `(typed-set-count 3 0)` -- a program that has simply
+     ;; written a value where a TYPE belongs -- died here with `Cannot create
+     ;; property 'closure_uid_...' on bigint '3'` instead of reaching the
+     ;; `:else` arm four lines down that says exactly what is wrong with it.
+     ;; Measured 2026-09-03: 42 of the 66 operations that take a declared type
+     ;; crashed this way under nbb, and none of them on the JVM, where a Long
+     ;; hashes. The guard costs nothing and removes the divergence.
+     (and (keyword? type) (contains? value-types type))
      type
      (schema-ref-type? type)
      type
@@ -1523,6 +1534,88 @@
                        span (assoc :span span)
                        operation (assoc :operation operation)
                        (map? data) (merge data)))))))
+
+(defn compiler-rejection?
+  "True for an error this frontend raised deliberately.
+
+  `reject!` is the only producer of a deliberate refusal here, and every one
+  of them carries `:phase`. Anything without it reached the caller by
+  escaping, not by being decided."
+  [error]
+  (some? (:phase (ex-data error))))
+
+(defn internal-failure!
+  "Re-raise a HOST error that escaped a compiler pass, naming what it escaped
+  from. A deliberate rejection is rethrown untouched.
+
+  A raw `TypeError` reaching `kotoba.sema/analyze` carries no `ex-data` at
+  all, so every consumer above it -- amu's CLI included -- could say only
+  `internal compiler error`. Measured 2026-09-03 on amu 6c245f69 / this
+  repository 1a073853: `(option-value-of :i64 (typed-map-get :i64 m 3) 0)`
+  exited 70 and the whole diagnostic was
+
+      {:code :kotoba/internal-error :severity :error :source \"p6.kotoba\"}
+
+  -- no operation, no span, no cause. That is the failure class this
+  workspace keeps finding: an execution that could not produce an answer
+  returns something indistinguishable from one that did.
+
+  What travels is compiler vocabulary and source position, never user data:
+  the operation SYMBOL, the span, and the host exception's own message.
+  The FORM is deliberately not attached. `kotoba.compiler.diagnostic/from-error`
+  copies `:span` into the diagnostic envelope and never `:form`, and this must
+  not become the first place a source fragment leaks into one.
+
+  `:phase :internal` is kept, so the exit code stays 70 -- a compiler that
+  broke is not a caller who typed something wrong, and the two must not
+  collapse into one code. What changes is that 70 now says WHERE.
+
+  The operation also travels in the `:kotoba.error/code`, because that is the
+  ONE field that survives the CLI envelope. `kotoba.compiler.diagnostic/from-error`
+  copies `:code`, `:severity`, `:source` and `:span` into `:diagnostic` and
+  nothing else, and amu's CLI replaces the MESSAGE of an internal error with
+  the fixed words `internal compiler error` on purpose (a host error's message
+  can carry a filesystem path). Keeping that redaction and putting the
+  operation in the code is what makes the crash diagnosable from CLI output
+  alone without loosening it:
+
+      :code :kotoba.error.internal-operation/option-value-of
+
+  Match the NAMESPACE to recognise the class; read the NAME for the operation.
+
+  Only a head in `reserved-function-names` is spelled into the code. That set
+  is the compiler's own closed vocabulary -- a name a program is forbidden to
+  define -- so nothing user-chosen can reach the envelope through it. Any
+  other head falls back to the generic code and stays in `ex-data` only."
+  [error form]
+  (if (or (compiler-rejection? error)
+          ;; Host stack exhaustion is already OWNED, one frame further out:
+          ;; `analyze` recognises it with `kir/host-stack-exhausted?` and
+          ;; refuses with `:kotoba.error/host-nesting-exhausted`, naming the
+          ;; source depth limit the program was inside of. Wrapping it here
+          ;; would hide the RangeError from that predicate and demote a
+          ;; refusal a caller can act on into an internal failure. Measured:
+          ;; `host-nesting-test` went red under nbb the moment this guard
+          ;; landed without this arm -- 64 `case` arms reported
+          ;; `:kotoba.error.internal-operation/=` instead.
+          (kir/host-stack-exhausted? error))
+    (throw error)
+    (let [operation (when (and (seq? form) (symbol? (first form))) (first form))
+          named? (contains? reserved-function-names operation)
+          span (or (get (meta form) :span) (form-span form))
+          cause (ex-message error)]
+      (throw (ex-info (str "internal compiler failure while lowering "
+                           (if operation (str "`" operation "`") "an expression")
+                           (when span (str " at line " (:line span) " column " (:column span)))
+                           ": " cause)
+                      (cond-> {:phase :internal
+                               :kotoba.error/code
+                               (if named?
+                                 (keyword "kotoba.error.internal-operation" (name operation))
+                                 :kotoba.error/internal-operation-failure)
+                               :kotoba.error/cause cause}
+                        operation (assoc :kotoba.error/operation operation)
+                        span (assoc :span span)))))))
 
 (defn- reject-call-arity!
   "One sentence for a wrong argument count at a call to a module function, in
@@ -4687,7 +4780,9 @@
         option-some-of
         (do (when-not (= 2 (count args)) (reject! "option-some-of requires type and payload" form))
             (list 'option-some-of (first args)
-                  (desugar-expected-value (second (first args)) (second args))))
+                  (desugar-expected-value
+                   (when (generic-option-type? (first args)) (second (first args)))
+                   (second args))))
         option-none-of
         (do (when-not (= 1 (count args)) (reject! "option-none-of requires one type" form))
             (list 'option-none-of (first args)))
@@ -4699,7 +4794,9 @@
         (do (when-not (= 3 (count args)) (reject! "option-value-of requires type, value, and fallback" form))
             (list 'option-value-of (first args)
                   (desugar-expected-value (first args) (second args))
-                  (desugar-expected-value (second (first args)) (nth args 2))))
+                  (desugar-expected-value
+                   (when (generic-option-type? (first args)) (second (first args)))
+                   (nth args 2))))
         option-or
         (do (when-not (= 2 (count args))
               (reject! "option-or requires an option value and a fallback" form))
@@ -4937,7 +5034,7 @@
         (do (when (empty? args)
               (reject! "record requires a type descriptor" form))
             (let [type (canonical-closure-result-type (first args))
-                  field-types (mapv second (nth type 2 nil))]
+                  field-types (when (record-type? type) (mapv second (nth type 2)))]
               (list* 'record-new type
                      (map-indexed (fn [index value]
                                     (desugar-expected-value
@@ -4947,7 +5044,7 @@
         (do (when (empty? args)
               (reject! "record-new requires a type descriptor" form))
             (let [type (canonical-closure-result-type (first args))
-                  field-types (mapv second (nth type 2 nil))]
+                  field-types (when (record-type? type) (mapv second (nth type 2)))]
               (list* 'record-new type
                      (map-indexed (fn [index value]
                                     (desugar-expected-value
@@ -4969,9 +5066,10 @@
         (do (when-not (= 4 (count args))
               (reject! "record-assoc requires type, value, literal field, and replacement" form))
             (let [type (canonical-closure-result-type (first args))
-                  field-type (some (fn [[field field-type]]
-                                     (when (= field (nth args 2)) field-type))
-                                   (nth type 2 nil))]
+                  field-type (when (record-type? type)
+                               (some (fn [[field field-type]]
+                                       (when (= field (nth args 2)) field-type))
+                                     (nth type 2)))]
               (list 'record-assoc type (desugar-expected-value type (second args))
                     (nth args 2) (desugar-expected-value field-type (nth args 3)))))
         record-equal
@@ -4983,21 +5081,29 @@
                     (desugar-expected-value type (nth args 2)))))
         result-ok-of (do (when-not (= 2 (count args)) (reject! "result-ok-of requires type and payload" form))
                          (list 'result-ok-of (first args)
-                               (desugar-expected-value (second (first args)) (second args))))
+                               (desugar-expected-value
+                                (when (parametric-result-type? (first args)) (second (first args)))
+                                (second args))))
         result-err-of (do (when-not (= 2 (count args)) (reject! "result-err-of requires type and payload" form))
                           (list 'result-err-of (first args)
-                                (desugar-expected-value (nth (first args) 2 nil) (second args))))
+                                (desugar-expected-value
+                                 (when (parametric-result-type? (first args)) (nth (first args) 2))
+                                 (second args))))
         result-ok?-of (do (when-not (= 2 (count args)) (reject! "result-ok?-of requires type and result" form))
                           (list 'result-ok?-of (first args)
                                 (desugar-expected-value (first args) (second args))))
         result-value-of (do (when-not (= 3 (count args)) (reject! "result-value-of requires type, result, and fallback" form))
                             (list 'result-value-of (first args)
                                   (desugar-expected-value (first args) (second args))
-                                  (desugar-expected-value (second (first args)) (nth args 2))))
+                                  (desugar-expected-value
+                                   (when (parametric-result-type? (first args)) (second (first args)))
+                                   (nth args 2))))
         result-error-of (do (when-not (= 3 (count args)) (reject! "result-error-of requires type, result, and fallback" form))
                             (list 'result-error-of (first args)
                                   (desugar-expected-value (first args) (second args))
-                                  (desugar-expected-value (nth (first args) 2 nil) (nth args 2))))
+                                  (desugar-expected-value
+                                   (when (parametric-result-type? (first args)) (nth (first args) 2))
+                                   (nth args 2))))
         ;; ADR-2607182410: `(cap-call :some/name value)` -> `(cap-call <int>
         ;; (desugar-expr value))`, resolving the keyword against
         ;; capability-registry BEFORE validate-expr/direct-facts ever see the
@@ -5353,9 +5459,16 @@
             (apply list op (map desugar-expr args)))))))))
 
 (defn- desugar-expr [form]
+  ;; The one chokepoint every desugared node passes through, and therefore the
+  ;; only place a host error escaping ANY branch of the lowering table can be
+  ;; named. The innermost frame wraps first, so the operation reported is the
+  ;; one that actually broke; outer frames see `:phase :internal` and rethrow
+  ;; untouched (`internal-failure!`).
   (let [contextual-result-type *contextual-closure-result-type*
         result (binding [*contextual-closure-result-type* nil]
-                 (desugar-expr* form contextual-result-type))
+                 (try (desugar-expr* form contextual-result-type)
+                      (catch #?(:clj Throwable :cljs :default) error
+                        (internal-failure! error form))))
         location (select-keys (meta form)
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (or (coll? result) (symbol? result)))
@@ -5931,7 +6044,18 @@
         (recur (next pairs) (conj env name)))
       env)))
 
+(declare validate-expr-impl)
+
+;; The three per-expression passes -- lowering, admission and inference --
+;; each get the same wrapper, for the same reason (`internal-failure!`).
+;; Admission and inference destructure a declared type after checking its
+;; shape in most branches and not in all of them, so a host error can escape
+;; here too; the innermost frame names the operation it escaped from.
 (defn validate-expr [form locals functions depth budget]
+  (try (validate-expr-impl form locals functions depth budget)
+       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
+
+(defn- validate-expr-impl [form locals functions depth budget]
   (charge-node! budget form)
   (when (> depth 256)
     (reject! "expression nesting exceeds admission limit" form))
@@ -6513,6 +6637,27 @@
     (reject! (str "abort slice 1 admits throw and calls to aborting functions "
                   "only in tail position or as a let binding value; the throw is in neither")
              form :kotoba.error/abort-position))
+  ;; The legacy pair-map against a canonical typed map. This is a DECISION,
+  ;; not a defect, and the generic sentence below reads like a defect.
+  ;; ADR 0012 decision 1: a keyword-keyed literal keeps the legacy untagged
+  ;; pair-map byte for byte, because that is the representation `map-get`,
+  ;; `map-assoc` and every `match` map pattern are written against; `:i64` and
+  ;; `:string` literals are the ones that were RETYPED to `typed-map-new`.
+  ;; `{}` is legacy for the same reason -- it has no key type of its own.
+  ;;
+  ;; So `(let [m {:a 1}] (typed-map-count [:map :keyword :i64] m))` is refused
+  ;; correctly and `(let [m {1 10}] (typed-map-count [:map :i64 :i64] m))` is
+  ;; admitted correctly, and until now the two answers looked like the same
+  ;; kind of fact about the same kind of program. Name the decision instead.
+  (when (and (= :map actual) (canonical-typed-map-type? expected))
+    (reject! (str "this value is the legacy pair-map, whose type is `map` and not "
+                  (pr-str expected)
+                  ". A map literal keeps the legacy representation when its keys are "
+                  "keywords and when it is empty; only :i64 and :string literals are "
+                  "retyped. Read and write it through get / assoc / contains? / dissoc, "
+                  "or build the typed map with (typed-map-new " (pr-str expected) " ...)")
+             form :kotoba.error/subset-reject
+             {:kotoba.error/expected expected :kotoba.error/actual actual}))
   (when-not (same-expression-type? actual expected)
     (let [type-text #(if (keyword? %) (name %) (pr-str %))]
       ;; The types travel as DATA as well as prose. `infer-absent-parameter-types`
@@ -7191,7 +7336,13 @@
 
       :else (reject! "operation has no admitted type signature" op))))
 
+(declare infer-expression-type-impl)
+
 (defn- infer-expression-type [form locals signatures]
+  (try (infer-expression-type-impl form locals signatures)
+       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
+
+(defn- infer-expression-type-impl [form locals signatures]
   (cond
     (kotoba-integer? form) :i64
     (value/f64-value? form) :f64
