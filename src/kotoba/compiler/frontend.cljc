@@ -2911,6 +2911,52 @@
                       (desugar-expected-value dataspace-request-type request))]
     (attach-source-operation form lowered :dataspace/transact)))
 
+(defn- f32-literal-bits!
+  "The binary32 bit pattern of a decimal literal written in an `:f32` context,
+  or a refusal.
+
+  A decimal literal reaches this compiler as a host binary64: the reader has
+  already rounded, and the decimal text is gone. So there is no way to round
+  decimal -> binary32 in one step, and decimal -> binary64 -> binary32 is not
+  always the value decimal -> binary32 would have been. Double rounding is rare
+  and it is silent, which is the worst combination.
+
+  A literal is therefore admitted only when the binary64 the reader produced
+  round-trips exactly through binary32. `1.5`, `0.5`, `2.0`, `16777216.0` are;
+  `0.1` is not, and is refused rather than quietly becoming a number the author
+  did not write. The explicit spellings for the rounding are
+  `(f64-to-f32-rounded 0.1)` and `(f32-from-bits 0x3DCCCCCD)`, both of which say
+  in the source that a narrowing happened.
+
+  Same fail-closed discipline `lang/value-codec.edn` already applies at the wire
+  (\"never two encodings for one source program\") rather than a second one.
+
+  `##NaN` and the infinities get their own refusal, ahead of the narrowing and
+  not folded into it. Two reasons, and the first is the one that matters: on the
+  JVM `(float ##Inf)` THROWS `IllegalArgumentException: Value out of range for
+  float`, so a shared guard evaluated in the same `let` raises a host exception
+  with no `:phase` and no `:kotoba.error/code` before the check can run --
+  measured, not supposed. The second is that \"narrow it explicitly\" is useless
+  advice for a value that has no decimal form at all.
+
+  Decided by kotoba-lang docs/adr/ADR-kotoba-floating-point-on-native.md."
+  [form]
+  (when-not #?(:clj (Double/isFinite (double form))
+               :cljs (js/Number.isFinite form))
+    (reject! (str "f32 literal must be a finite decimal: " (pr-str form)
+                  " -- write (f32-from-bits <i32>) for a NaN or an infinity")
+             form :kotoba.error/f32-literal-not-finite))
+  (let [narrowed #?(:clj (float form) :cljs (js/Math.fround form))
+        exact? #?(:clj (== (double narrowed) (double form))
+                  :cljs (js/Object.is narrowed form))]
+    (when-not exact?
+      (reject! (str "f32 literal is not exactly representable in binary32: "
+                    (pr-str form)
+                    " -- write (f64-to-f32-rounded " (pr-str form)
+                    ") to narrow it explicitly, or (f32-from-bits <i32>)")
+               form :kotoba.error/f32-literal-inexact))
+    (value/f32-to-i64-bits narrowed)))
+
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; A closed EDN-shaped value in a :document context is already fully
@@ -2926,6 +2972,13 @@
     ;; form before the broader f64 predicate so generated loop indices/defaults
     ;; stay i64 in typed modules.
     (kotoba-integer? form) form
+    ;; A decimal literal in an `:f32` context. Without this branch the literal
+    ;; below turns it into an `(f64-from-bits ...)` -- an f64 -- and every f32
+    ;; operation then rejects its own literal argument as the wrong type, which
+    ;; is why no f32 expression could be written with a number in it at all.
+    ;; The narrowing is exact-or-refused; see `f32-literal-bits!`.
+    (and (= :f32 contextual-result-type) (value/f64-value? form))
+    (list 'f32-from-bits (f32-literal-bits! form))
     (value/f64-value? form) (list 'f64-from-bits (value/f64-to-i64-bits form))
     (keyword? form) form
     (boolean? form) form
