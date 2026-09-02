@@ -165,9 +165,45 @@
 ;; EDN text, so entity/attribute/value are caller-assigned integer ids.
 (def kgraph-operations '{kgraph-assert! 3 kgraph-get 2 kgraph-count 1 kgraph-entity-at 2})
 (def kernel-memory-operations
-  '{kernel-load-u8 3 kernel-load-u8-4k 3 kernel-load-u8-16k 3
-    kernel-store-u8 4 kernel-store-u8-4k 4
+  ;; memwidth: four transfer widths by four window tiers, plus the ADR 0285
+  ;; slice family. Was seven entries, and the seven said something nobody had
+  ;; decided: that `kernel-store-u8` could name a 4 KiB window and not a 16 KiB
+  ;; one, that the u32 pair could name neither, and that 16-bit and 64-bit
+  ;; accesses did not exist -- which is what a PCI vendor/device ID pair and a
+  ;; descriptor ring pointer respectively are.
+  ;;
+  ;; Every entry here is `base length index [value]`, so every one of them gets
+  ;; the SAME provenance treatment: `kernel-memory-op?` below reads this map,
+  ;; so a new width inherits the taint analysis on its first argument without
+  ;; anything else being written. That is the reason to widen a table rather
+  ;; than add a family beside it.
+  ;;
+  ;; The slice family differs from the window family in what its `length` and
+  ;; `index` COUNT -- elements rather than bytes -- and in its ceiling, which
+  ;; is an address-space bound rather than a window profile. Neither difference
+  ;; is visible in the arity or in the provenance rule, which is why they share
+  ;; this table.
+  '{
+    kernel-load-u8 3 kernel-store-u8 4
+    kernel-load-u8-4k 3 kernel-store-u8-4k 4
+    kernel-load-u8-16k 3 kernel-store-u8-16k 4
+    kernel-load-u8-64k 3 kernel-store-u8-64k 4
+    kernel-load-u16 3 kernel-store-u16 4
+    kernel-load-u16-4k 3 kernel-store-u16-4k 4
+    kernel-load-u16-16k 3 kernel-store-u16-16k 4
+    kernel-load-u16-64k 3 kernel-store-u16-64k 4
     kernel-load-u32 3 kernel-store-u32 4
+    kernel-load-u32-4k 3 kernel-store-u32-4k 4
+    kernel-load-u32-16k 3 kernel-store-u32-16k 4
+    kernel-load-u32-64k 3 kernel-store-u32-64k 4
+    kernel-load-u64 3 kernel-store-u64 4
+    kernel-load-u64-4k 3 kernel-store-u64-4k 4
+    kernel-load-u64-16k 3 kernel-store-u64-16k 4
+    kernel-load-u64-64k 3 kernel-store-u64-64k 4
+    slice-load-u8 3 slice-store-u8 4
+    slice-load-u16 3 slice-store-u16 4
+    slice-load-u32 3 slice-store-u32 4
+    slice-load-u64 3 slice-store-u64 4
     ;; The lock pair. `(kernel-try-lock-u32 base length index)` -> 1 if this
     ;; call moved the u32 at `index` from 0 to 1, else 0;
     ;; `(kernel-unlock-u32 base length index)` -> 1 if it moved that word from
