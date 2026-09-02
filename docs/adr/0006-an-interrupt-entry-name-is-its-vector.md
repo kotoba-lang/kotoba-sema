@@ -65,7 +65,7 @@ than a constant to nudge.
 
 ## Evidence
 
-`clojure -M:test`: 133 tests, 756 assertions, 0 failures.
+`clojure -M:test`: 141 tests, 781 assertions, 0 failures (after merging kotoba-lang/main).
 `nbb run-tests.cljs`: 58 tests, 172 assertions, 0 failures.
 
 Two deliberate breaks, each producing the failure it names and no other:
