@@ -6,6 +6,10 @@
   ;; for the fuller explanation). `#?@` (splicing) rather than `#?` here
   ;; because each branch below is more than one require-spec.
   (:require [clojure.set :as set]
+            ;; isr: `starts-with?`/`subs` for the interrupt entry name rule.
+            ;; The alias does not shadow `clojure.core/str`: only symbols
+            ;; carrying a `/` are resolved through it.
+            [clojure.string :as str]
             [kotoba.compiler.affine :as affine]
             [kotoba.artifact.core :as artifact]
             [kotoba.compiler.schema :as schema]
@@ -473,7 +477,61 @@
     ;; the region-provenance rule below has nothing to say about them.
     kernel-fence-load 0 kernel-fence-store 0 kernel-fence-full 0
     kernel-rdtsc 0 kernel-rdtscp 0
-    kernel-swapgs 0})
+    kernel-swapgs 0
+    ;; isr: `(kernel-isr-entry-address vector)` -> the address of the
+    ;; toolchain-generated interrupt entry for that vector. An IDT gate
+    ;; descriptor carries that address split across three offset fields, so a
+    ;; kernel installing its own IDT cannot do it without naming an entry.
+    ;;
+    ;; Arity 1, and the one argument is the vector NUMBER. An entry is declared
+    ;; as `aiueos-isr-<vector>` (see `interrupt-entry-vector`), so the name and
+    ;; the number carry the same information and neither is derived from the
+    ;; other; taking the number is what lets this ride the privileged channel,
+    ;; whose operands are ordinary values. It need not be a literal here --
+    ;; the backend bounds it at run time and traps above the table.
+    ;;
+    ;; It is privileged and never oracled for the strongest form of the
+    ;; `cpuid` reason. A `cpuid` answer invented at compile time is a wrong
+    ;; branch; an address invented here is what the CPU jumps to on an
+    ;; interrupt, because the caller's next act is to write it into a gate.
+    ;; kotoba-kir refuses it outright, and it has no answer at all in the
+    ;; relocatable-object route, where the context is the object's own private
+    ;; 80 bytes.
+    kernel-isr-entry-address 1})
+
+;; isr: an interrupt entry is a function whose NAME is its vector.
+;;
+;; `aiueos-isr-3` is the entry for vector 3. The name carries the number
+;; because the toolchain-generated entry has to know its own vector -- it
+;; passes it to the body -- and a mnemonic table (`bp`, `pf`, ...) would be a
+;; second place to keep the mapping, kept equal by review across three
+;; repositories. A decimal suffix is derivable in both directions with no
+;; table at all.
+(def interrupt-entry-prefix "aiueos-isr-")
+
+;; isr: vectors 0..63. The exceptions are 0..31 and the rest is room for the
+;; remapped legacy PIC (32..47) and a handful of message-signalled lines,
+;; which is what a NIC driver needs. It is a RESERVATION in the image's text
+;; segment -- the packager lays down one fixed-size entry per vector -- so
+;; widening it costs bytes in every kernel image that has any entry at all,
+;; and is a decision with an ADR rather than a constant to nudge.
+(def interrupt-entry-vector-limit 64)
+
+(defn interrupt-entry-vector
+  "The vector `name` declares, or nil when it is not an interrupt entry name.
+
+  Nil for a name that merely starts with the prefix and does not continue as a
+  decimal vector (`aiueos-isr-bp`), and nil for one outside the table -- both
+  of which are refusals rather than admissions, because the packager has no
+  entry to point at either way."
+  [name]
+  (let [text (str name)]
+    (when (and (str/starts-with? text interrupt-entry-prefix)
+               (re-matches #"(0|[1-9][0-9]*)"
+                           (subs text (count interrupt-entry-prefix))))
+      (let [vector (#?(:clj Long/parseLong :cljs js/parseInt)
+                    (subs text (count interrupt-entry-prefix)))]
+        (when (< vector interrupt-entry-vector-limit) vector)))))
 (def list-operations '#{list cons first second rest empty?})
 (def predicate-operations '#{not zero? pos? neg?})
 ;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
@@ -6146,6 +6204,52 @@
            functions)
      :used @used}))
 
+(def interrupt-entry-signature
+  "isr: the signature every interrupt entry body has, and the reason it is
+  fixed rather than declared.
+
+  The toolchain-generated entry is a fixed byte sequence: it saves the general
+  registers, replenishes this object's fuel, loads four registers from the
+  frame the CPU built, and calls. Those four registers are the SysV first four
+  arguments, in order -- the vector, the error code (zero for the vectors that
+  push none), the interrupted RIP and the interrupted RSP. The entry cannot
+  ask the body what it wanted, so a body with a different arity would be
+  handed four registers and read whichever of them it happened to name.
+
+  Every one of them is a machine word out of the interrupt frame, so every
+  parameter is `:i64` and so is the result. A `:string` or record parameter
+  would make the entry hand a raw frame word to code expecting a validated
+  handle."
+  {:arity 4 :param-type :i64 :result :i64})
+
+(defn- validate-interrupt-entries!
+  "isr: refuse a function whose NAME claims an interrupt vector but whose
+  signature is not the one the generated entry calls.
+
+  Names are checked in two directions. `aiueos-isr-3` must have the fixed
+  signature; `aiueos-isr-bp` and `aiueos-isr-64` are refused outright, because
+  they read as entries and the packager has no entry to point at for either --
+  admitting them would produce a function that looks installed and is not."
+  [functions]
+  (doseq [{:keys [name param-types result]} functions
+          :let [text (str name)]
+          :when (str/starts-with? text interrupt-entry-prefix)]
+    (when-not (interrupt-entry-vector name)
+      (reject! (str "interrupt entry name must be " interrupt-entry-prefix
+                    "<vector> with a vector below "
+                    interrupt-entry-vector-limit)
+               name :kotoba.error/interrupt-entry-name))
+    (when-not (= (:arity interrupt-entry-signature) (count param-types))
+      (reject! "interrupt entry must take the vector, error code, rip and rsp"
+               name :kotoba.error/interrupt-entry-signature))
+    (when-not (every? #(= (:param-type interrupt-entry-signature) %) param-types)
+      (reject! "interrupt entry parameters are machine words from the frame"
+               name :kotoba.error/interrupt-entry-signature))
+    (when-not (= (:result interrupt-entry-signature) result)
+      (reject! "interrupt entry result must be i64"
+               name :kotoba.error/interrupt-entry-signature)))
+  functions)
+
 (defn- resolve-loop-helper-param-types
   "`loop`/`recur` desugars to a synthesized recursive helper whose parameters
   are the loop bindings followed by the captured outer variables (see the
@@ -9241,6 +9345,7 @@
         ;; function signatures. Re-run absent-result inference now that the
         ;; internal `option-value-of` form has an admitted type signature.
         parsed (infer-absent-results parsed)
+        _ (validate-interrupt-entries! parsed)
         named-elaboration (elaborate-named-abilities parsed)
         parsed (:functions named-elaboration)
         parsed (infer-closure-refinements parsed preliminary-lambdas)
