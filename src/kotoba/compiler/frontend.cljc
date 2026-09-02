@@ -199,6 +199,41 @@
     ;; the arena's design is one u32 lock word at offset 0 of an RW/NX page,
     ;; with everything else mutated only while it is held. amu#625.
     kernel-try-lock-u32 3 kernel-unlock-u32 3
+    ;; sysops: the general atomics (kotoba-gmir ADR 0007). Everything the long
+    ;; note above says about a LOCK stands -- and it is precisely why the
+    ;; general form is now here beside it rather than instead of it.
+    ;;
+    ;; That note recorded a measurement: across the five aiueos value-runtime
+    ;; objects, all eleven call sites were the same binary try-lock at offset
+    ;; zero, so a general compare-exchange would have widened the surface to
+    ;; cover no observed use. The measurement was right and it was about the
+    ;; value runtime. A NIC's descriptor ring is a different program, and it
+    ;; has exactly the uses that measurement did not find: a producer index the
+    ;; guest advances by its own delta, an ownership word it swaps for its own
+    ;; value, a doorbell claimed against its own comparand. Fixing the
+    ;; comparand and the replacement makes those inexpressible.
+    ;;
+    ;; The two costs the note names are paid where it said they would be, and
+    ;; in the backend rather than here: x86-64 saves and restores RAX around a
+    ;; fixed sequence (`kotoba.native.machine-ir`), and the AArch64 retry stays
+    ;; inside one selection rather than becoming guest control flow.
+    ;;
+    ;;   (kernel-atomic-add-u32 base length index delta)     -> the old word
+    ;;   (kernel-xchg-u32       base length index new)       -> the old word
+    ;;   (kernel-cmpxchg-u32    base length index want new)  -> the old word
+    ;;
+    ;; and the u64 spelling of each. All six answer with the word memory held
+    ;; BEFORE the operation, which is what the machine leaves in the
+    ;; destination register; a compare-exchange answering with a success flag
+    ;; would force the caller to re-read on failure, which is the race it
+    ;; exists to close.
+    ;;
+    ;; Bounds-checked exactly like the loads and stores -- same `base length
+    ;; index` prefix, same taint analysis on `base`, and a tail requirement of
+    ;; the operation's own width.
+    kernel-atomic-add-u32 4 kernel-atomic-add-u64 4
+    kernel-xchg-u32 4 kernel-xchg-u64 4
+    kernel-cmpxchg-u32 5 kernel-cmpxchg-u64 5
     ;; (kernel-subregion base length offset sublen) -> base+offset, trapping
     ;; unless offset+sublen fits inside length. Listed here so its first
     ;; argument is checked as a base like every other kernel op's: a derived
@@ -318,7 +353,27 @@
     ;; hand-assembles today. Its declared result is i64 because every operation
     ;; here has one; nothing ever reads it.
     kernel-system-table 0 kernel-load-ptr 2
-    kernel-uefi-call2 4 kernel-jump-to 2})
+    kernel-uefi-call2 4 kernel-jump-to 2
+    ;; sysops: barriers, the timestamp counter and the GS-base swap
+    ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
+    ;;
+    ;; `(kernel-fence-store)` before a doorbell write and
+    ;; `(kernel-fence-load)` after a status read are the ordering half of a
+    ;; device driver: a descriptor written before a doorbell is rung only if
+    ;; something says so, and on x86 that something is `sfence`/`lfence`.
+    ;; `(kernel-fence-full)` is the two-way barrier.
+    ;;
+    ;; `(kernel-rdtsc)` and `(kernel-rdtscp)` answer with the 64-bit timestamp
+    ;; counter. `(kernel-swapgs)` exchanges GS.base with KERNEL_GS_BASE and
+    ;; answers 0 -- the one instruction a ring-0 entry path cannot express any
+    ;; other way.
+    ;;
+    ;; They are privileged rather than memory operations because none of them
+    ;; names a region: there is no base, no length and no index to bound, so
+    ;; the region-provenance rule below has nothing to say about them.
+    kernel-fence-load 0 kernel-fence-store 0 kernel-fence-full 0
+    kernel-rdtsc 0 kernel-rdtscp 0
+    kernel-swapgs 0})
 (def list-operations '#{list cons first second rest empty?})
 (def predicate-operations '#{not zero? pos? neg?})
 ;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
@@ -2948,6 +3003,52 @@
                       (desugar-expected-value dataspace-request-type request))]
     (attach-source-operation form lowered :dataspace/transact)))
 
+(defn- f32-literal-bits!
+  "The binary32 bit pattern of a decimal literal written in an `:f32` context,
+  or a refusal.
+
+  A decimal literal reaches this compiler as a host binary64: the reader has
+  already rounded, and the decimal text is gone. So there is no way to round
+  decimal -> binary32 in one step, and decimal -> binary64 -> binary32 is not
+  always the value decimal -> binary32 would have been. Double rounding is rare
+  and it is silent, which is the worst combination.
+
+  A literal is therefore admitted only when the binary64 the reader produced
+  round-trips exactly through binary32. `1.5`, `0.5`, `2.0`, `16777216.0` are;
+  `0.1` is not, and is refused rather than quietly becoming a number the author
+  did not write. The explicit spellings for the rounding are
+  `(f64-to-f32-rounded 0.1)` and `(f32-from-bits 0x3DCCCCCD)`, both of which say
+  in the source that a narrowing happened.
+
+  Same fail-closed discipline `lang/value-codec.edn` already applies at the wire
+  (\"never two encodings for one source program\") rather than a second one.
+
+  `##NaN` and the infinities get their own refusal, ahead of the narrowing and
+  not folded into it. Two reasons, and the first is the one that matters: on the
+  JVM `(float ##Inf)` THROWS `IllegalArgumentException: Value out of range for
+  float`, so a shared guard evaluated in the same `let` raises a host exception
+  with no `:phase` and no `:kotoba.error/code` before the check can run --
+  measured, not supposed. The second is that \"narrow it explicitly\" is useless
+  advice for a value that has no decimal form at all.
+
+  Decided by kotoba-lang docs/adr/ADR-kotoba-floating-point-on-native.md."
+  [form]
+  (when-not #?(:clj (Double/isFinite (double form))
+               :cljs (js/Number.isFinite form))
+    (reject! (str "f32 literal must be a finite decimal: " (pr-str form)
+                  " -- write (f32-from-bits <i32>) for a NaN or an infinity")
+             form :kotoba.error/f32-literal-not-finite))
+  (let [narrowed #?(:clj (float form) :cljs (js/Math.fround form))
+        exact? #?(:clj (== (double narrowed) (double form))
+                  :cljs (js/Object.is narrowed form))]
+    (when-not exact?
+      (reject! (str "f32 literal is not exactly representable in binary32: "
+                    (pr-str form)
+                    " -- write (f64-to-f32-rounded " (pr-str form)
+                    ") to narrow it explicitly, or (f32-from-bits <i32>)")
+               form :kotoba.error/f32-literal-inexact))
+    (value/f32-to-i64-bits narrowed)))
+
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; A closed EDN-shaped value in a :document context is already fully
@@ -2963,6 +3064,13 @@
     ;; form before the broader f64 predicate so generated loop indices/defaults
     ;; stay i64 in typed modules.
     (kotoba-integer? form) form
+    ;; A decimal literal in an `:f32` context. Without this branch the literal
+    ;; below turns it into an `(f64-from-bits ...)` -- an f64 -- and every f32
+    ;; operation then rejects its own literal argument as the wrong type, which
+    ;; is why no f32 expression could be written with a number in it at all.
+    ;; The narrowing is exact-or-refused; see `f32-literal-bits!`.
+    (and (= :f32 contextual-result-type) (value/f64-value? form))
+    (list 'f32-from-bits (f32-literal-bits! form))
     (value/f64-value? form) (list 'f64-from-bits (value/f64-to-i64-bits form))
     (keyword? form) form
     (boolean? form) form
