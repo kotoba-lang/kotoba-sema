@@ -29,6 +29,29 @@
 (def max-function-docstring-chars frontend/max-function-docstring-chars)
 (def kernel-region-report frontend/kernel-region-report)
 
+(def kernel-operation-heads
+  "Every kernel head this frontend admits as a builtin: the byte-indexed and
+  element-indexed memory operations, the CARRIED slice family, and the
+  privileged machine operations. A set of symbols.
+
+  Public because kotoba-lang's `lang/guest-grammar.edn` `:admitted-builtins`
+  claims to name exactly these, four repositories carry a byte copy of that
+  file, and a consumer therefore has to be able to CHECK the claim rather than
+  restate it as a number. amu's `guest-grammar-vendor-test` compares the
+  grammar it reads against this set across its `deps.edn` pin; before this
+  existed it pinned the count as a literal, which went stale one authority
+  edit later and reported staleness as drift.
+
+  A set rather than the three tables, because the tables' arities are this
+  repository's business and a consumer that read them would be depending on
+  the implementation -- which is what `kotoba.compiler.namespace-reachability`
+  refuses, correctly."
+  (into #{}
+        (mapcat keys)
+        [frontend/kernel-memory-operations
+         frontend/slice-value-operations
+         frontend/kernel-privileged-operations]))
+
 (defn- default-controls? []
   (= [max-functions max-expression-nodes max-lowered-nodes max-bindings
       max-list-items max-namespace-capabilities
