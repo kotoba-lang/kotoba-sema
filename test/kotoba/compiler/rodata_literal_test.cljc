@@ -1,0 +1,124 @@
+(ns kotoba.compiler.rodata-literal-test
+  "boot-lit: the four read-only-literal spellings, and the two wider firmware
+  calls.
+
+  What this suite decides is what the frontend decides: the heads are known,
+  each owns its arity, each takes a STRING LITERAL rather than an expression,
+  and each malformed shape is refused where the author can see what they wrote.
+  What it deliberately does NOT say is that any of them is safe on a given
+  target -- the frontend admits these target-independently, exactly as it
+  admits `kernel-write-cr3` for `x86_64-linux-kotoba-v1`, and amu owns the
+  gate."
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [clojure.string :as str]
+            [kotoba.compiler.frontend :as frontend]
+            [kotoba.sema :as sema]))
+
+(defn- unit [source] (str source "\n(defn main [] :i64 0)"))
+
+(defn- analyzes? [source]
+  (try (do (sema/analyze (unit source)) true)
+       (catch #?(:clj Throwable :cljs :default) _ false)))
+
+(defn- rejection-of [source]
+  (try (do (sema/analyze (unit source)) nil)
+       (catch #?(:clj Throwable :cljs :default) e (ex-message e))))
+
+(def ^:private good
+  {'ucs2 "AIUEOS"
+   'guid "5B1B31A1-9562-11D2-8E3F-00A0C969723B"
+   'bytes-literal "48656c6c6f"
+   'bytes-literal-length "48656c6c6f"})
+
+(deftest the-four-heads-are-declared-at-arity-one
+  (is (= '{ucs2 1 guid 1 bytes-literal 1 bytes-literal-length 1}
+         frontend/rodata-literal-operations))
+  (testing "and three of them name a pool encoding; the length names none"
+    (is (= '{ucs2 :utf-16le-nul guid :guid-mixed-endian bytes-literal :hex-bytes}
+           frontend/rodata-literal-encodings))
+    (is (nil? (get frontend/rodata-literal-encodings 'bytes-literal-length)))))
+
+(deftest each-head-admits-a-string-literal-and-refuses-anything-else
+  (doseq [[head text] good]
+    (testing (str head " with a literal")
+      (is (analyzes? (str "(defn f [] :i64 (" head " \"" text "\"))")) head))
+    (testing (str head " refuses a parameter")
+      ;; There is no runtime here that could place bytes for a string that
+      ;; does not exist until the program runs.
+      (is (= "rodata literal requires a string literal"
+             (rejection-of (str "(defn f [s] :i64 (" head " s))")))
+          head))
+    (testing (str head " refuses an i64")
+      (is (= "rodata literal requires a string literal"
+             (rejection-of (str "(defn f [] :i64 (" head " 42))")))
+          head))
+    (testing (str head " refuses a second argument")
+      (is (= "rodata literal arity mismatch"
+             (rejection-of (str "(defn f [] :i64 (" head " \"" text "\" \"" text "\"))")))
+          head))))
+
+(deftest a-malformed-literal-is-refused-at-the-source
+  (doseq [[label source]
+          [["a GUID one digit short"
+            "(defn f [] :i64 (guid \"5B1B31A1-9562-11D2-8E3F-00A0C969723\"))"]
+           ["a GUID with a non-hex digit"
+            "(defn f [] :i64 (guid \"5B1B31A1-9562-11D2-8E3F-00A0C969723G\"))"]
+           ["a GUID with braces"
+            "(defn f [] :i64 (guid \"{5B1B31A1-9562-11D2-8E3F-00A0C969723B}\"))"]
+           ["a GUID with four fields"
+            "(defn f [] :i64 (guid \"5B1B31A1-9562-11D2-00A0C969723B\"))"]
+           ;; Five fields, every one an even number of hex digits -- so the
+           ;; hex check admits it and only the WIDTHS refuse it. Without this
+           ;; case, dropping the width check leaves the suite green.
+           ["five fields of the wrong widths"
+            "(defn f [] :i64 (guid \"5B1B31A19562-11D2-8E3F-00A0C969723B-00\"))"]
+           ["odd hex"
+            "(defn f [] :i64 (bytes-literal \"abc\"))"]
+           ["non-hex"
+            "(defn f [] :i64 (bytes-literal \"zz\"))"]
+           ["an odd hex length"
+            "(defn f [] :i64 (bytes-literal-length \"abc\"))"]
+           ["a surrogate pair in UCS-2"
+            "(defn f [] :i64 (ucs2 \"hello\\uD83D\\uDE00\"))"]]]
+    (testing label
+      (is (= "rodata literal is malformed for its encoding"
+             (rejection-of source))
+          label))))
+
+(deftest the-result-is-an-i64-word
+  ;; If any of them inferred something other than i64, arithmetic over it
+  ;; would be a type mismatch rather than an admission.
+  (doseq [[head text] good]
+    (is (analyzes? (str "(defn f [] :i64 (+ (" head " \"" text "\") 0))")) head)))
+
+(deftest the-heads-are-reserved-function-names
+  ;; A function named `guid` would shadow the head silently: `(guid "...")`
+  ;; would become a call with a string argument to a function whose parameter
+  ;; is declared i64.
+  (doseq [head (keys frontend/rodata-literal-operations)]
+    (is (contains? frontend/reserved-function-names head) head)))
+
+(deftest the-two-wider-firmware-calls-declare-six-and-eight-operands
+  (is (= 6 (get frontend/kernel-privileged-operations 'kernel-uefi-call4)))
+  (is (= 8 (get frontend/kernel-privileged-operations 'kernel-uefi-call6)))
+  (testing "each admits its own arity and refuses one argument too many"
+    ;; The operands are two parameters and a tail of constants rather than one
+    ;; parameter each: this frontend caps a FUNCTION's parameter count at the
+    ;; ABI's argument registers, so a six-parameter wrapper is rejected as
+    ;; "function parameters exceed ABI-supported arity" -- a real rule, and one
+    ;; that would have made this test green for the wrong reason had the
+    ;; assertion been `analyzes?` alone. A privileged operation's operand count
+    ;; is not a function's parameter count, and this is where that shows.
+    (doseq [[head arity] '{kernel-uefi-call4 6 kernel-uefi-call6 8}]
+      (let [call (fn [n] (str "(" head " a b"
+                              (apply str (map #(str " " %) (range (- n 2))))
+                              ")"))
+            wrapper (fn [n] (str "(defn f [a b] :i64 " (call n) ")"))]
+        (is (analyzes? (wrapper arity)) head)
+        (is (= "kernel privileged operation arity mismatch"
+               (rejection-of (wrapper (inc arity))))
+            head)
+        (is (= "kernel privileged operation arity mismatch"
+               (rejection-of (wrapper (dec arity))))
+            head)))))
