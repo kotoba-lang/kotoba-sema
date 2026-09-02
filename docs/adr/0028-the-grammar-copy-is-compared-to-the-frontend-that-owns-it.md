@@ -31,15 +31,25 @@ this repository and reached the authority in none of them.
 
 ## Why nothing noticed
 
-`:admitted-builtins` **decides nothing**. Grepped across kotoba-lang, amu,
-kotoba and this repository on 2026-09-03: no source reads it to admit
-anything. It is read by exactly one thing, kotoba-lang's own
-`admitted-source-forms`, which explicitly excludes it from the set that must
-be classified in `surface-status`.
+Nothing in this repository, in amu or in kotoba-lang reads `:admitted-builtins`
+at all, and nothing anywhere reads it to decide what the COMPILER admits — the
+three frontend tables above do that, and they never consult the file. Its one
+reader anywhere is `kotoba.grammar/admitted-heads`, in kotoba-lang/kotoba's
+vendored grammar loader (`vendor/grammar/src/kotoba/grammar.clj`), where a head
+missing from the set is reported as `:unknown-form`.
 
-A description that nothing compares to the thing it describes will be wrong
-eventually, and nothing will fail when it becomes wrong. That is the whole
-finding; the 111 missing heads are the symptom.
+So the understatement's consequence was one repository calling 111 heads the
+compiler admits unknown, with nothing failing. A description that nothing
+compares to the thing it describes will be wrong eventually, and nothing will
+fail when it becomes wrong. That is the whole finding; the 111 missing heads
+are the symptom.
+
+> **Corrected 2026-09-03, after this ADR first landed.** The paragraph above
+> originally said `:admitted-builtins` "decides nothing", from a grep across
+> the four repositories that covered `src test scripts` and not `vendor/` —
+> which is where the one reader lives. Measuring a subset and reporting it as
+> the whole is the defect this ADR is about, so the correction is recorded
+> rather than made quietly.
 
 ## The decision
 
@@ -51,7 +61,7 @@ repository is uniquely able to assert:
    heads named in the failure message rather than "the files differ". The
    frontend lives here, so this comparison can be made nowhere else.
 2. The vendored copy's sha256 equals the authority digest of the 2026-09-03
-   wave, `9f4a779c…`. The same literal is pinned in kotoba-lang, amu and
+   wave, `3e3f9748…`. The same literal is pinned in kotoba-lang, amu and
    kotoba, which makes the next authority edit a four-repository wave by
    construction.
 
@@ -91,7 +101,7 @@ Deliberately broken by deleting `"kernel-dot-f32"` from the vendored copy:
   2 failures, exit 1
   the frontend admits heads the authority does not name: ("kernel-dot-f32")
   vendored grammar drifted from the authority
-    expected 9f4a779c…  actual 0af2cc09…
+    expected 3e3f9748…  actual 0af2cc09…
 ```
 
 Both failures name the head. A run that could not open the resource fails on
