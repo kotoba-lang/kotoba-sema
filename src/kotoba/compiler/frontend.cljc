@@ -38,10 +38,18 @@
      :cljs #{}))
 
 (def forbidden-heads
+  ;; `atom` left this set on 2026-09-02: local-state slice 1 (kotoba-lang
+  ;; `lang/local-state.edn`) admits a non-escaping, function-local atom by
+  ;; ELABORATION -- it becomes ordinary let rebindings, so no cell exists at
+  ;; runtime and no ambient state is created. `swap!` / `reset!` were never in
+  ;; this literal set; they were forbidden through the vendored guest grammar,
+  ;; which drops them for the same reason. `ref` / `dosync` / `volatile!` /
+  ;; `set!` / `binding` / `var` / `alter-var-root` stay refused: they have no
+  ;; ability model decided and no widening path.
   (into '#{load load-file load-string read-string compile
            require use import ns-resolve resolve alter-var-root
            future pmap agent send send-off new . .. set! defmacro
-           locking dosync atom ref volatile!}
+           locking dosync ref volatile!}
         (load-catalog-forbidden)))
 
 ;; The language-owned semantic catalog is vendored byte-for-byte from
@@ -940,6 +948,10 @@
              (set (keys i32-operations))
              (set (keys i64-operations))
              lazy-sequence-operations
+             ;; local-state slice 1: these four are no longer in
+             ;; forbidden-heads, so they have to be reserved here or a program
+             ;; could define `(defn swap! ...)` and shadow the head silently.
+             '#{atom swap! reset! deref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
                 hetero-vector typed-set record match-result match-variant match-option}))
 (def max-functions 1024)
@@ -1320,6 +1332,9 @@
   '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!
      doseq dotimes defmulti defmethod throw try catch
      future pmap agent send send-off
+     ;; local-state slice 1 left forbidden-heads on 2026-09-02; naming the
+     ;; heads here keeps the pure-product surface exactly what it was.
+     atom swap! reset! deref
      condp cond-> cond->> some-> some->> as-> -> ->>})
 
 (defn- pure-product-form-head [form]
@@ -4949,6 +4964,550 @@
 (defn- valid-name? [value]
   (and (simple-symbol? value) (<= (count (name value)) max-symbol-chars)))
 
+;; ---------------------------------------------------------------------------
+;; Local state -- the atom slice 1 elaboration (kotoba-lang `lang/local-state.edn`).
+;;
+;; `lang/surface-status.edn` `:no-ambient-mutation` bans `atom`/`swap!`/
+;; `reset!` under the invariant that state must not be AMBIENT -- not that
+;; mutation is forbidden. The `:state` capability kit is the admitted model for
+;; state that ESCAPES or PERSISTS. It is the wrong model for
+;;
+;;     (let [a (atom 0)] (swap! a + 1) @a)
+;;
+;; which needs no host, no grant and no runtime cell: the atom is born and dies
+;; inside one function body, so the compiler can see every write. This slice
+;; admits exactly that shape and compiles it away.
+;;
+;; A cell is NOT a value. The binding name introduced by `(atom init)` may
+;; appear only as the first argument of `swap!` / `reset!` / `deref` (`@a`
+;; reads as `(clojure.core/deref a)` on the JVM reader, which is normalised
+;; here). Every other mention -- passed as an argument, returned, stored,
+;; captured by `fn`, read inside `loop`/`doseq`/`dotimes` -- is refused by the
+;; escape rule below, which is what keeps the state non-ambient: nothing can
+;; observe it except the straight-line code that owns it.
+;;
+;; The elaboration is state passing. The cell becomes an ordinary let-bound
+;; value, REBOUND after every write; `deref` reads the current binding;
+;; `swap!`/`reset!` evaluate to the new value (Clojure's own answer). Where a
+;; branch writes, the branching form is emitted ONCE PER MUTATED CELL plus once
+;; for its own value, and the enclosing scope rebinds each cell from its copy:
+;;
+;;     (let [a (atom 0)] (if c (swap! a + 10) (reset! a 5)) (+ @a 1))
+;;
+;;     (let [__kotoba_cell_1_2_a 0
+;;           __kotoba_cell_1_5_a (if c (let [__kotoba_cell_1_3_a (+ __kotoba_cell_1_2_a 10)]
+;;                                       __kotoba_cell_1_3_a)
+;;                                     (let [__kotoba_cell_1_4_a 5] __kotoba_cell_1_4_a))
+;;           ...]
+;;       (+ __kotoba_cell_1_5_a 1))
+;;
+;; Copying a branch is sound because Kotoba branches are pure -- the copies
+;; compute the same values and differ only in which one they project. The one
+;; observable exception is a capability call, so a branch that both writes a
+;; cell and calls a capability is refused rather than duplicated.
+;;
+;; Nothing is added to the effect row: the cell does not exist at runtime and
+;; there is no authority to declare. `:named-operations` gains `:local-state`
+;; so the elaboration is still visible in `check` output and provenance.
+;;
+;; A program with no `atom` / `swap!` / `reset!` / `deref` skips this pass
+;; entirely (`local-state-source?`), so its lowering is byte-for-byte what it
+;; was -- pinned by a golden in `test/kotoba/compiler/local_state_test.clj`.
+
+(def ^:dynamic *local-state-used*
+  "Set once per analyze when an atom cell is elaborated, so `:named-operations`
+  can carry `:local-state`. Created outside the desugaring `binding` in
+  `analyze*` for the same reason `used-capabilities` is."
+  nil)
+
+(def ^:dynamic *local-state-ids*
+  "Per-function counter behind cell binding names. Deterministic (a function of
+  the source), never `gensym`, for the reason `*synthetic-counter*` gives."
+  nil)
+
+(def ^:private local-state-note
+  "atom slice 1 admits swap!/reset!/deref in straight-line code of the binding function only")
+
+(def ^:private local-state-write-heads '#{atom swap! reset!})
+
+(def ^:private local-state-scope-heads
+  "Heads that open a scope no cell can be threaded through: the body may run
+  zero times, many times, or later, so a rebinding chain cannot express it."
+  '#{fn fn* loop recur doseq dotimes lazy-seq})
+
+(def ^:private local-state-conditional-heads
+  "Heads whose operands are not all evaluated, or whose expansion moves them.
+  Hoisting a write out of one would make it unconditional, so a write inside
+  is refused rather than silently promoted."
+  '#{and or if-not when-not if-let when-let if-some when-some
+     some-> some->> cond-> cond->> condp match try catch throw assert
+     -> ->> as->})
+
+(def ^:private local-state-effect-heads
+  '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!})
+
+(defn- local-state-deref-head? [head]
+  (or (= head 'deref) (= head 'clojure.core/deref)))
+
+(defn- local-state-head [form]
+  (when (and (seq? form) (seq form)) (first form)))
+
+(defn- local-state-nodes [form] (tree-seq coll? seq form))
+
+(defn- local-state-source?
+  "Whether this body mentions the slice at all. A `false` here is what makes
+  the pass a no-op -- and therefore byte-identical -- for every other program."
+  [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (or (contains? local-state-write-heads head)
+                         (local-state-deref-head? head))))
+                 (local-state-nodes form))))
+
+(defn- local-state-writes? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (contains? local-state-write-heads head)))
+                 (local-state-nodes form))))
+
+(defn- local-state-reads? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (local-state-deref-head? head)))
+                 (local-state-nodes form))))
+
+(defn- local-state-mentions-cell? [form cells]
+  (boolean (some #(and (symbol? %) (contains? cells %)) (local-state-nodes form))))
+
+(defn- local-state-touches? [form cells]
+  (or (local-state-writes? form)
+      (local-state-reads? form)
+      (local-state-mentions-cell? form cells)))
+
+(defn- local-state-effectful? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (or (contains? local-state-effect-heads head)
+                         (contains? source-operation-registry head))))
+                 (local-state-nodes form))))
+
+(defn- local-state-escape! [name form]
+  (reject! (str "atom `" name "` escapes its let scope (" local-state-note ")")
+           form :kotoba.error/local-state-escape))
+
+(defn- local-state-position! [head form]
+  (reject! (str "swap!/reset! is not admitted inside `" head
+                "` (atom slice 1 admits them in let, do, if, when, cond and case only)")
+           form :kotoba.error/local-state-position))
+
+(defn- local-state-cell-ref!
+  "The symbol currently holding CELL's value; refuses a first argument that is
+  not a cell bound by `(atom ...)` in this function body."
+  [op target cells form]
+  (if (and (simple-symbol? target) (contains? cells target))
+    (:sym (get cells target))
+    (reject! (str op " expects a let-bound atom cell as its first argument; got `"
+                  (pr-str target) "` (atom slice 1)")
+             form :kotoba.error/local-state-not-a-cell)))
+
+(defn- local-state-wrap [bindings value]
+  (if (seq bindings) (list 'let (vec bindings) value) value))
+
+(defn- local-state-fresh
+  "A new binding symbol for CELL. The cell's id is stable across rebindings so
+  the type check can tie them together; the second number is drawn from one
+  per-function counter so no two bindings anywhere in the function collide."
+  [cells name]
+  (let [id (or (:id (get cells name)) (vswap! *local-state-ids* inc))
+        n (vswap! *local-state-ids* inc)
+        sym (symbol (str "__kotoba_cell_" id "_" n "_" name))]
+    [(assoc cells name {:id id :sym sym}) sym]))
+
+(defn- local-state-changed
+  "The cells of BEFORE whose binding AFTER moved, ordered by cell id so the
+  emitted bindings are a function of the source."
+  [before after]
+  (vec (sort-by #(:id (get before %))
+                (filter #(not= (:sym (get before %)) (:sym (get after %)))
+                        (keys before)))))
+
+(defn- local-state-cell-parts
+  "`[cell-id source-name]` for a cell binding symbol, else nil."
+  [value]
+  (when (simple-symbol? value)
+    (let [text (name value)]
+      (when (str/starts-with? text "__kotoba_cell_")
+        (let [m (re-matches #"(\d+)_(\d+)_(.+)" (subs text (count "__kotoba_cell_")))]
+          (when m [(nth m 1) (nth m 3)]))))))
+
+(defn- local-state-type-text [type]
+  (if (keyword? type) (name type) (pr-str type)))
+
+(declare local-state-tx local-state-subst)
+
+(defn- local-state-subst
+  "Rewrite `(deref c)` to the symbol holding c's value inside a subtree that
+  does NOT write. Every other mention of a cell is an escape."
+  [form cells]
+  (cond
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (local-state-deref-head? head)
+        (do (when-not (= 2 (count form))
+              (reject! "deref takes exactly one argument (atom slice 1)"
+                       form :kotoba.error/local-state-arity))
+            (local-state-cell-ref! "deref" (second form) cells form))
+
+        (contains? local-state-scope-heads head)
+        (do (when-let [cell (first (filter #(and (symbol? %) (contains? cells %))
+                                           (local-state-nodes form)))]
+              (local-state-escape! cell form))
+            form)
+
+        :else
+        (let [parts (mapv #(local-state-subst % cells) form)]
+          (if (= (seq parts) (seq form))
+            form
+            (with-meta (apply list parts) (meta form))))))
+
+    (vector? form)
+    (let [parts (mapv #(local-state-subst % cells) form)]
+      (if (= parts form) form (with-meta parts (meta form))))
+
+    (set? form) (into #{} (map #(local-state-subst % cells)) form)
+    (map? form) (into {} (map (fn [[k v]] [(local-state-subst k cells)
+                                           (local-state-subst v cells)]))
+                      form)
+    (symbol? form) (if (contains? cells form) (local-state-escape! form form) form)
+    :else form))
+
+(defn- local-state-tx-items [items cells]
+  (reduce (fn [acc item]
+            (let [res (local-state-tx item (:cells acc))]
+              (-> acc
+                  (update :bindings into (:bindings res))
+                  (update :items conj (:value res))
+                  (assoc :cells (:cells res)))))
+          {:bindings [] :items [] :cells cells}
+          items))
+
+(defn- local-state-tx-swap [form cells]
+  (when (< (count form) 3)
+    (reject! "swap! takes a cell, a function, and that function's extra arguments (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (let [[_ target f & extra] form
+        current (local-state-cell-ref! "swap!" target cells form)]
+    (when (local-state-writes? (cons f extra))
+      (reject! (str "a swap! argument must not write another atom (" local-state-note ")")
+               form :kotoba.error/local-state-position))
+    (let [applied (local-state-tx-items (cons f extra) cells)
+          [cells' sym] (local-state-fresh (:cells applied) target)]
+      {:bindings (conj (vec (:bindings applied)) sym
+                       (apply list (first (:items applied)) current (rest (:items applied))))
+       :value sym
+       :cells cells'})))
+
+(defn- local-state-tx-reset [form cells]
+  (when-not (= 3 (count form))
+    (reject! "reset! takes a cell and one value (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (let [[_ target value] form
+        _ (local-state-cell-ref! "reset!" target cells form)]
+    (when (local-state-writes? value)
+      (reject! (str "a reset! value must not write another atom (" local-state-note ")")
+               form :kotoba.error/local-state-position))
+    (let [res (local-state-tx value cells)
+          [cells' sym] (local-state-fresh (:cells res) target)]
+      {:bindings (conj (vec (:bindings res)) sym (:value res))
+       :value sym
+       :cells cells'})))
+
+(defn- local-state-branch-copies
+  "The shared tail of every branching join: one copy of the branching form per
+  mutated cell, then one for the form's own value. BRANCHES are the transformed
+  arms; ASSEMBLE rebuilds the branching form from one tail expression per arm."
+  [cells-in branches assemble form]
+  (let [changed (vec (sort-by #(:id (get cells-in %))
+                              (distinct (mapcat #(local-state-changed cells-in (:cells %))
+                                                branches))))]
+    (if (empty? changed)
+      {:changed [] :bindings []
+       :value (assemble (mapv #(local-state-wrap (:bindings %) (:value %)) branches))
+       :cells cells-in}
+      (let [[cells' projections]
+            (reduce (fn [[cs acc] cell]
+                      (let [[cs' sym] (local-state-fresh cs cell)]
+                        [cs' (conj acc sym
+                                   (assemble
+                                    (mapv #(local-state-wrap
+                                            (:bindings %)
+                                            (:sym (get (:cells %) cell)))
+                                          branches)))]))
+                    [cells-in []] changed)
+            value-sym (synthetic "cellvalue")]
+        {:changed changed
+         :bindings (conj (vec projections) value-sym
+                         (assemble (mapv #(local-state-wrap (:bindings %) (:value %))
+                                         branches)))
+         :value value-sym
+         :cells cells'
+         :form form}))))
+
+(defn- local-state-guard-branch! [branch cells-in form]
+  (when (and (seq (local-state-changed cells-in (:cells branch)))
+             (local-state-effectful? (:source branch)))
+    (reject! (str "a branch that writes an atom must not contain a capability call"
+                  " (atom slice 1 elaborates the branch once per cell)")
+             form :kotoba.error/local-state-effectful-branch)))
+
+(defn- local-state-tx-branching
+  "Shared driver for `if` and `case`: transform the scrutinee, transform each
+  arm against the post-scrutinee cells, then join."
+  [scrutinee arms assemble-with-scrutinee cells form]
+  (let [head (local-state-tx scrutinee cells)
+        cells1 (:cells head)
+        branches (mapv (fn [arm] (assoc (local-state-tx arm cells1) :source arm)) arms)
+        _ (doseq [branch branches] (local-state-guard-branch! branch cells1 form))
+        scrutinee-value (:value head)
+        simple? (or (symbol? scrutinee-value) (not (coll? scrutinee-value)))
+        scrutinee-sym (if simple? scrutinee-value (synthetic "cellscrutinee"))
+        joined (local-state-branch-copies
+                cells1 branches
+                (fn [tails] (assemble-with-scrutinee scrutinee-sym tails))
+                form)]
+    (if (empty? (:changed joined))
+      {:bindings (vec (:bindings head))
+       :value (assemble-with-scrutinee scrutinee-value
+                                       (mapv #(local-state-wrap (:bindings %) (:value %))
+                                             branches))
+       :cells cells1}
+      {:bindings (vec (concat (:bindings head)
+                              (when-not simple? [scrutinee-sym scrutinee-value])
+                              (:bindings joined)))
+       :value (:value joined)
+       :cells (:cells joined)})))
+
+(defn- local-state-tx-if [form cells]
+  (let [args (rest form)]
+    (when-not (= 3 (count args))
+      (reject! (str "if requires test, then, else where it writes an atom ("
+                    local-state-note ")")
+               form :kotoba.error/local-state-arity))
+    (local-state-tx-branching
+     (first args) (vec (rest args))
+     (fn [test tails] (list 'if test (first tails) (second tails)))
+     cells form)))
+
+(defn- local-state-tx-when [form cells]
+  (let [[_ test & bodies] form]
+    (when (empty? bodies)
+      (reject! "when requires at least one body expression (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (local-state-tx (list 'if test
+                          (if (= 1 (count bodies)) (first bodies) (cons 'do bodies))
+                          0)
+                    cells)))
+
+(defn- local-state-tx-cond [form cells]
+  (let [clauses (rest form)]
+    (when (or (empty? clauses) (odd? (count clauses)))
+      (reject! "cond requires an even number of clauses (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (let [pairs (vec (partition 2 clauses))]
+      (when-not (= :else (first (peek pairs)))
+        (reject! (str "a cond that writes an atom must end with :else ("
+                      local-state-note ")")
+                 form :kotoba.error/local-state-position))
+      (local-state-tx (reduce (fn [else [test expression]] (list 'if test expression else))
+                              (second (peek pairs))
+                              (reverse (pop pairs)))
+                      cells))))
+
+(defn- local-state-tx-case [form cells]
+  (let [[_ scrutinee & clauses] form]
+    (when (empty? clauses)
+      (reject! "case requires at least one clause (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (let [default? (odd? (count clauses))
+          pairs (vec (partition 2 (if default? (butlast clauses) clauses)))
+          tests (mapv first pairs)
+          arms (cond-> (mapv second pairs) default? (conj (last clauses)))]
+      (local-state-tx-branching
+       scrutinee arms
+       (fn [value tails]
+         (list* 'case value
+                (concat (mapcat vector tests (take (count tests) tails))
+                        (when default? [(last tails)]))))
+       cells form))))
+
+(declare local-state-tx-let-tail)
+
+(defn- local-state-tx-do [forms cells form]
+  (when (empty? forms)
+    (reject! "do requires at least one body expression (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (loop [remaining (seq forms) bindings [] cells cells]
+    (let [res (local-state-tx (first remaining) cells)
+          bindings (into (vec bindings) (:bindings res))]
+      (if (next remaining)
+        ;; A non-final expression is bound rather than dropped: `sequenced-body`
+        ;; keeps `do` first-class precisely so a kernel store or a cap-call in
+        ;; non-final position survives, and the same has to hold here.
+        (recur (next remaining)
+               (let [value (:value res)]
+                 (if (or (symbol? value) (not (coll? value)))
+                   bindings
+                   (conj bindings (synthetic "cellstep") value)))
+               (:cells res))
+        {:bindings bindings :value (:value res) :cells (:cells res)}))))
+
+(defn- local-state-tx-let [form cells]
+  (let [bindings (second form)
+        bodies (drop 2 form)]
+    (when-not (vector? bindings)
+      (reject! "let requires a binding vector (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (when (odd? (count bindings))
+      (reject! "let requires an even binding vector (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (local-state-tx-let-tail (partition 2 bindings) bodies cells form)))
+
+(defn- local-state-tx-let-tail [pairs bodies cells form]
+  (if (empty? pairs)
+    (local-state-tx-do bodies cells form)
+    (let [[name value] (first pairs)
+          remaining (next pairs)]
+      (if (= 'atom (local-state-head value))
+        (do
+          (when-not (= 2 (count value))
+            (reject! "atom takes exactly one initial value (atom slice 1)"
+                     value :kotoba.error/local-state-arity))
+          (when-not (simple-symbol? name)
+            (reject! (str "an atom must be bound to a plain name (" local-state-note ")")
+                     form :kotoba.error/local-state-atom-position))
+          (when (contains? cells name)
+            (reject! (str "atom `" name "` shadows an atom of the same name ("
+                          local-state-note ")")
+                     form :kotoba.error/local-state-shadow))
+          (when (local-state-writes? (second value))
+            (reject! (str "an atom's initial value must not write another atom ("
+                          local-state-note ")")
+                     value :kotoba.error/local-state-position))
+          (let [init (local-state-tx (second value) cells)
+                [cells' sym] (local-state-fresh (:cells init) name)
+                _ (when *local-state-used* (vreset! *local-state-used* true))
+                tail (local-state-tx-let-tail remaining bodies cells' form)]
+            {:bindings (vec (concat (:bindings init) [sym (:value init)] (:bindings tail)))
+             :value (:value tail)
+             ;; The cell dies with its `let`; only the outer cells survive.
+             :cells (dissoc (:cells tail) name)}))
+        (do
+          (when (local-state-mentions-cell? name cells)
+            (local-state-escape! (first (filter #(and (symbol? %) (contains? cells %))
+                                                (local-state-nodes name)))
+                                 form))
+          (let [bound (local-state-tx value cells)
+                cells1 (:cells bound)
+                tail (local-state-tx-let-tail remaining bodies cells1 form)
+                changed (local-state-changed cells1 (:cells tail))
+                scope (fn [tail-form]
+                        (list 'let [name (:value bound)]
+                              (local-state-wrap (:bindings tail) tail-form)))]
+            (if (empty? changed)
+              {:bindings (vec (:bindings bound))
+               :value (scope (:value tail))
+               :cells cells1}
+              ;; The rest of the `let` writes cells that live OUTSIDE this
+              ;; binding's scope, so the scope is entered once per mutated cell
+              ;; and once for the value -- the same copy rule branches follow.
+              (let [[cells' projections]
+                    (reduce (fn [[cs acc] cell]
+                              (let [[cs' sym] (local-state-fresh cs cell)]
+                                [cs' (conj acc sym (scope (:sym (get (:cells tail) cell))))]))
+                            [cells1 []] changed)
+                    value-sym (synthetic "cellvalue")]
+                {:bindings (vec (concat (:bindings bound) projections
+                                        [value-sym (scope (:value tail))]))
+                 :value value-sym
+                 :cells cells'}))))))))
+
+(defn- local-state-tx
+  "Transform FORM under CELLS, returning the bindings the enclosing sequenced
+  scope must emit first, the expression's value, and the cells afterwards."
+  [form cells]
+  (cond
+    (not (local-state-touches? form cells))
+    {:bindings [] :value form :cells cells}
+
+    (not (local-state-writes? form))
+    {:bindings [] :value (local-state-subst form cells) :cells cells}
+
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= head 'atom)
+        (reject! (str "atom must be the init expression of a let binding ("
+                      local-state-note ")")
+                 form :kotoba.error/local-state-atom-position)
+        (= head 'swap!) (local-state-tx-swap form cells)
+        (= head 'reset!) (local-state-tx-reset form cells)
+        (= head 'let) (local-state-tx-let form cells)
+        (= head 'do) (local-state-tx-do (rest form) cells form)
+        (= head 'if) (local-state-tx-if form cells)
+        (= head 'when) (local-state-tx-when form cells)
+        (= head 'cond) (local-state-tx-cond form cells)
+        (= head 'case) (local-state-tx-case form cells)
+        (contains? local-state-scope-heads head) (local-state-position! head form)
+        (contains? local-state-conditional-heads head) (local-state-position! head form)
+        :else
+        (let [applied (local-state-tx-items (seq form) cells)]
+          {:bindings (:bindings applied)
+           :value (with-meta (apply list (:items applied)) (meta form))
+           :cells (:cells applied)})))
+
+    (vector? form)
+    (let [applied (local-state-tx-items form cells)]
+      {:bindings (:bindings applied)
+       :value (with-meta (vec (:items applied)) (meta form))
+       :cells (:cells applied)})
+
+    :else
+    (reject! (str "swap!/reset! is not admitted inside a collection literal ("
+                  local-state-note ")")
+             form :kotoba.error/local-state-position)))
+
+(defn- elaborate-local-state
+  "Elaborate function-local atoms away, or return BODY untouched when the
+  function does not mention the slice."
+  [body]
+  (if-not (local-state-source? body)
+    body
+    (binding [*local-state-ids* (volatile! 0)]
+      (let [{:keys [bindings value]} (local-state-tx body {})]
+        (local-state-wrap bindings value)))))
+
+(declare same-expression-type?)
+
+(defn- local-state-check-cell-type!
+  "Tie every rebinding of one cell to the type its `(atom init)` gave it.
+
+  The cell's identity survives desugaring in the binding NAME, so this runs
+  where let bindings are typed rather than in the elaboration, which has no
+  types yet. The recorded type rides in `locals` under a key no source symbol
+  can spell, so it is threaded exactly as far as the bindings are."
+  [name type locals form]
+  (if-let [[id cell-name] (local-state-cell-parts name)]
+    (let [key (symbol (str "__kotoba_cellty_" id))
+          known (get locals key)]
+      (when (and known (not (same-expression-type? known type)))
+        (reject! (str "atom `" cell-name "` is " (local-state-type-text known)
+                      "; this rebinding is " (local-state-type-text type)
+                      " (atom slice 1 requires one type per cell)")
+                 form :kotoba.error/local-state-cell-type))
+      (assoc locals key (or known type)))
+    locals))
+
 (defn- charge-node! [budget form]
   (when (> (vswap! budget inc) max-expression-nodes)
     (reject! "program expression budget exhausted" form)))
@@ -6173,8 +6732,13 @@
         let (let [bindings (first args) body (let-body args form)]
               (loop [pairs (partition 2 bindings) current locals]
                 (if-let [[name value] (first pairs)]
-                  (recur (next pairs)
-                         (assoc current name (infer-expression-type value current signatures)))
+                  (let [type (infer-expression-type value current signatures)]
+                    (recur (next pairs)
+                           ;; local-state slice 1: a cell binding carries the
+                           ;; cell's identity in its name, so every rebinding
+                           ;; is checked against the type `(atom init)` gave it.
+                           (local-state-check-cell-type!
+                            name type (assoc current name type) form)))
                   (infer-expression-type body current signatures))))
         if (let [[test then else] args
                  test-type (infer-expression-type test locals signatures)
@@ -9498,7 +10062,14 @@
       (reject! "desugar template requires a simple name" form))
     (when (reserved-binding-name? name)
       (reject! "symbol uses the reserved __kotoba_ prefix" name))
-    (when (or (contains? structural-heads name) (contains? forbidden-heads name))
+    ;; `reserved-function-names` rather than `forbidden-heads` alone: when
+    ;; `atom` left the forbidden set on 2026-09-02 (local-state slice 1) this
+    ;; check stopped refusing `(defdesugar atom ...)`, which would shadow the
+    ;; head the elaboration reads. A name a program may not DEFINE is a name a
+    ;; template may not take, and that set is the reserved one.
+    (when (or (contains? structural-heads name)
+              (contains? forbidden-heads name)
+              (contains? reserved-function-names name))
       (reject! "desugar template may not take a reserved head name" name))
     (when-not (vector? params)
       (reject! "desugar template requires a parameter vector" form))
@@ -10453,6 +11024,10 @@
         ;; here from outside, keeps whatever `resolve-capability-keyword!`
         ;; conjoined onto it during desugaring.
         used-capabilities (volatile! #{})
+        ;; local-state slice 1: set when a function-local atom is elaborated.
+        ;; Created out here, like used-capabilities and for the same reason --
+        ;; it is read after `binding`'s dynamic extent has ended.
+        local-state-used (volatile! false)
         lambda-infos (atom [])
         uses-apply? (volatile! false)
         uses-lazy? (volatile! false)
@@ -10467,7 +11042,8 @@
                           *function-callable-result-contracts*
                           function-callable-result-contracts
                           *synthetic-counter* (volatile! 0)
-                          *used-capability-keywords* used-capabilities]
+                          *used-capability-keywords* used-capabilities
+                          *local-state-used* local-state-used]
                ;; `vec` (forcing) must stay INSIDE `binding`'s dynamic
                ;; extent: `mapcat` is lazy, so `(vec (binding [...]
                ;; (mapcat ...)))` would rebind *loop-counter* only around
@@ -10509,9 +11085,15 @@
                              (reject! "function parameters must be unique bounded symbols with ABI-supported arity" raw-params))
                            (let [loop-helpers (atom [])
                                  constant-bound (into #{} (mapcat #(binding-symbols (:pattern %)) param-parts))
-                                 source-body (substitute-constants
-                                              (wrap-body (first body))
-                                              constants constant-bound)
+                                 ;; local-state slice 1 runs on SOURCE, before
+                                 ;; desugaring: a cell is a rebinding chain the
+                                 ;; rest of the pipeline reads as ordinary
+                                 ;; `let`/`if`. A body that does not mention the
+                                 ;; slice comes back identical.
+                                 source-body (elaborate-local-state
+                                              (substitute-constants
+                                               (wrap-body (first body))
+                                               constants constant-bound))
                                  ;; Product Value ABI v1: typed option params for if-some/when-some.
                                  option-locals
                                  (into {}
@@ -10873,7 +11455,11 @@
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
           main-result (some->> parsed (some #(when (= 'main (:name %)) (:result %))))
-          named-operations (into (sorted-set) @used-capabilities)
+          named-operations (cond-> (into (sorted-set) @used-capabilities)
+                             ;; The elaboration adds nothing to the effect row
+                             ;; -- the cell does not exist at runtime -- so this
+                             ;; is where a reader of `check` sees it happened.
+                             @local-state-used (conj :local-state))
           effects (reduce set/union #{} (vals function-effects))
           _ (when (and (= :pure-product language-profile) (seq effects))
               (reject! "pure-product profile requires empty effects"
