@@ -873,6 +873,18 @@
 ;; otherwise be shadowed silently, because the rewrite dispatches on the head
 ;; name before signatures are consulted.
 (def map-presence-operations '#{contains? dissoc})
+;; `conj` and `disj` are declared admitted heads by the language authority
+;; (`lang/guest-grammar.edn`: "pair prepend after duplicate removal", "bounded
+;; set removal") and, like `contains?` and `dissoc` before them, had no
+;; implementation here at all. Measured 2026-09-03 against sema `1587f57`:
+;; `(conj #{:a} :b)` and `(disj #{:a} :a)` reached validation as unknown calls
+;; and were refused with `operation has no admitted lowering`, which says
+;; nothing about sets, on every receiver -- while `typed-set-conj` and
+;; `typed-set-disj` sat next to them, fully lowered on all three backends.
+;; RESERVED as well as implemented, for the reason `contains?` is: the rewrite
+;; dispatches on the head name before signatures are consulted, so a
+;; `(defn conj ...)` would otherwise be shadowed silently.
+(def set-operations '#{conj disj})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
@@ -1096,7 +1108,7 @@
              ;; declared i64.
              (set (keys image-symbol-operations))
              list-operations predicate-operations logical-operations map-operations
-             map-presence-operations typed-map-operations
+             map-presence-operations set-operations typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
              variant-operations
@@ -6571,6 +6583,41 @@
                      (cons op args) :kotoba.error/numeric-resolution-unresolved))
           float-type))))
 
+(declare same-expression-type?)
+
+(defn- require-set-item-type!
+  "Require `item` to be the item type of set type `type`, and say which set
+  when it is not.
+
+  A `#{...}` literal always lowers to `[:set :keyword]` -- the desugar
+  hard-codes the descriptor -- so `#{:a (+ 1 1)}`, `#{1 2}` and
+  `(conj #{:a} 2)` were all refused `expression type mismatch: expected
+  keyword, got i64`, which names neither the set nor the rule. That message was
+  the whole report on the language authority's own set conformance fixture,
+  which is written with a heterogeneous literal and therefore cannot be
+  admitted at all; a reader had no way to learn that from it.
+
+  `:kotoba.error/expected`/`:actual` are carried through unchanged and with the
+  same `form`: `infer-absent-parameter-types` reads a refused operand's
+  required type out of this ex-data rather than out of the prose, so narrowing
+  the prose must not narrow the data."
+  [type item locals signatures]
+  (let [expected (second type)
+        actual (infer-expression-type item locals signatures)]
+    (if (or (= actual abort-bottom) (same-expression-type? actual expected))
+      (require-expression-type! actual expected item)
+      (reject! (str "set item type mismatch: this set is " (pr-str type)
+                    ", so every item must be " (pr-str expected)
+                    "; this one is " (pr-str actual)
+                    ". A `#{...}` literal is always [:set :keyword]: a set "
+                    "literal of another item type, and one mixing item types, "
+                    "are both outside the bounded profile. Write "
+                    "(typed-set-new [:set item-type] item ...) for any other "
+                    "item type.")
+               item :kotoba.error/subset-reject
+               {:kotoba.error/expected expected
+                :kotoba.error/actual actual}))))
+
 (defn- infer-call-type [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -7502,8 +7549,7 @@
         (let [[type & items] args]
           (validate-value-type! type)
           (doseq [item items]
-            (require-expression-type! (infer-expression-type item locals signatures)
-                                      (second type) item))
+            (require-set-item-type! type item locals signatures))
           type)
         typed-set-count
         (let [[type value] args]
@@ -7514,22 +7560,19 @@
         (let [[type value item] args]
           (validate-value-type! type)
           (require-expression-type! (infer-expression-type value locals signatures) type value)
-          (require-expression-type! (infer-expression-type item locals signatures)
-                                    (second type) item)
+          (require-set-item-type! type item locals signatures)
           :bool)
         typed-set-conj
         (let [[type value item] args]
           (validate-value-type! type)
           (require-expression-type! (infer-expression-type value locals signatures) type value)
-          (require-expression-type! (infer-expression-type item locals signatures)
-                                    (second type) item)
+          (require-set-item-type! type item locals signatures)
           type)
         typed-set-disj
         (let [[type value item] args]
           (validate-value-type! type)
           (require-expression-type! (infer-expression-type value locals signatures) type value)
-          (require-expression-type! (infer-expression-type item locals signatures)
-                                    (second type) item)
+          (require-set-item-type! type item locals signatures)
           type)
         typed-set-equal
         (let [[type left right] args]
@@ -8609,6 +8652,40 @@
           (reduce (fn [accumulated key]
                     (list 'typed-map-dissoc value-type accumulated key))
                   receiver keys))
+
+        ;; `conj` and `disj` on a typed set. The receiver carries the item
+        ;; type, so neither head assumes `:keyword` -- a `typed-set-new [:set
+        ;; :i64]` answers them too, and only a `#{...}` LITERAL is keyword-only.
+        ;; Folded left over the items, like `dissoc`, because both are variadic
+        ;; in Clojure and `typed-set-conj`/`typed-set-disj` return the set type.
+        (contains? set-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              [receiver & items] rewritten-args
+              ;; See `contains?` above: this arm REFUSES, so swallowing the
+              ;; receiver's own refusal would replace a precise message with
+              ;; `got nil`. The exception is carried out and rethrown.
+              inferred (try {:type (infer-expression-type receiver locals signatures)}
+                            (catch #?(:clj Exception :cljs :default) e {:refusal e}))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)
+              conj? (= op 'conj)
+              primitive (if conj? 'typed-set-conj 'typed-set-disj)]
+          (when-not (seq items)
+            (reject! (str op " requires a set and at least one item")
+                     form :kotoba.error/set-operation-arity))
+          (when-not (typed-set-type? value-type)
+            (reject! (str op " requires a typed set [:set item-type]; got "
+                          (pr-str value-type)
+                          ". A bounded vector answers to vector-conj, and a "
+                          "canonical typed map answers to typed-map-assoc and "
+                          "typed-map-dissoc")
+                     form (if conj?
+                            :kotoba.error/set-conj-receiver
+                            :kotoba.error/set-disj-receiver)))
+          (reduce (fn [accumulated item]
+                    (list primitive value-type accumulated item))
+                  receiver items))
 
         (= op 'vector-drop)
         (let [rewritten-args
