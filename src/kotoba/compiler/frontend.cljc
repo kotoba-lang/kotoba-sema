@@ -38,10 +38,18 @@
      :cljs #{}))
 
 (def forbidden-heads
+  ;; `atom` left this set on 2026-09-02: local-state slice 1 (kotoba-lang
+  ;; `lang/local-state.edn`) admits a non-escaping, function-local atom by
+  ;; ELABORATION -- it becomes ordinary let rebindings, so no cell exists at
+  ;; runtime and no ambient state is created. `swap!` / `reset!` were never in
+  ;; this literal set; they were forbidden through the vendored guest grammar,
+  ;; which drops them for the same reason. `ref` / `dosync` / `volatile!` /
+  ;; `set!` / `binding` / `var` / `alter-var-root` stay refused: they have no
+  ;; ability model decided and no widening path.
   (into '#{load load-file load-string read-string compile
            require use import ns-resolve resolve alter-var-root
            future pmap agent send send-off new . .. set! defmacro
-           locking dosync atom ref volatile!}
+           locking dosync ref volatile!}
         (load-catalog-forbidden)))
 
 ;; The language-owned semantic catalog is vendored byte-for-byte from
@@ -309,6 +317,39 @@
     kernel-dequant-dot-q8-0 5
     kernel-dequant-dot-q4-k 5
     kernel-dequant-dot-q6-k 5})
+
+;; slice-value: the CARRIED form of the slice family (amu ADR 0285).
+;;
+;; These are deliberately NOT in `kernel-memory-operations`. That table is the
+;; machine layer: every entry there takes `base length index [value]` as three
+;; or four separate i64 words, and the provenance rule reads argument 0 of
+;; each. These eight take a `[:slice T]` VALUE instead, and are erased into
+;; that machine layer by `erase-slice-values` before anything downstream --
+;; type inference, `validate-expr`, the provenance check, HIR, KIR, both
+;; backends, the verifier -- ever runs. So the two families are the same
+;; operations written at two altitudes, and only the lower one has a lowering.
+;;
+;;   (slice-of-u8 base length)   -> [:slice :u8]    length counts ELEMENTS
+;;   (slice-length s)            -> :i64            elements, not bytes
+;;   (slice-get s index)         -> :i64            the element, zero-extended
+;;   (slice-set! s index value)  -> :i64            the value, per ADR 0049
+;;   (slice-sub s offset count)  -> [:slice T]      a CHECKED narrowing
+;;
+;; `slice-sub` lowers to `kernel-subregion`, which is why the narrowing is
+;; checked at runtime rather than trusted: the offset must lie inside the
+;; parent and the count inside the remainder, or the machine traps before it
+;; addresses anything. The element scale is applied here, in the erasure, so
+;; the narrowing arithmetic is in bytes exactly where `kernel-subregion`
+;; expects bytes and in elements everywhere a Kotoba author reads it.
+(def slice-value-operations
+  '{slice-of-u8 2 slice-of-u16 2 slice-of-u32 2 slice-of-u64 2
+    slice-length 1 slice-get 2 slice-set! 3 slice-sub 3})
+
+;; `slice-of-<width>` -> the element type it constructs. One map rather than a
+;; string suffix parse, so a new width is one entry in two tables and not a
+;; naming convention a reader has to reverse.
+(def ^:private slice-constructor-elements
+  '{slice-of-u8 :u8 slice-of-u16 :u16 slice-of-u32 :u32 slice-of-u64 :u64})
 
 ;; simd: which ARGUMENT POSITIONS of a kernel memory operation name a region.
 ;;
@@ -890,6 +931,11 @@
              (set (keys heap-operations))
              (set (keys kgraph-operations))
              (set (keys kernel-memory-operations))
+             ;; slice-value: a function named `slice-get` would shadow the
+             ;; carrier's own head, and the shadowing would be silent -- the
+             ;; erasure pass rewrites by head name, so a user function with
+             ;; that name would have its calls rewritten into memory accesses.
+             (set (keys slice-value-operations))
              (set (keys kernel-privileged-operations))
              ;; boot-lit: a function named `guid` would shadow the literal
              ;; head, and the shadowing would be silent -- `(guid "...")` would
@@ -919,6 +965,10 @@
              (set (keys i32-operations))
              (set (keys i64-operations))
              lazy-sequence-operations
+             ;; local-state slice 1: these four are no longer in
+             ;; forbidden-heads, so they have to be reserved here or a program
+             ;; could define `(defn swap! ...)` and shadow the head silently.
+             '#{atom swap! reset! deref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
                 hetero-vector typed-set record match-result match-variant match-option}))
 (def max-functions 1024)
@@ -992,12 +1042,39 @@
   (and (vector? type) (= 2 (count type)) (= :ref (first type))
        (keyword? (second type)) (namespace (second type))))
 
+;; slice-value: `[:slice T]`, the ADR 0285 bulk carrier.
+;;
+;; The element widths, in BYTES. The map is the authority for two facts at
+;; once -- which element types exist, and what each one scales by -- because
+;; the scale is the only thing that distinguishes an element index from a byte
+;; offset, and a second table would let the two drift.
+(def ^:private slice-element-widths
+  {:u8 1 :u16 2 :u32 4 :u64 8})
+
+;; `:f32` is DECLARED here and admitted nowhere. Naming it is the point: the
+;; carrier is intended to reach binary32 elements (that is the Qwen weight
+;; case ADR 0285 exists for), and there is no `slice-load-f32` on either
+;; native ISA to reach them with. Recording it as available before the load
+;; exists would be the defect amu ADR 0284 named, in miniature -- an admission
+;; that admits what nothing can lower. So it is refused BY NAME, with a
+;; message that says which half is missing, rather than falling through the
+;; generic "unknown element type" arm where a reader would learn nothing.
+(def ^:private slice-declared-unadmitted-elements
+  #{:f32})
+
+(defn- slice-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :slice (first type))))
+
+(defn- slice-element-type [type]
+  (when (slice-type? type) (second type)))
+
 (defn- structured-type? [type]
   (or (parametric-result-type? type) (variant-type? type) (generic-option-type? type)
       (canonical-list-type? type)
       (stream-type? type) (task-type? type)
       (heterogeneous-vector-type? type) (typed-set-type? type)
       (canonical-typed-map-type? type) (record-type? type) (schema-ref-type? type)
+      (slice-type? type)
       (callable-type? type)))
 
 (defn- validate-value-type!
@@ -1036,6 +1113,23 @@
      type
      (schema-ref-type? type)
      type
+     ;; slice-value: `[:slice T]`. The element type is a closed set, not a
+     ;; recursive value type -- a slice names host memory, and the only thing
+     ;; that can live in host memory here is a machine integer of a width the
+     ;; ISAs can load. So this arm does NOT recurse: `[:slice [:slice :u8]]`
+     ;; and `[:slice :string]` are refused by the same clause that refuses
+     ;; `[:slice :banana]`, which is what keeps the carrier two words wide.
+     (slice-type? type)
+     (let [element (slice-element-type type)]
+       (when (contains? slice-declared-unadmitted-elements element)
+         (reject! (str "slice element type is declared but not admitted: no native element load exists for "
+                       element)
+                  type :kotoba.error/slice-element-not-admitted))
+       (when-not (contains? slice-element-widths element)
+         (reject! (str "slice element type must be one of "
+                       (pr-str (vec (sort (keys slice-element-widths)))))
+                  type :kotoba.error/slice-element-type))
+       type)
      (parametric-result-type? type)
      (do (validate-value-type! (second type) (inc depth) nodes)
          (validate-value-type! (nth type 2) (inc depth) nodes)
@@ -1255,6 +1349,9 @@
   '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!
      doseq dotimes defmulti defmethod throw try catch
      future pmap agent send send-off
+     ;; local-state slice 1 left forbidden-heads on 2026-09-02; naming the
+     ;; heads here keeps the pure-product surface exactly what it was.
+     atom swap! reset! deref
      condp cond-> cond->> some-> some->> as-> -> ->>})
 
 (defn- pure-product-form-head [form]
@@ -1474,24 +1571,35 @@
       (reject! "catch binder must be an unqualified symbol" form :kotoba.error/abort-shape))
     [error-type binder handler]))
 
-(defn- abort-callee-error-types
-  "The error types of the aborting functions FORM calls with no try body in
-  between. A try's handler is walked -- what it throws leaves the try -- and
-  its body is not: that body's aborts are the try's own to catch."
+(defn- abort-callee-sites
+  "`[[callee error-type] ...]`, in source order, for the aborting functions
+  FORM calls with no try body in between. A try's handler is walked -- what it
+  throws leaves the try -- and its body is not: that body's aborts are the
+  try's own to catch. A `fn` literal's body is NOT walked: an aborting call
+  there belongs to the lambda that body becomes, not to the function the
+  literal appears in. (Lambda lifting has already run by the time the abort
+  passes do, so that clause is a backstop rather than the usual route.)"
   [form]
   (let [known *abort-error-types* out (volatile! [])]
     (letfn [(walk [x]
               (cond
                 (seq? x)
                 (let [[op & args] x]
-                  (if (= op 'try)
-                    (walk (last (second args)))
+                  (cond
+                    (= op 'fn) nil
+                    (= op 'try) (walk (last (second args)))
+                    :else
                     (do (when-let [error-type (get known op)]
-                          (vswap! out conj error-type))
+                          (vswap! out conj [op error-type]))
                         (doseq [arg args] (walk arg)))))
                 (coll? x) (doseq [item x] (walk item))))]
       (walk form)
       (distinct @out))))
+
+(defn- abort-callee-error-types
+  "The error types of `abort-callee-sites`, deduplicated in source order."
+  [form]
+  (distinct (map second (abort-callee-sites form))))
 (def ^:dynamic *lexical-bindings* #{})
 (def ^:dynamic *lexical-callable-contracts* {})
 (def ^:dynamic *function-callable-result-contracts* {})
@@ -4884,6 +4992,550 @@
 (defn- valid-name? [value]
   (and (simple-symbol? value) (<= (count (name value)) max-symbol-chars)))
 
+;; ---------------------------------------------------------------------------
+;; Local state -- the atom slice 1 elaboration (kotoba-lang `lang/local-state.edn`).
+;;
+;; `lang/surface-status.edn` `:no-ambient-mutation` bans `atom`/`swap!`/
+;; `reset!` under the invariant that state must not be AMBIENT -- not that
+;; mutation is forbidden. The `:state` capability kit is the admitted model for
+;; state that ESCAPES or PERSISTS. It is the wrong model for
+;;
+;;     (let [a (atom 0)] (swap! a + 1) @a)
+;;
+;; which needs no host, no grant and no runtime cell: the atom is born and dies
+;; inside one function body, so the compiler can see every write. This slice
+;; admits exactly that shape and compiles it away.
+;;
+;; A cell is NOT a value. The binding name introduced by `(atom init)` may
+;; appear only as the first argument of `swap!` / `reset!` / `deref` (`@a`
+;; reads as `(clojure.core/deref a)` on the JVM reader, which is normalised
+;; here). Every other mention -- passed as an argument, returned, stored,
+;; captured by `fn`, read inside `loop`/`doseq`/`dotimes` -- is refused by the
+;; escape rule below, which is what keeps the state non-ambient: nothing can
+;; observe it except the straight-line code that owns it.
+;;
+;; The elaboration is state passing. The cell becomes an ordinary let-bound
+;; value, REBOUND after every write; `deref` reads the current binding;
+;; `swap!`/`reset!` evaluate to the new value (Clojure's own answer). Where a
+;; branch writes, the branching form is emitted ONCE PER MUTATED CELL plus once
+;; for its own value, and the enclosing scope rebinds each cell from its copy:
+;;
+;;     (let [a (atom 0)] (if c (swap! a + 10) (reset! a 5)) (+ @a 1))
+;;
+;;     (let [__kotoba_cell_1_2_a 0
+;;           __kotoba_cell_1_5_a (if c (let [__kotoba_cell_1_3_a (+ __kotoba_cell_1_2_a 10)]
+;;                                       __kotoba_cell_1_3_a)
+;;                                     (let [__kotoba_cell_1_4_a 5] __kotoba_cell_1_4_a))
+;;           ...]
+;;       (+ __kotoba_cell_1_5_a 1))
+;;
+;; Copying a branch is sound because Kotoba branches are pure -- the copies
+;; compute the same values and differ only in which one they project. The one
+;; observable exception is a capability call, so a branch that both writes a
+;; cell and calls a capability is refused rather than duplicated.
+;;
+;; Nothing is added to the effect row: the cell does not exist at runtime and
+;; there is no authority to declare. `:named-operations` gains `:local-state`
+;; so the elaboration is still visible in `check` output and provenance.
+;;
+;; A program with no `atom` / `swap!` / `reset!` / `deref` skips this pass
+;; entirely (`local-state-source?`), so its lowering is byte-for-byte what it
+;; was -- pinned by a golden in `test/kotoba/compiler/local_state_test.clj`.
+
+(def ^:dynamic *local-state-used*
+  "Set once per analyze when an atom cell is elaborated, so `:named-operations`
+  can carry `:local-state`. Created outside the desugaring `binding` in
+  `analyze*` for the same reason `used-capabilities` is."
+  nil)
+
+(def ^:dynamic *local-state-ids*
+  "Per-function counter behind cell binding names. Deterministic (a function of
+  the source), never `gensym`, for the reason `*synthetic-counter*` gives."
+  nil)
+
+(def ^:private local-state-note
+  "atom slice 1 admits swap!/reset!/deref in straight-line code of the binding function only")
+
+(def ^:private local-state-write-heads '#{atom swap! reset!})
+
+(def ^:private local-state-scope-heads
+  "Heads that open a scope no cell can be threaded through: the body may run
+  zero times, many times, or later, so a rebinding chain cannot express it."
+  '#{fn fn* loop recur doseq dotimes lazy-seq})
+
+(def ^:private local-state-conditional-heads
+  "Heads whose operands are not all evaluated, or whose expansion moves them.
+  Hoisting a write out of one would make it unconditional, so a write inside
+  is refused rather than silently promoted."
+  '#{and or if-not when-not if-let when-let if-some when-some
+     some-> some->> cond-> cond->> condp match try catch throw assert
+     -> ->> as->})
+
+(def ^:private local-state-effect-heads
+  '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!})
+
+(defn- local-state-deref-head? [head]
+  (or (= head 'deref) (= head 'clojure.core/deref)))
+
+(defn- local-state-head [form]
+  (when (and (seq? form) (seq form)) (first form)))
+
+(defn- local-state-nodes [form] (tree-seq coll? seq form))
+
+(defn- local-state-source?
+  "Whether this body mentions the slice at all. A `false` here is what makes
+  the pass a no-op -- and therefore byte-identical -- for every other program."
+  [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (or (contains? local-state-write-heads head)
+                         (local-state-deref-head? head))))
+                 (local-state-nodes form))))
+
+(defn- local-state-writes? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (contains? local-state-write-heads head)))
+                 (local-state-nodes form))))
+
+(defn- local-state-reads? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (local-state-deref-head? head)))
+                 (local-state-nodes form))))
+
+(defn- local-state-mentions-cell? [form cells]
+  (boolean (some #(and (symbol? %) (contains? cells %)) (local-state-nodes form))))
+
+(defn- local-state-touches? [form cells]
+  (or (local-state-writes? form)
+      (local-state-reads? form)
+      (local-state-mentions-cell? form cells)))
+
+(defn- local-state-effectful? [form]
+  (boolean (some (fn [node]
+                   (when-let [head (local-state-head node)]
+                     (or (contains? local-state-effect-heads head)
+                         (contains? source-operation-registry head))))
+                 (local-state-nodes form))))
+
+(defn- local-state-escape! [name form]
+  (reject! (str "atom `" name "` escapes its let scope (" local-state-note ")")
+           form :kotoba.error/local-state-escape))
+
+(defn- local-state-position! [head form]
+  (reject! (str "swap!/reset! is not admitted inside `" head
+                "` (atom slice 1 admits them in let, do, if, when, cond and case only)")
+           form :kotoba.error/local-state-position))
+
+(defn- local-state-cell-ref!
+  "The symbol currently holding CELL's value; refuses a first argument that is
+  not a cell bound by `(atom ...)` in this function body."
+  [op target cells form]
+  (if (and (simple-symbol? target) (contains? cells target))
+    (:sym (get cells target))
+    (reject! (str op " expects a let-bound atom cell as its first argument; got `"
+                  (pr-str target) "` (atom slice 1)")
+             form :kotoba.error/local-state-not-a-cell)))
+
+(defn- local-state-wrap [bindings value]
+  (if (seq bindings) (list 'let (vec bindings) value) value))
+
+(defn- local-state-fresh
+  "A new binding symbol for CELL. The cell's id is stable across rebindings so
+  the type check can tie them together; the second number is drawn from one
+  per-function counter so no two bindings anywhere in the function collide."
+  [cells name]
+  (let [id (or (:id (get cells name)) (vswap! *local-state-ids* inc))
+        n (vswap! *local-state-ids* inc)
+        sym (symbol (str "__kotoba_cell_" id "_" n "_" name))]
+    [(assoc cells name {:id id :sym sym}) sym]))
+
+(defn- local-state-changed
+  "The cells of BEFORE whose binding AFTER moved, ordered by cell id so the
+  emitted bindings are a function of the source."
+  [before after]
+  (vec (sort-by #(:id (get before %))
+                (filter #(not= (:sym (get before %)) (:sym (get after %)))
+                        (keys before)))))
+
+(defn- local-state-cell-parts
+  "`[cell-id source-name]` for a cell binding symbol, else nil."
+  [value]
+  (when (simple-symbol? value)
+    (let [text (name value)]
+      (when (str/starts-with? text "__kotoba_cell_")
+        (let [m (re-matches #"(\d+)_(\d+)_(.+)" (subs text (count "__kotoba_cell_")))]
+          (when m [(nth m 1) (nth m 3)]))))))
+
+(defn- local-state-type-text [type]
+  (if (keyword? type) (name type) (pr-str type)))
+
+(declare local-state-tx local-state-subst)
+
+(defn- local-state-subst
+  "Rewrite `(deref c)` to the symbol holding c's value inside a subtree that
+  does NOT write. Every other mention of a cell is an escape."
+  [form cells]
+  (cond
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (local-state-deref-head? head)
+        (do (when-not (= 2 (count form))
+              (reject! "deref takes exactly one argument (atom slice 1)"
+                       form :kotoba.error/local-state-arity))
+            (local-state-cell-ref! "deref" (second form) cells form))
+
+        (contains? local-state-scope-heads head)
+        (do (when-let [cell (first (filter #(and (symbol? %) (contains? cells %))
+                                           (local-state-nodes form)))]
+              (local-state-escape! cell form))
+            form)
+
+        :else
+        (let [parts (mapv #(local-state-subst % cells) form)]
+          (if (= (seq parts) (seq form))
+            form
+            (with-meta (apply list parts) (meta form))))))
+
+    (vector? form)
+    (let [parts (mapv #(local-state-subst % cells) form)]
+      (if (= parts form) form (with-meta parts (meta form))))
+
+    (set? form) (into #{} (map #(local-state-subst % cells)) form)
+    (map? form) (into {} (map (fn [[k v]] [(local-state-subst k cells)
+                                           (local-state-subst v cells)]))
+                      form)
+    (symbol? form) (if (contains? cells form) (local-state-escape! form form) form)
+    :else form))
+
+(defn- local-state-tx-items [items cells]
+  (reduce (fn [acc item]
+            (let [res (local-state-tx item (:cells acc))]
+              (-> acc
+                  (update :bindings into (:bindings res))
+                  (update :items conj (:value res))
+                  (assoc :cells (:cells res)))))
+          {:bindings [] :items [] :cells cells}
+          items))
+
+(defn- local-state-tx-swap [form cells]
+  (when (< (count form) 3)
+    (reject! "swap! takes a cell, a function, and that function's extra arguments (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (let [[_ target f & extra] form
+        current (local-state-cell-ref! "swap!" target cells form)]
+    (when (local-state-writes? (cons f extra))
+      (reject! (str "a swap! argument must not write another atom (" local-state-note ")")
+               form :kotoba.error/local-state-position))
+    (let [applied (local-state-tx-items (cons f extra) cells)
+          [cells' sym] (local-state-fresh (:cells applied) target)]
+      {:bindings (conj (vec (:bindings applied)) sym
+                       (apply list (first (:items applied)) current (rest (:items applied))))
+       :value sym
+       :cells cells'})))
+
+(defn- local-state-tx-reset [form cells]
+  (when-not (= 3 (count form))
+    (reject! "reset! takes a cell and one value (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (let [[_ target value] form
+        _ (local-state-cell-ref! "reset!" target cells form)]
+    (when (local-state-writes? value)
+      (reject! (str "a reset! value must not write another atom (" local-state-note ")")
+               form :kotoba.error/local-state-position))
+    (let [res (local-state-tx value cells)
+          [cells' sym] (local-state-fresh (:cells res) target)]
+      {:bindings (conj (vec (:bindings res)) sym (:value res))
+       :value sym
+       :cells cells'})))
+
+(defn- local-state-branch-copies
+  "The shared tail of every branching join: one copy of the branching form per
+  mutated cell, then one for the form's own value. BRANCHES are the transformed
+  arms; ASSEMBLE rebuilds the branching form from one tail expression per arm."
+  [cells-in branches assemble form]
+  (let [changed (vec (sort-by #(:id (get cells-in %))
+                              (distinct (mapcat #(local-state-changed cells-in (:cells %))
+                                                branches))))]
+    (if (empty? changed)
+      {:changed [] :bindings []
+       :value (assemble (mapv #(local-state-wrap (:bindings %) (:value %)) branches))
+       :cells cells-in}
+      (let [[cells' projections]
+            (reduce (fn [[cs acc] cell]
+                      (let [[cs' sym] (local-state-fresh cs cell)]
+                        [cs' (conj acc sym
+                                   (assemble
+                                    (mapv #(local-state-wrap
+                                            (:bindings %)
+                                            (:sym (get (:cells %) cell)))
+                                          branches)))]))
+                    [cells-in []] changed)
+            value-sym (synthetic "cellvalue")]
+        {:changed changed
+         :bindings (conj (vec projections) value-sym
+                         (assemble (mapv #(local-state-wrap (:bindings %) (:value %))
+                                         branches)))
+         :value value-sym
+         :cells cells'
+         :form form}))))
+
+(defn- local-state-guard-branch! [branch cells-in form]
+  (when (and (seq (local-state-changed cells-in (:cells branch)))
+             (local-state-effectful? (:source branch)))
+    (reject! (str "a branch that writes an atom must not contain a capability call"
+                  " (atom slice 1 elaborates the branch once per cell)")
+             form :kotoba.error/local-state-effectful-branch)))
+
+(defn- local-state-tx-branching
+  "Shared driver for `if` and `case`: transform the scrutinee, transform each
+  arm against the post-scrutinee cells, then join."
+  [scrutinee arms assemble-with-scrutinee cells form]
+  (let [head (local-state-tx scrutinee cells)
+        cells1 (:cells head)
+        branches (mapv (fn [arm] (assoc (local-state-tx arm cells1) :source arm)) arms)
+        _ (doseq [branch branches] (local-state-guard-branch! branch cells1 form))
+        scrutinee-value (:value head)
+        simple? (or (symbol? scrutinee-value) (not (coll? scrutinee-value)))
+        scrutinee-sym (if simple? scrutinee-value (synthetic "cellscrutinee"))
+        joined (local-state-branch-copies
+                cells1 branches
+                (fn [tails] (assemble-with-scrutinee scrutinee-sym tails))
+                form)]
+    (if (empty? (:changed joined))
+      {:bindings (vec (:bindings head))
+       :value (assemble-with-scrutinee scrutinee-value
+                                       (mapv #(local-state-wrap (:bindings %) (:value %))
+                                             branches))
+       :cells cells1}
+      {:bindings (vec (concat (:bindings head)
+                              (when-not simple? [scrutinee-sym scrutinee-value])
+                              (:bindings joined)))
+       :value (:value joined)
+       :cells (:cells joined)})))
+
+(defn- local-state-tx-if [form cells]
+  (let [args (rest form)]
+    (when-not (= 3 (count args))
+      (reject! (str "if requires test, then, else where it writes an atom ("
+                    local-state-note ")")
+               form :kotoba.error/local-state-arity))
+    (local-state-tx-branching
+     (first args) (vec (rest args))
+     (fn [test tails] (list 'if test (first tails) (second tails)))
+     cells form)))
+
+(defn- local-state-tx-when [form cells]
+  (let [[_ test & bodies] form]
+    (when (empty? bodies)
+      (reject! "when requires at least one body expression (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (local-state-tx (list 'if test
+                          (if (= 1 (count bodies)) (first bodies) (cons 'do bodies))
+                          0)
+                    cells)))
+
+(defn- local-state-tx-cond [form cells]
+  (let [clauses (rest form)]
+    (when (or (empty? clauses) (odd? (count clauses)))
+      (reject! "cond requires an even number of clauses (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (let [pairs (vec (partition 2 clauses))]
+      (when-not (= :else (first (peek pairs)))
+        (reject! (str "a cond that writes an atom must end with :else ("
+                      local-state-note ")")
+                 form :kotoba.error/local-state-position))
+      (local-state-tx (reduce (fn [else [test expression]] (list 'if test expression else))
+                              (second (peek pairs))
+                              (reverse (pop pairs)))
+                      cells))))
+
+(defn- local-state-tx-case [form cells]
+  (let [[_ scrutinee & clauses] form]
+    (when (empty? clauses)
+      (reject! "case requires at least one clause (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (let [default? (odd? (count clauses))
+          pairs (vec (partition 2 (if default? (butlast clauses) clauses)))
+          tests (mapv first pairs)
+          arms (cond-> (mapv second pairs) default? (conj (last clauses)))]
+      (local-state-tx-branching
+       scrutinee arms
+       (fn [value tails]
+         (list* 'case value
+                (concat (mapcat vector tests (take (count tests) tails))
+                        (when default? [(last tails)]))))
+       cells form))))
+
+(declare local-state-tx-let-tail)
+
+(defn- local-state-tx-do [forms cells form]
+  (when (empty? forms)
+    (reject! "do requires at least one body expression (atom slice 1)"
+             form :kotoba.error/local-state-arity))
+  (loop [remaining (seq forms) bindings [] cells cells]
+    (let [res (local-state-tx (first remaining) cells)
+          bindings (into (vec bindings) (:bindings res))]
+      (if (next remaining)
+        ;; A non-final expression is bound rather than dropped: `sequenced-body`
+        ;; keeps `do` first-class precisely so a kernel store or a cap-call in
+        ;; non-final position survives, and the same has to hold here.
+        (recur (next remaining)
+               (let [value (:value res)]
+                 (if (or (symbol? value) (not (coll? value)))
+                   bindings
+                   (conj bindings (synthetic "cellstep") value)))
+               (:cells res))
+        {:bindings bindings :value (:value res) :cells (:cells res)}))))
+
+(defn- local-state-tx-let [form cells]
+  (let [bindings (second form)
+        bodies (drop 2 form)]
+    (when-not (vector? bindings)
+      (reject! "let requires a binding vector (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (when (odd? (count bindings))
+      (reject! "let requires an even binding vector (atom slice 1)"
+               form :kotoba.error/local-state-arity))
+    (local-state-tx-let-tail (partition 2 bindings) bodies cells form)))
+
+(defn- local-state-tx-let-tail [pairs bodies cells form]
+  (if (empty? pairs)
+    (local-state-tx-do bodies cells form)
+    (let [[name value] (first pairs)
+          remaining (next pairs)]
+      (if (= 'atom (local-state-head value))
+        (do
+          (when-not (= 2 (count value))
+            (reject! "atom takes exactly one initial value (atom slice 1)"
+                     value :kotoba.error/local-state-arity))
+          (when-not (simple-symbol? name)
+            (reject! (str "an atom must be bound to a plain name (" local-state-note ")")
+                     form :kotoba.error/local-state-atom-position))
+          (when (contains? cells name)
+            (reject! (str "atom `" name "` shadows an atom of the same name ("
+                          local-state-note ")")
+                     form :kotoba.error/local-state-shadow))
+          (when (local-state-writes? (second value))
+            (reject! (str "an atom's initial value must not write another atom ("
+                          local-state-note ")")
+                     value :kotoba.error/local-state-position))
+          (let [init (local-state-tx (second value) cells)
+                [cells' sym] (local-state-fresh (:cells init) name)
+                _ (when *local-state-used* (vreset! *local-state-used* true))
+                tail (local-state-tx-let-tail remaining bodies cells' form)]
+            {:bindings (vec (concat (:bindings init) [sym (:value init)] (:bindings tail)))
+             :value (:value tail)
+             ;; The cell dies with its `let`; only the outer cells survive.
+             :cells (dissoc (:cells tail) name)}))
+        (do
+          (when (local-state-mentions-cell? name cells)
+            (local-state-escape! (first (filter #(and (symbol? %) (contains? cells %))
+                                                (local-state-nodes name)))
+                                 form))
+          (let [bound (local-state-tx value cells)
+                cells1 (:cells bound)
+                tail (local-state-tx-let-tail remaining bodies cells1 form)
+                changed (local-state-changed cells1 (:cells tail))
+                scope (fn [tail-form]
+                        (list 'let [name (:value bound)]
+                              (local-state-wrap (:bindings tail) tail-form)))]
+            (if (empty? changed)
+              {:bindings (vec (:bindings bound))
+               :value (scope (:value tail))
+               :cells cells1}
+              ;; The rest of the `let` writes cells that live OUTSIDE this
+              ;; binding's scope, so the scope is entered once per mutated cell
+              ;; and once for the value -- the same copy rule branches follow.
+              (let [[cells' projections]
+                    (reduce (fn [[cs acc] cell]
+                              (let [[cs' sym] (local-state-fresh cs cell)]
+                                [cs' (conj acc sym (scope (:sym (get (:cells tail) cell))))]))
+                            [cells1 []] changed)
+                    value-sym (synthetic "cellvalue")]
+                {:bindings (vec (concat (:bindings bound) projections
+                                        [value-sym (scope (:value tail))]))
+                 :value value-sym
+                 :cells cells'}))))))))
+
+(defn- local-state-tx
+  "Transform FORM under CELLS, returning the bindings the enclosing sequenced
+  scope must emit first, the expression's value, and the cells afterwards."
+  [form cells]
+  (cond
+    (not (local-state-touches? form cells))
+    {:bindings [] :value form :cells cells}
+
+    (not (local-state-writes? form))
+    {:bindings [] :value (local-state-subst form cells) :cells cells}
+
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= head 'atom)
+        (reject! (str "atom must be the init expression of a let binding ("
+                      local-state-note ")")
+                 form :kotoba.error/local-state-atom-position)
+        (= head 'swap!) (local-state-tx-swap form cells)
+        (= head 'reset!) (local-state-tx-reset form cells)
+        (= head 'let) (local-state-tx-let form cells)
+        (= head 'do) (local-state-tx-do (rest form) cells form)
+        (= head 'if) (local-state-tx-if form cells)
+        (= head 'when) (local-state-tx-when form cells)
+        (= head 'cond) (local-state-tx-cond form cells)
+        (= head 'case) (local-state-tx-case form cells)
+        (contains? local-state-scope-heads head) (local-state-position! head form)
+        (contains? local-state-conditional-heads head) (local-state-position! head form)
+        :else
+        (let [applied (local-state-tx-items (seq form) cells)]
+          {:bindings (:bindings applied)
+           :value (with-meta (apply list (:items applied)) (meta form))
+           :cells (:cells applied)})))
+
+    (vector? form)
+    (let [applied (local-state-tx-items form cells)]
+      {:bindings (:bindings applied)
+       :value (with-meta (vec (:items applied)) (meta form))
+       :cells (:cells applied)})
+
+    :else
+    (reject! (str "swap!/reset! is not admitted inside a collection literal ("
+                  local-state-note ")")
+             form :kotoba.error/local-state-position)))
+
+(defn- elaborate-local-state
+  "Elaborate function-local atoms away, or return BODY untouched when the
+  function does not mention the slice."
+  [body]
+  (if-not (local-state-source? body)
+    body
+    (binding [*local-state-ids* (volatile! 0)]
+      (let [{:keys [bindings value]} (local-state-tx body {})]
+        (local-state-wrap bindings value)))))
+
+(declare same-expression-type?)
+
+(defn- local-state-check-cell-type!
+  "Tie every rebinding of one cell to the type its `(atom init)` gave it.
+
+  The cell's identity survives desugaring in the binding NAME, so this runs
+  where let bindings are typed rather than in the elaboration, which has no
+  types yet. The recorded type rides in `locals` under a key no source symbol
+  can spell, so it is threaded exactly as far as the bindings are."
+  [name type locals form]
+  (if-let [[id cell-name] (local-state-cell-parts name)]
+    (let [key (symbol (str "__kotoba_cellty_" id))
+          known (get locals key)]
+      (when (and known (not (same-expression-type? known type)))
+        (reject! (str "atom `" cell-name "` is " (local-state-type-text known)
+                      "; this rebinding is " (local-state-type-text type)
+                      " (atom slice 1 requires one type per cell)")
+                 form :kotoba.error/local-state-cell-type))
+      (assoc locals key (or known type)))
+    locals))
+
 (defn- charge-node! [budget form]
   (when (> (vswap! budget inc) max-expression-nodes)
     (reject! "program expression budget exhausted" form)))
@@ -6108,8 +6760,13 @@
         let (let [bindings (first args) body (let-body args form)]
               (loop [pairs (partition 2 bindings) current locals]
                 (if-let [[name value] (first pairs)]
-                  (recur (next pairs)
-                         (assoc current name (infer-expression-type value current signatures)))
+                  (let [type (infer-expression-type value current signatures)]
+                    (recur (next pairs)
+                           ;; local-state slice 1: a cell binding carries the
+                           ;; cell's identity in its name, so every rebinding
+                           ;; is checked against the type `(atom init)` gave it.
+                           (local-state-check-cell-type!
+                            name type (assoc current name type) form)))
                   (infer-expression-type body current signatures))))
         if (let [[test then else] args
                  test-type (infer-expression-type test locals signatures)
@@ -7490,6 +8147,229 @@
   (some (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
         (tree-seq coll? seq form)))
 
+(defn- abort-synthesized-context
+  "The lexical context a SYNTHESIZED function came from -- the description the
+  precondition refusal names -- or nil when the author wrote the function.
+
+  A function with no `:source-name` was made by desugaring: a loop / doseq /
+  dotimes body becomes `__kotoba_loop_N` (`:loop-helper?`), a lazy thunk and a
+  fn literal both become `__kotoba_lambda_N_arityK`, told apart by
+  `:lazy-thunk?`. `throw` inside one of those is refused while it is still
+  syntax (`abort-lexical-context`, bound during desugaring). An aborting CALL
+  cannot be refused there -- which functions abort is not known until the
+  fixed point below -- so it is refused when that is known, by the same
+  precondition and in the same words."
+  [{:keys [source-name loop-helper? lazy-thunk?]}]
+  (when-not source-name
+    (cond loop-helper? "a loop/doseq/dotimes body"
+          lazy-thunk? "a lazy thunk"
+          :else "a fn literal")))
+
+(defn- abort-anf-trivial?
+  "Can FORM be evaluated AFTER a hoisted binding without changing what the
+  program does?
+
+  Only if evaluating it is unobservable and cannot depend on the computation
+  that was moved in front of it. A literal and a symbol qualify: there is no
+  ambient mutation in this language, so a local's value cannot have been
+  changed by the hoisted form. A form containing a CALL does not -- the call
+  may exercise a capability, and reordering two observable effects is the one
+  thing the A-normalization must not do.
+
+  CONTAINMENT, not shape, is the test, because a vector literal can hold a
+  call: `(vector-at [(g 1) 2] 0)` is admitted (measured 2026-09-02). A type,
+  `[:result :i64 :string]`, contains no seq and is therefore trivial -- which
+  is what keeps a type out of a `let` binding, where it would not be a value."
+  [form]
+  (not (some seq? (tree-seq coll? seq form))))
+
+(defn- a-normalize-aborts
+  "A-normalize every aborting form into a position the elaboration admits:
+  tail position, or a `let` binding value.
+
+  Slice 1 refused an aborting form in an operand or a test. This is the
+  conversion that lifts that restriction, and the whole of its difficulty is
+  EVALUATION ORDER. `(op a b)` evaluates a then b; if b aborts and is hoisted,
+  `(let [t b] (op a t))` would evaluate b BEFORE a. So once any argument is
+  hoisted, every argument to its LEFT that is not `abort-anf-trivial?` is
+  hoisted too, in order. Arguments to the right stay where they are: they are
+  evaluated after, and still are.
+
+  What is produced is source, not lowered code: a `let` whose binding value is
+  the aborting form. `elaborate-aborts` then does exactly what it already did
+  for a `let` binding value the author wrote -- one `result-match-of` with a
+  re-raising err arm. The lowering is not duplicated here.
+
+  A `throw` reached in an operand position makes the ENCLOSING expression
+  dead: `(+ (g 1) (throw \"s\"))` evaluates `(g 1)` and then leaves, so it
+  becomes `(let [t (g 1)] (throw \"s\"))` -- the `+` is gone because it never
+  runs. Deadness propagates outward through operand positions and stops at a
+  scope, where a `throw` is the ordinary tail form.
+
+  Runs TWICE, because the two things it hoists are known at different times.
+  Own `throw`s are syntax, so the first run has ABORT-ERROR-TYPES `{}` and
+  must precede `infer-abort-error-types` -- a bottom-typed operand is refused
+  by `require-expression-type!` during inference, before the fixed point could
+  report anything. Aborting CALLS are only known after that fixed point, so
+  the second run follows it. PREFIX keeps the two runs' synthesized names
+  disjoint; without that a name from the first run could be shadowed by one
+  from the second inside the same function.
+
+  A function whose body mentions neither `throw` nor `try` nor an aborting
+  call is returned untouched, so a program without the ability lowers to the
+  same bytes it did before the ability existed."
+  [functions abort-error-types prefix]
+  (binding [*synthetic-counter* (volatile! 0)]
+   (letfn
+   [(escapes? [form] (abort-escapes? form abort-error-types))
+    (hoist [form] (let [t (synthetic prefix)] [[[t form]] t]))
+    (wrap [binds form]
+      (if (seq binds) (list 'let (vec (mapcat identity binds)) form) form))
+    (scope [form]
+      ;; A position where an aborting form is already admitted: a function
+      ;; body, an `if` branch, a `try` body or handler, a match arm.
+      (let [{:keys [binds form]} (anf form true)] (wrap binds form)))
+    (siblings [items tail-last? rebuild tail?]
+      ;; ITEMS are evaluated left to right and REBUILD puts the results back
+      ;; into the form they came from. The last one is in tail position when
+      ;; TAIL-LAST? -- that is how a `do`'s value, and only its value, keeps
+      ;; the tail treatment.
+      (let [last-hoisted (last (keep-indexed (fn [i x] (when (escapes? x) i)) items))
+            n (count items)]
+        (loop [i 0 remaining (seq items) binds [] out []]
+          (if (nil? remaining)
+            (let [rebuilt (rebuild out)]
+              (if (or tail? (not (escapes? rebuilt)))
+                {:binds binds :form rebuilt}
+                (let [[b t] (hoist rebuilt)] {:binds (into binds b) :form t})))
+            (let [last? (= i (dec n))
+                  {b :binds f :form dead? :dead?} (anf (first remaining) (and last? tail-last?))]
+              (cond
+                ;; A dead LAST element in tail position is the ordinary
+                ;; `(do ... (throw e))`: the throw is the value, and the
+                ;; deadness travels outward rather than truncating here.
+                (and dead? last? tail-last?)
+                {:binds (into binds b) :form (rebuild (conj out f)) :dead? true}
+                dead?
+                {:binds (into binds b) :form f :dead? true}
+                :else
+                (let [binds (into binds b)]
+                  (if (and (some? last-hoisted) (<= i last-hoisted)
+                           (not (abort-anf-trivial? f)))
+                    (let [[hb t] (hoist f)]
+                      (recur (inc i) (next remaining) (into binds hb) (conj out t)))
+                    (recur (inc i) (next remaining) binds (conj out f))))))))))
+    (bind-unless-tail [rebuilt tail?]
+      (if (or tail? (not (escapes? rebuilt)))
+        {:binds [] :form rebuilt}
+        (let [[b t] (hoist rebuilt)] {:binds b :form t})))
+    (anf [form tail?]
+      (cond
+        (and (vector? form) (escapes? form))
+        (siblings form false vec tail?)
+
+        (not (seq? form))
+        {:binds [] :form form}
+
+        (not (or (abort-form-mentions? form) (escapes? form)))
+        {:binds [] :form form}
+
+        :else
+        (let [[op & args] form]
+          (case op
+            throw
+            (let [{b :binds v :form dead? :dead?} (anf (first args) false)]
+              (if dead?
+                {:binds b :form v :dead? true}
+                {:binds b :form (list 'throw v) :dead? true}))
+
+            try
+            (let [[body clause] args
+                  [explicit binder handler] (try-clause-parts clause form)
+                  rebuilt (list 'try (scope body)
+                                (if (some? explicit)
+                                  (list 'catch explicit binder (scope handler))
+                                  (list 'catch binder (scope handler))))]
+              (bind-unless-tail rebuilt tail?))
+
+            if
+            (let [[test then else] (if-parts args form)
+                  {b :binds t :form dead? :dead?} (anf test false)]
+              (if dead?
+                {:binds b :form t :dead? true}
+                (let [{binds :binds form :form}
+                      (bind-unless-tail (list 'if t (scope then) (scope else)) tail?)]
+                  {:binds (into b binds) :form form})))
+
+            do (siblings (vec args) true #(apply list 'do %) tail?)
+
+            let
+            (let [bindings (first args) body (let-body args form)
+                  [binds pairs]
+                  (reduce (fn [[binds pairs] [name value]]
+                            ;; A binding value is already an admitted position
+                            ;; for an aborting form, so it is normalized as a
+                            ;; tail and stays where it is.
+                            (let [{b :binds v :form} (anf value true)]
+                              [(into binds b) (conj pairs [name v])]))
+                          [[] []] (partition 2 bindings))
+                  {body-binds :binds body* :form dead? :dead?} (anf body true)
+                  rebuilt (list 'let (vec (mapcat identity (concat binds pairs body-binds)))
+                                body*)]
+              (if (or tail? (not (escapes? rebuilt)))
+                {:binds [] :form rebuilt :dead? dead?}
+                (let [[b t] (hoist rebuilt)] {:binds b :form t})))
+
+            result-match-of
+            (let [[type value ok-name ok-body err-name err-body] args
+                  {b :binds v :form dead? :dead?} (anf value false)]
+              (if dead?
+                {:binds b :form v :dead? true}
+                (let [{binds :binds form :form}
+                      (bind-unless-tail (list 'result-match-of type v
+                                              ok-name (scope ok-body)
+                                              err-name (scope err-body))
+                                        tail?)]
+                  {:binds (into b binds) :form form})))
+
+            option-match
+            (let [[type value none-body some-name some-body] args
+                  {b :binds v :form dead? :dead?} (anf value false)]
+              (if dead?
+                {:binds b :form v :dead? true}
+                (let [{binds :binds form :form}
+                      (bind-unless-tail (list 'option-match type v (scope none-body)
+                                              some-name (scope some-body))
+                                        tail?)]
+                  {:binds (into b binds) :form form})))
+
+            variant-match
+            (let [[type value branches] args
+                  {b :binds v :form dead? :dead?} (anf value false)]
+              (if dead?
+                {:binds b :form v :dead? true}
+                (let [lowered (mapv (fn [[tag binder body :as branch]]
+                                      (let [body* (scope body)]
+                                        (if (vector? branch) [tag binder body*] (list tag binder body*))))
+                                    branches)
+                      {binds :binds form :form}
+                      (bind-unless-tail (list 'variant-match type v
+                                              (if (vector? branches) (vec lowered) (apply list lowered)))
+                                        tail?)]
+                  {:binds (into b binds) :form form})))
+
+            ;; A `fn` literal's body belongs to the lambda it becomes, not to
+            ;; the function it sits in; hoisting out of it would move the
+            ;; computation to a different call count. Left alone.
+            fn {:binds [] :form form}
+
+            (siblings (vec args) false #(cons op %) tail?)))))]
+    (mapv (fn [{:keys [body] :as function}]
+            (if (or (abort-form-mentions? body) (escapes? body))
+              (assoc function :body (scope body))
+              function))
+          functions))))
+
 (defn- abort-type-text [type]
   (if (keyword? type) (name type) (pr-str type)))
 
@@ -7501,15 +8381,36 @@
 (defn- infer-abort-error-types
   "Result inference and abort-error-type inference, together, to a fixed point.
 
-  A function's error type E is the type of its OWN escaping throws -- the ones
-  no try body between them and the function boundary catches. Calls to other
-  aborting functions never make a function aborting (slice 1: such a call is
-  admitted only under a try, or in a function that throws the same E itself).
+  A function's error type E is the type of its own escaping throws -- the ones
+  no try body between them and the function boundary catches -- AND, since
+  slice 2, the error type of every aborting function it calls with no try body
+  in between. Propagation is what makes an ordinary caller aborting without
+  writing `throw`, and it is why E is now an interprocedural fact: `parse`
+  throws, `read` calls `parse`, `main` catches, and only `main` had to say so.
+
+  Everything that can abort a function must agree on ONE E. Three ways to
+  disagree, each refused by name:
+
+    own throws disagree        function f throws two different error types
+    own throw vs a callee      function f throws X but calls aborting function
+                               `g`, which aborts with Y
+    two callees               function f calls aborting functions with two
+                               different error types
+
+  A SYNTHESIZED function may not acquire E this way. A loop / doseq / dotimes
+  body, a lazy thunk and a fn literal all become functions of their own, and
+  an abort leaving one of them unwinds a context whose obligations nothing
+  checks yet. `throw` there is refused while it is still syntax; an aborting
+  call is refused here, citing the same precondition in the same words --
+  otherwise slice 2's propagation would quietly admit exactly what slice 1's
+  guard was written to stop.
+
   The two inferences feed each other: a throw's operand may be a call whose
   result is inferred, and a try's binder type is a callee's error type. So
   each round infers absent results with the error types known so far, then
-  reads every function's escaping throw types with those results; the loop
-  ends when a round adds nothing.
+  reads every function's escaping error types with those results; the loop
+  ends when a round adds nothing. Propagation therefore advances one call
+  edge per round, which terminates because the call graph is finite.
 
   Returns `{:functions fs :abort-error-types {name E}}`. A module with no
   `throw`/`try` returns exactly `(infer-absent-results functions)` and `{}`."
@@ -7522,8 +8423,18 @@
             sigs (abort-signatures fs)
             next-known
             (reduce
-             (fn [acc {:keys [name source-name params param-types body]}]
-               (if (or (contains? acc name) (not (abort-escapes? body {})))
+             (fn [acc {:keys [name source-name params param-types body] :as function}]
+               ;; Deliberately NOT short-circuiting on a name already in ACC.
+               ;; A function that throws gets its E in round one, when nothing
+               ;; is known about its callees; the disagreement between its own
+               ;; throw and a callee it also calls is only visible in a LATER
+               ;; round, and skipping the function once it has an E would have
+               ;; meant never looking. Measured 2026-09-02: with the skip in
+               ;; place, `(defn- g [x] (if (= x 1) (throw 9) (f x)))` where `f`
+               ;; aborts with a string was admitted here and refused much
+               ;; later by elaboration, naming a scope rather than the two
+               ;; functions. Recomputing is idempotent -- `own` does not move.
+               (if (not (abort-escapes? body known))
                  acc
                  (let [thrown (volatile! [])
                        inferred? (binding [*abort-error-types* known
@@ -7531,16 +8442,54 @@
                                    (try (do (infer-expression-type body (zipmap params param-types) sigs)
                                             true)
                                         (catch #?(:clj Exception :cljs :default) _ false)))
-                       types (distinct @thrown)]
+                       own (distinct @thrown)
+                       sites (binding [*abort-error-types* known] (abort-callee-sites body))
+                       propagated (distinct (map second sites))
+                       label (or source-name name)]
                    (cond
                      (not inferred?) acc
-                     (> (count types) 1)
-                     (reject! (str "function " (or source-name name)
+
+                     (> (count own) 1)
+                     (reject! (str "function " label
                                    " throws two different error types: "
-                                   (abort-type-text (first types)) " and "
-                                   (abort-type-text (second types)))
+                                   (abort-type-text (first own)) " and "
+                                   (abort-type-text (second own)))
                               name :kotoba.error/abort-error-type)
-                     (= 1 (count types)) (assoc acc name (first types))
+
+                     (and (= 1 (count own))
+                          (some (fn [[_ e]] (not (same-expression-type? e (first own)))) sites))
+                     (let [[callee callee-error]
+                           (first (remove (fn [[_ e]] (same-expression-type? e (first own))) sites))]
+                       (reject! (str "function " label " throws " (abort-type-text (first own))
+                                     " but calls aborting function `" callee
+                                     "`, which aborts with " (abort-type-text callee-error))
+                                name :kotoba.error/abort-error-type))
+
+                     (and (empty? own) (> (count propagated) 1))
+                     (let [[[a ae] [b be]] (->> sites
+                                                (reduce (fn [seen [callee e]]
+                                                          (if (some (fn [[_ s]] (same-expression-type? s e)) seen)
+                                                            seen
+                                                            (conj seen [callee e])))
+                                                        [])
+                                                (take 2))]
+                       (reject! (str "function " label
+                                     " calls aborting functions with two different error types: "
+                                     (abort-type-text ae) " (`" a "`) and "
+                                     (abort-type-text be) " (`" b "`)")
+                                name :kotoba.error/abort-error-type))
+
+                     (seq own) (assoc acc name (first own))
+
+                     (seq propagated)
+                     (if-let [context (abort-synthesized-context function)]
+                       (reject! (str "call to aborting function `" (ffirst sites)
+                                     "` inside " context
+                                     " is not admitted in abort slice 1: precondition "
+                                     ":checked-lexical-facet-unwind is not met")
+                                name :kotoba.error/abort-precondition)
+                       (assoc acc name (first propagated)))
+
                      :else acc))))
              known fs)]
         (if (= next-known known)
@@ -7587,18 +8536,24 @@
                 (keep-meta [form result]
                   (if (seq (meta form)) (with-meta result (meta form)) result))
                 (scope-error-type [scope] (nth scope 2))
+                ;; BACKSTOPS. `a-normalize-aborts` has already moved every
+                ;; aborting form it can reach into tail or let-binding
+                ;; position, and `infer-abort-error-types` has already given
+                ;; every function that calls one an error type of its own. So
+                ;; both of these fire only where the normalizer does not
+                ;; descend -- a map or set literal holding an aborting call --
+                ;; and they say that rather than naming a rule slice 2 lifted.
                 (refuse-position! [form scope]
                   (if scope
-                    (reject! (str "abort slice 1 admits throw and calls to aborting functions "
-                                  "only in tail position or as a let binding value; "
+                    (reject! (str "abort slice 2 could not A-normalize "
                                   (if-let [callee (first-aborting-call form abort-error-types)]
                                     (str "the call to `" callee "`")
                                     "the throw")
-                                  " is in neither")
+                                  " into tail or let binding position")
                              form :kotoba.error/abort-position)
                     (let [callee (first-aborting-call form abort-error-types)]
                       (reject! (str "call to aborting function `" callee
-                                    "` must be inside try or in a function that aborts "
+                                    "` in a function that neither catches it nor aborts "
                                     "with the same error type")
                                form :kotoba.error/abort-unhandled-call))))
                 (lower-try [form env scope tail?]
@@ -7751,6 +8706,10 @@
                             (assoc function
                                    :result scope
                                    :abort-error-type error-type
+                                   ;; Which of the two ways it became aborting,
+                                   ;; so the precondition refusal can say
+                                   ;; "throw" only where there is one.
+                                   :abort-own-throw? (abort-escapes? body {})
                                    :body (walk body env scope true))))
                       ;; Escaping throws whose type never resolved: run the
                       ;; inference uncaught so the real refusal is the one seen.
@@ -7779,12 +8738,15 @@
   skip the `facet-leave!` obligation, and slice 1 has no unwind that runs it.
   The row is the interprocedural one, so a facet operation in a callee counts."
   [functions function-effects]
-  (doseq [{:keys [name source-name abort-error-type abort-catches?]} functions
+  (doseq [{:keys [name source-name abort-error-type abort-own-throw? abort-catches?]} functions
           :when (or abort-error-type abort-catches?)]
     (let [row (get function-effects name #{})
           facet-effects (filter #(and (vector? %) (contains? dataspace-capability-ids (second %))) row)]
       (when (seq facet-effects)
-        (reject! (str (if abort-error-type "throw" "try") " in function " (or source-name name)
+        (reject! (str (cond abort-own-throw? "throw"
+                            abort-error-type "abort"
+                            :else "try")
+                      " in function " (or source-name name)
                       " whose effect row has a dataspace facet operation "
                       (pr-str (into #{} (map #(get capability-id->name (second %))) facet-effects))
                       " is not admitted in abort slice 1: precondition "
@@ -8592,6 +9554,298 @@
                 (reject! "kernel memory base must name a region, not compute one"
                          arg :kotoba.error/kernel-region-provenance)))))))))
 
+
+;; ---------------------------------------------------------------------------
+;; slice-value: erasing the ADR 0285 carrier.
+;;
+;; WHERE THE TYPE STOPS EXISTING. `[:slice T]` is a type of this frontend's
+;; source syntax and of nothing else. This pass runs immediately after
+;; parameter types are settled and BEFORE every later pass -- loop-helper
+;; type resolution, absent-parameter and absent-result inference, abort
+;; elaboration, `validate-expr`, `check-value-types!`,
+;; `check-kernel-region-provenance!`, `check-lowering-budget!`, and the HIR
+;; construction that follows all of them. Downstream of this line the program
+;; contains only `:i64` words and the `slice-load-*`/`slice-store-*`/
+;; `kernel-subregion` operations the machine already had, so HIR, KIR, GMIR,
+;; MIR, codegen, both native ISAs and `kotoba.verifier` need no slice value,
+;; no register pair and no new IR key.
+;;
+;; WHAT ENFORCES THE BOUNDARY. Three independent things, in this order:
+;;
+;;   1. This pass refuses, by name, every position a two-word value cannot
+;;      cross: a slice as a result type, inside any structured type, as an
+;;      argument to anything but a declared slice parameter, or bound and then
+;;      mentioned anywhere else. A slice-typed parameter on an exported
+;;      function (or on `main`) is refused where the export list is known,
+;;      because a kernel object's callers spell one machine word per argument
+;;      and there is no ABI in which they could spell two.
+;;   2. If this pass ever failed to erase one, `kotoba.kir`'s
+;;      `native-function-boundary-type?` refuses a `[:slice T]` in
+;;      `:param-types` -- named explicitly there rather than by absence, so
+;;      the message says which invariant broke.
+;;   3. `kotoba.verifier` refuses it again, independently, from its own table.
+;;
+;; WHY ERASURE AND NOT A REGISTER PAIR. kotoba-native's
+;; `docs/lang-authority-diff.md` lists four routes to a carried slice and
+;; names this one -- its route 3 -- as the cheapest. Its routes 1 and 2 (a
+;; second `pilot-expression?` shape and a two-slot spill in the x86-64
+;; fallback) turn out not to be needed AT ALL rather than merely to be
+;; dearer: `pilot-expression?` already answers `:scalar` for a four-operand
+;; `slice-load-u8`, because `kir-kernel-memory-ops` has carried the slice
+;; family since the lowering landed. A pair-shaped SSA value would have been
+;; a second representation for something both backends can already hold.
+(def ^:private slice-escape-message
+  "a slice value can only be indexed, narrowed, measured, or passed to a slice parameter")
+
+(defn- slice-erased-base-name [sym]
+  (symbol (str "__kotoba_slice_" (name sym) "_base")))
+
+(defn- slice-erased-length-name [sym]
+  (symbol (str "__kotoba_slice_" (name sym) "_len")))
+
+(defn- slice-scale
+  "ELEMENTS to BYTES. Folded when the operand is a literal, so a carried
+  traversal and the same traversal written with the machine operations emit
+  the same bytes rather than merely equivalent ones."
+  [expr width]
+  (cond
+    (= 1 width) expr
+    (integer? expr) (* expr width)
+    :else (list '* expr width)))
+
+(defn- slice-access-operation [kind element]
+  (symbol (str "slice-" kind "-" (name element))))
+
+(defn- uses-slice-values? [body slice-parameters]
+  (boolean (some #(and (seq? %)
+                       (or (contains? slice-value-operations (first %))
+                           ;; A caller that merely PASSES a slice on has no
+                           ;; slice operation of its own. Without this arm it
+                           ;; would be left untouched and its call would reach
+                           ;; `validate-expr` with the callee's pre-erasure
+                           ;; arity -- a refusal that names arity and not the
+                           ;; slice that caused it.
+                           (contains? slice-parameters (first %))))
+                 (tree-seq coll? seq body))))
+
+(defn- erase-slice-values
+  "Rewrite every `[:slice T]` parameter, binding and operation into the two
+  i64 words the machine carries. Returns FUNCTIONS with slice parameters
+  expanded in place; `slice-parameter-functions` is a volatile the caller
+  reads once the export list is known, because the export boundary refusal
+  cannot be made until then.
+
+  A function with no slice parameter and no slice operation in its body is
+  returned untouched -- identical object, not an equal one -- so a module that
+  does not use the carrier cannot change bytes because of it."
+  [functions slice-parameter-functions]
+  (let [slice-parameters
+        (into {}
+              (keep (fn [{:keys [name param-types]}]
+                      (let [indexed (into (sorted-map)
+                                          (keep-indexed
+                                           (fn [i t]
+                                             (when (slice-type? t)
+                                               [i (slice-element-type t)]))
+                                           (or param-types [])))]
+                        (when (seq indexed) [name indexed]))))
+              functions)
+        source-arity (into {} (map (juxt :name (comp count :params))) functions)]
+    (vswap! slice-parameter-functions into (keys slice-parameters))
+    (mapv
+     (fn [{:keys [name source-name params param-types result body] :as function}]
+       (if-not (or (contains? slice-parameters name)
+                   (uses-slice-values? body slice-parameters))
+         function
+         (let [reported (or source-name name)
+               _ (when (slice-type? result)
+                   (reject! (str "a slice value cannot be returned: " reported
+                                 " declares " (pr-str result))
+                            result :kotoba.error/slice-result-type))
+               pairs (map vector params (or param-types (repeat :i64)))
+               expanded
+               (reduce (fn [acc [p t]]
+                         (if (slice-type? t)
+                           (-> acc
+                               (update :params conj
+                                       (slice-erased-base-name p)
+                                       (slice-erased-length-name p))
+                               (update :param-types conj :i64 :i64)
+                               (assoc-in [:env p]
+                                         {:element (slice-element-type t)
+                                          :base (slice-erased-base-name p)
+                                          :len (slice-erased-length-name p)}))
+                           (-> acc
+                               (update :params conj p)
+                               (update :param-types conj t))))
+                       {:params [] :param-types [] :env {}}
+                       pairs)
+               _ (when (> (count (:params expanded)) max-parameters)
+                   (reject! (str "function parameters exceed ABI-supported arity after slice erasure: "
+                                 reported " needs " (count (:params expanded))
+                                 " machine words for " (count params) " parameters")
+                            params :kotoba.error/slice-erased-max-parameters))
+               root-params (set params)]
+           (letfn
+               [(slice-of [expr env scalars]
+                  ;; -> {:element T :base <expr> :len <expr>} or nil when EXPR
+                  ;; is not slice-valued. Never rewrites in place: the caller
+                  ;; decides where the two words go.
+                  (cond
+                    (and (symbol? expr) (contains? env expr)) (get env expr)
+
+                    (and (seq? expr) (contains? slice-constructor-elements (first expr)))
+                    (let [[op & args] expr]
+                      (when-not (= 2 (count args))
+                        (reject! "slice constructor arity mismatch" expr
+                                 :kotoba.error/slice-arity))
+                      (let [[base length] args]
+                        ;; The provenance rule, applied to the base BEFORE it
+                        ;; is buried inside a value. After erasure
+                        ;; `check-kernel-region-provenance!` would catch this
+                        ;; too, by following the `let` it is about to be bound
+                        ;; by -- but it would report the synthesised binding
+                        ;; and the machine operation, naming neither the
+                        ;; constructor nor the slice. This refuses first and
+                        ;; says which.
+                        (when-not (traceable-base? base scalars root-params)
+                          (reject! "slice base must name a region, not compute one"
+                                   expr :kotoba.error/slice-region-provenance))
+                        {:element (get slice-constructor-elements op)
+                         :base (rewrite base env scalars)
+                         :len (rewrite length env scalars)}))
+
+                    (and (seq? expr) (= 'slice-sub (first expr)))
+                    (let [[_ parent offset count'] expr]
+                      (when-not (= 4 (count expr))
+                        (reject! "slice-sub arity mismatch" expr :kotoba.error/slice-arity))
+                      (let [{:keys [element base len]}
+                            (or (slice-of parent env scalars)
+                                (reject! "slice-sub narrows a slice value" expr
+                                         :kotoba.error/slice-operand))
+                            width (get slice-element-widths element)
+                            offset' (rewrite offset env scalars)
+                            count'' (rewrite count' env scalars)]
+                        ;; A CHECKED narrowing: `kernel-subregion` traps
+                        ;; unless the offset lies inside the parent and the
+                        ;; count inside the remainder. The scale is applied
+                        ;; here, so the arithmetic is bytes where
+                        ;; `kernel-subregion` reads bytes and elements
+                        ;; everywhere it is written.
+                        {:element element
+                         :base (list 'kernel-subregion
+                                     base
+                                     (slice-scale len width)
+                                     (slice-scale offset' width)
+                                     (slice-scale count'' width))
+                         :len count''}))
+
+                    :else nil))
+
+                (bind-slice [binder info bindings env scalars]
+                  ;; Give a slice binding two real bindings so neither half is
+                  ;; ever evaluated twice, whatever the initialiser was.
+                  (let [b (slice-erased-base-name binder)
+                        l (slice-erased-length-name binder)]
+                    {:bindings (conj bindings b (:base info) l (:len info))
+                     :env (assoc env binder (assoc info :base b :len l))
+                     :scalars (assoc scalars b (:base info) l (:len info))}))
+
+                (require-slice [expr env scalars what]
+                  (or (slice-of expr env scalars)
+                      (reject! (str what " requires a slice value")
+                               expr :kotoba.error/slice-operand)))
+
+                (rewrite [expr env scalars]
+                  (cond
+                    (and (symbol? expr) (contains? env expr))
+                    (reject! slice-escape-message expr :kotoba.error/slice-escape)
+
+                    (not (seq? expr)) expr
+
+                    :else
+                    (let [[op & args] expr]
+                      (cond
+                        (= op 'let)
+                        (let [[raw & tail] args
+                              _ (when-not (and (vector? raw) (even? (count raw)))
+                                  (reject! "let bindings must be an even-length vector" expr))
+                              {:keys [bindings env scalars]}
+                              (reduce
+                               (fn [acc [binder init]]
+                                 (if-let [info (slice-of init (:env acc) (:scalars acc))]
+                                   (bind-slice binder info (:bindings acc)
+                                               (:env acc) (:scalars acc))
+                                   (let [value (rewrite init (:env acc) (:scalars acc))]
+                                     {:bindings (conj (:bindings acc) binder value)
+                                      ;; a non-slice binding SHADOWS an outer
+                                      ;; slice of the same name
+                                      :env (dissoc (:env acc) binder)
+                                      :scalars (assoc (:scalars acc) binder init)})))
+                               {:bindings [] :env env :scalars scalars}
+                               (partition 2 raw))]
+                          (list* 'let bindings
+                                 (map #(rewrite % env scalars) tail)))
+
+                        (= op 'slice-length)
+                        (do (when-not (= 1 (count args))
+                              (reject! "slice-length arity mismatch" expr
+                                       :kotoba.error/slice-arity))
+                            (:len (require-slice (first args) env scalars "slice-length")))
+
+                        (= op 'slice-get)
+                        (let [_ (when-not (= 2 (count args))
+                                  (reject! "slice-get arity mismatch" expr
+                                           :kotoba.error/slice-arity))
+                              {:keys [element base len]}
+                              (require-slice (first args) env scalars "slice-get")]
+                          (list (slice-access-operation "load" element)
+                                base len (rewrite (second args) env scalars)))
+
+                        (= op 'slice-set!)
+                        (let [_ (when-not (= 3 (count args))
+                                  (reject! "slice-set! arity mismatch" expr
+                                           :kotoba.error/slice-arity))
+                              {:keys [element base len]}
+                              (require-slice (first args) env scalars "slice-set!")]
+                          (list (slice-access-operation "store" element)
+                                base len
+                                (rewrite (second args) env scalars)
+                                (rewrite (nth args 2) env scalars)))
+
+                        (or (contains? slice-constructor-elements op) (= op 'slice-sub))
+                        (reject! slice-escape-message expr :kotoba.error/slice-escape)
+
+                        (contains? slice-parameters op)
+                        (let [positions (get slice-parameters op)
+                              expected (get source-arity op)]
+                          (when-not (= expected (count args))
+                            (reject! "call arity does not match the callee's declared parameters"
+                                     expr :kotoba.error/slice-call-arity))
+                          (cons op
+                                (mapcat
+                                 (fn [[i arg]]
+                                   (if-let [element (get positions i)]
+                                     (let [info (require-slice
+                                                 arg env scalars
+                                                 (str "parameter " i " of " op))]
+                                       (when-not (= element (:element info))
+                                         (reject! (str "slice element type mismatch: parameter "
+                                                       i " of " op " takes [:slice "
+                                                       element "], not [:slice "
+                                                       (:element info) "]")
+                                                  expr :kotoba.error/slice-element-mismatch))
+                                       [(:base info) (:len info)])
+                                     [(rewrite arg env scalars)]))
+                                 (map-indexed vector args))))
+
+                        :else (cons op (map #(rewrite % env scalars) args))))))]
+             (assoc function
+                    :params (:params expanded)
+                    :param-types (:param-types expanded)
+                    :body (rewrite body (:env expanded) {}))))))
+     functions)))
+
 (defn- direct-facts [form function-names]
   (let [effects (volatile! #{}) calls (volatile! #{})]
     (letfn [(walk [x]
@@ -8616,11 +9870,13 @@
 
 (defn- infer-effects
   "Every function's effect row. Capability effects propagate through calls:
-  what a callee exercises, its caller exercises. `:abort` does not -- it is
-  the mark of a function that ITSELF aborts (`elaborate-aborts` put
-  `:abort-error-type` on it), and a caller either catches that with `try`
-  (no `:abort`) or aborts with the same error type in its own right (`:abort`
-  from its own mark). A call is never what puts `:abort` on a row."
+  what a callee exercises, its caller exercises. `:abort` is not propagated
+  HERE, and that is not the same as saying it does not propagate: since slice
+  2 a caller of an aborting function is itself aborting, but that is decided
+  by `infer-abort-error-types` and recorded as `:abort-error-type`, which the
+  direct row below reads. Union over calls would be WRONG -- a caller that
+  CATCHES has no `:abort`, and it calls the aborting function just the same.
+  The mark, not the call graph, is the authority."
   [functions]
   (let [names (set (map :name functions))
         direct (into {} (map (fn [{:keys [name body abort-error-type]}]
@@ -9141,7 +10397,14 @@
       (reject! "desugar template requires a simple name" form))
     (when (reserved-binding-name? name)
       (reject! "symbol uses the reserved __kotoba_ prefix" name))
-    (when (or (contains? structural-heads name) (contains? forbidden-heads name))
+    ;; `reserved-function-names` rather than `forbidden-heads` alone: when
+    ;; `atom` left the forbidden set on 2026-09-02 (local-state slice 1) this
+    ;; check stopped refusing `(defdesugar atom ...)`, which would shadow the
+    ;; head the elaboration reads. A name a program may not DEFINE is a name a
+    ;; template may not take, and that set is the reserved one.
+    (when (or (contains? structural-heads name)
+              (contains? forbidden-heads name)
+              (contains? reserved-function-names name))
       (reject! "desugar template may not take a reserved head name" name))
     (when-not (vector? params)
       (reject! "desugar template requires a parameter vector" form))
@@ -10096,6 +11359,10 @@
         ;; here from outside, keeps whatever `resolve-capability-keyword!`
         ;; conjoined onto it during desugaring.
         used-capabilities (volatile! #{})
+        ;; local-state slice 1: set when a function-local atom is elaborated.
+        ;; Created out here, like used-capabilities and for the same reason --
+        ;; it is read after `binding`'s dynamic extent has ended.
+        local-state-used (volatile! false)
         lambda-infos (atom [])
         uses-apply? (volatile! false)
         uses-lazy? (volatile! false)
@@ -10110,7 +11377,8 @@
                           *function-callable-result-contracts*
                           function-callable-result-contracts
                           *synthetic-counter* (volatile! 0)
-                          *used-capability-keywords* used-capabilities]
+                          *used-capability-keywords* used-capabilities
+                          *local-state-used* local-state-used]
                ;; `vec` (forcing) must stay INSIDE `binding`'s dynamic
                ;; extent: `mapcat` is lazy, so `(vec (binding [...]
                ;; (mapcat ...)))` would rebind *loop-counter* only around
@@ -10152,9 +11420,15 @@
                              (reject! "function parameters must be unique bounded symbols with ABI-supported arity" raw-params))
                            (let [loop-helpers (atom [])
                                  constant-bound (into #{} (mapcat #(binding-symbols (:pattern %)) param-parts))
-                                 source-body (substitute-constants
-                                              (wrap-body (first body))
-                                              constants constant-bound)
+                                 ;; local-state slice 1 runs on SOURCE, before
+                                 ;; desugaring: a cell is a rebinding chain the
+                                 ;; rest of the pipeline reads as ordinary
+                                 ;; `let`/`if`. A body that does not mention the
+                                 ;; slice comes back identical.
+                                 source-body (elaborate-local-state
+                                              (substitute-constants
+                                               (wrap-body (first body))
+                                               constants constant-bound))
                                  ;; Product Value ABI v1: typed option params for if-some/when-some.
                                  option-locals
                                  (into {}
@@ -10300,6 +11574,17 @@
         ;; captured outer variables from each helper's call site so a loop that
         ;; captures a :string/:f64/record variable type-checks and lowers with
         ;; the correct local types instead of a spurious "expected i64" error.
+        ;; slice-value: erase the ADR 0285 carrier into the two i64 words the
+        ;; machine carries, BEFORE any pass that reasons about types. Every
+        ;; later stage -- the two inference passes below, abort elaboration,
+        ;; `validate-expr`, `check-value-types!`, the provenance check, HIR,
+        ;; KIR, both backends, the verifier -- sees a program made of `:i64`
+        ;; and of the `slice-load-*`/`slice-store-*`/`kernel-subregion`
+        ;; operations that already had a lowering. It runs AFTER
+        ;; `resolve-overloaded-calls` because it changes arities, and after
+        ;; the `:param-types` defaulting above because it reads them.
+        slice-parameter-functions (volatile! #{})
+        parsed (erase-slice-values parsed slice-parameter-functions)
         parsed (resolve-loop-helper-param-types parsed)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
@@ -10315,8 +11600,17 @@
         ;; binder type is a callee's error type), so they run together to a
         ;; fixed point. A module with no `throw`/`try` takes the unchanged
         ;; single `infer-absent-results` path.
+        ;; Abort ability, slice 2: A-normalize an aborting operand or test
+        ;; into a `let` binding. Twice, because the two kinds are known at
+        ;; different times -- own `throw`s are syntax and must be moved BEFORE
+        ;; inference (a bottom-typed operand is refused by
+        ;; `require-expression-type!` before the fixed point could report
+        ;; anything), and which functions abort is only known after it. The
+        ;; two prefixes keep the runs' synthesized names disjoint.
+        parsed (a-normalize-aborts parsed {} "abort_thrown")
         {parsed :functions abort-error-types :abort-error-types}
         (infer-abort-error-types parsed)
+        parsed (a-normalize-aborts parsed abort-error-types "abort_operand")
         parsed (elaborate-aborts parsed abort-error-types)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
@@ -10369,6 +11663,17 @@
             :when (contains? abort-error-types name)]
       (reject! (str "unhandled abort at export boundary; catch it with try: " name)
                name :kotoba.error/abort-unhandled-export))
+    ;; slice-value: a slice parameter is TWO machine words, and an export's
+    ;; callers spell one word per argument. Refused here rather than in the
+    ;; erasure pass because the export list is not known until now, and
+    ;; refusing every slice parameter would forbid the only shape the carrier
+    ;; is for -- an internal traversal handed a region by the module's own
+    ;; entry point.
+    (doseq [name (cond-> (vec exports) entry (conj entry))
+            :when (contains? @slice-parameter-functions name)]
+      (reject! (str "a slice parameter cannot cross an export boundary: " name
+                    " carries two machine words per slice and its callers spell one")
+               name :kotoba.error/slice-export-boundary))
     (check-namespace-capabilities! (:capabilities namespace-info)
                                    used-capability-names)
     (let [declared (set (keys (:schemas namespace-info)))
@@ -10490,11 +11795,15 @@
                               ;; A frontend-internal mark: which parameters were
                               ;; written without a type. HIR has a closed key
                               ;; set and this is not one of its keys.
-                              true (dissoc :param-types-inferred :abort-error-type :abort-catches?)
+                              true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?)
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
           main-result (some->> parsed (some #(when (= 'main (:name %)) (:result %))))
-          named-operations (into (sorted-set) @used-capabilities)
+          named-operations (cond-> (into (sorted-set) @used-capabilities)
+                             ;; The elaboration adds nothing to the effect row
+                             ;; -- the cell does not exist at runtime -- so this
+                             ;; is where a reader of `check` sees it happened.
+                             @local-state-used (conj :local-state))
           effects (reduce set/union #{} (vals function-effects))
           _ (when (and (= :pure-product language-profile) (seq effects))
               (reject! "pure-product profile requires empty effects"
