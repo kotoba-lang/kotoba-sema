@@ -15,6 +15,8 @@
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
             [kotoba.compiler.case-uniqueness-test]
+            ;; boot-scratch: the writable region and a function's address
+            [kotoba.compiler.boot-scratch-test]
             [kotoba.compiler.host-nesting-test]
             ;; a `let` body is an implicit `do`; the value is the last form
             [kotoba.compiler.let-body-test]
@@ -28,6 +30,9 @@
             [kotoba.compiler.defdesugar-test]
             [kotoba.compiler.match-test]
             [kotoba.compiler.parameter-inference-test]
+            ;; boot-lit: the read-only literal heads, and (loader) the rule
+            ;; that makes one of their addresses a bounded load's region root
+            [kotoba.compiler.rodata-literal-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
             [kotoba.compiler.loop-accumulator-type-test]))
 
@@ -39,6 +44,7 @@
 
 (t/run-tests 'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
+             'kotoba.compiler.boot-scratch-test
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.let-body-test
              'kotoba.compiler.kernel-xgetbv-test
@@ -49,4 +55,5 @@
              'kotoba.compiler.defdesugar-test
              'kotoba.compiler.match-test
              'kotoba.compiler.parameter-inference-test
+             'kotoba.compiler.rodata-literal-test
              'kotoba.compiler.loop-accumulator-type-test)

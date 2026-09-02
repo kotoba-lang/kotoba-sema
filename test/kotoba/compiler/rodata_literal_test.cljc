@@ -79,8 +79,18 @@
             "(defn f [] :i64 (bytes-literal \"zz\"))"]
            ["an odd hex length"
             "(defn f [] :i64 (bytes-literal-length \"abc\"))"]
-           ["a surrogate pair in UCS-2"
-            "(defn f [] :i64 (ucs2 \"hello\\uD83D\\uDE00\"))"]]]
+           ;; Spelled as a REAL surrogate character rather than as a
+           ;; `\\uD83D` escape. Measured 2026-09-02, the two routes refuse the
+           ;; escape at different places and so with different words: the JVM
+           ;; reader builds the surrogate and `rodata-literal-content?` names
+           ;; it, while the ClojureScript source reader refuses the escape
+           ;; outright ("source reader rejected input"). Both refuse, and
+           ;; pinning one route's message made this case red the moment the
+           ;; suite was registered for the other. Written this way it is the
+           ;; SAME assertion on both, and it still goes red if a surrogate is
+           ;; ever admitted -- which is the thing being tested.
+           ["a surrogate in UCS-2"
+            "(defn f [] :i64 (ucs2 \"hello\ud83d\"))"]]]
     (testing label
       (is (= "rodata literal is malformed for its encoding"
              (rejection-of source))
@@ -122,3 +132,50 @@
         (is (= "kernel privileged operation arity mismatch"
                (rejection-of (wrapper (dec arity))))
             head)))))
+
+;; ---------------------------------------------------------------------------
+;; loader: a literal pool address is a REGION ROOT
+;; ---------------------------------------------------------------------------
+;; A bounded kernel load takes a base that must NAME a region rather than
+;; compute one. Before this, the three address-producing rodata heads were not
+;; among the roots, so an image could obtain the address of bytes it had
+;; emitted itself and then not read them with a checked load -- while an
+;; INTEGER base, naming an address the compiler has never seen, was admitted.
+;;
+;; The refusal was measured, on 2026-09-02, against a Kotoba BOOTX64.EFI that
+;; wanted to admit an ELF header held in its own literal pool:
+;;   :kotoba.error/kernel-region-provenance
+;;   "kernel memory base must name a region, not compute one"
+;; both directly and through an argument flowing into a base position.
+
+(def ^:private literal-bases
+  '{ucs2 "AIUEOS" guid "5B1B31A1-9562-11D2-8E3F-00A0C969723B"
+    bytes-literal "0102030405060708"})
+
+(deftest a-literal-pool-address-is-a-region-root
+  (testing "directly in a base position"
+    (doseq [[head text] literal-bases]
+      (is (analyzes? (str "(defn f [] :i64 (kernel-load-u8-4k (" head " \"" text "\") 8 0))"))
+          head)))
+  (testing "flowing through an argument into a callee's base position"
+    ;; The second half of the rule: a caller may not hand a callee something
+    ;; the callee could not have written itself.
+    (doseq [[head text] literal-bases]
+      (is (analyzes? (str "(defn g [b] :i64 (kernel-load-u8-4k b 8 0))\n"
+                          "(defn f [] :i64 (g (" head " \"" text "\")))"))
+          head)))
+  (testing "and through a let binding, like any other root"
+    (is (analyzes? (str "(defn f [] :i64"
+                        " (let [b (bytes-literal \"0102030405060708\")]"
+                        " (kernel-load-u8-4k b 8 0)))"))))
+  (testing "the length head is NOT an address and stays refused"
+    ;; `bytes-literal-length` answers a count. Admitting it as a base would
+    ;; make a number the compiler happens to know into an address, which is
+    ;; the exact confusion this rule exists to prevent.
+    (is (= "kernel memory base must name a region, not compute one"
+           (rejection-of (str "(defn f [] :i64 (kernel-load-u8-4k"
+                              " (bytes-literal-length \"0102030405060708\") 8 0))")))))
+  (testing "a base with no traceable root at all is still refused"
+    (is (= "kernel memory base must name a region, not compute one"
+           (rejection-of (str "(defn f [b l i] :i64"
+                              " (kernel-load-u8-4k (kernel-load-u8-4k b l i) 8 0))"))))))

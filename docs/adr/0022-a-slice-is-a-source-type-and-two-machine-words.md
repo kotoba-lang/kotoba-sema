@@ -1,4 +1,11 @@
-# ADR-0009: A slice is a source type and two machine words
+# ADR-0022: A slice is a source type and two machine words
+
+> **Renumbered.** This landed as ADR-0009 and collided with
+> `0009-a-second-base-in-a-second-family.md`, which landed the same day.
+> The coordinator's allocation table assigns this stream `0022`, so the file
+> moved and the other stream's `0009` stayed put. References to **"kotoba-sema
+> ADR 0009"** in kotoba-kir ADR 0240, kotoba-verifier ADR 0028 and amu ADR 0314
+> mean this file.
 
 - Status: accepted
 - Date: 2026-09-02
