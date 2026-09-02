@@ -708,8 +708,45 @@
     f32-add 2 f32-sub 2 f32-mul 2 f32-div 2 f32-min 2 f32-max 2
     f32-neg 1 f32-abs 1 f32-sqrt 1
     f32-eq 2 f32-lt 2 f32-le 2 f32-gt 2 f32-ge 2 f32-unordered 2})
+
+;; Type-directed name resolution for the plain numeric operators (2026-09-02).
+;; `+ - * / < <= > >= =` are one spelling each; the operand types choose the
+;; typed operation the way Unison resolves `+` to `Nat.+` or `Float.+`:
+;; i64 operands stay the i64 forms KIR already executes, f64 operands lower to
+;; `f64-add`/`f64-lt`/..., f32 operands to the `f32-*` family. Only the plain
+;; spelling is overloaded -- `f64-add` and friends remain valid so a typed or
+;; ABI boundary can still name its operation exactly.
+;;
+;; There is NO implicit conversion. An i64 next to an f64, or an f32 next to
+;; an f64, is a rejection that names both types and the explicit conversion
+;; operations the author has to choose between, because widening and
+;; narrowing each have two spellings (`-checked` vs `-rounded`/`-truncating`)
+;; and choosing one silently would decide overflow and rounding behaviour
+;; the source never wrote. `quot` and the bit operations are integer-only and
+;; are not overloaded; `/` has no i64 reading at all (integer division is
+;; `quot`), so it resolves only through a float operand type.
+(def ^:private type-directed-numeric-heads '#{+ - * / < <= > >= =})
+(def ^:private float-division-heads '#{/})
+(def ^:private float-arithmetic-resolution
+  "Plain operator -> typed operation, per float operand type."
+  {:f64 '{+ f64-add - f64-sub * f64-mul / f64-div
+          < f64-lt <= f64-le > f64-gt >= f64-ge = f64-eq}
+   :f32 '{+ f32-add - f32-sub * f32-mul / f32-div
+          < f32-lt <= f32-le > f32-gt >= f32-ge = f32-eq}})
+(def ^:private float-negation-resolution '{:f64 f64-neg :f32 f32-neg})
+(def ^:private explicit-numeric-conversions
+  "[from to] -> the explicit conversion operations that take FROM to TO. Read
+  from `f64-operations`/`f32-operations`; the message that names them is
+  pinned by test, so a rename there must be a rename here."
+  {[:i64 :f64] '[i64-to-f64-checked i64-to-f64-rounded]
+   [:f64 :i64] '[f64-to-i64-checked f64-to-i64-truncating]
+   [:i64 :f32] '[i64-to-f32-checked i64-to-f32-rounded]
+   [:f32 :i64] '[f32-to-i64-checked f32-to-i64-truncating]
+   [:f32 :f64] '[f32-to-f64-exact]
+   [:f64 :f32] '[f64-to-f32-rounded]})
 (def reserved-function-names
-  (set/union forbidden-heads arithmetic comparisons (set (keys heap-operations))
+  (set/union forbidden-heads arithmetic comparisons float-division-heads
+             (set (keys heap-operations))
              (set (keys kgraph-operations))
              (set (keys kernel-memory-operations))
              (set (keys kernel-privileged-operations))
@@ -4669,6 +4706,10 @@
               (reject! "invalid arithmetic arity" form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
+        (contains? float-division-heads op)
+        (do (when-not (= 2 (count args)) (reject! "/ requires two operands" form))
+            (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
+
         (contains? i64-operations op)
         (do (when-not (= (get i64-operations op) (count args))
               (reject! "i64 operation arity mismatch" form))
@@ -5134,13 +5175,78 @@
 
 (declare infer-expression-type)
 
+(def ^:dynamic *numeric-resolution-final*
+  "True only inside `check-value-types!`. Before that pass, a plain numeric
+  operator on float operands TYPES as the float (that is what lets an
+  unannotated parameter be refined to `:f64` from `(+ p 1.5)`, and a result be
+  inferred), and `rewrite-record-projection` then rewrites it to the typed
+  operation. At the final check the rewrite has already run, so a plain
+  operator that still has float operands is one the rewrite could not see the
+  types of in time; typing it as f64 there would let KIR execute i64 `+` on a
+  double. Fail closed instead."
+  false)
+
+(defn- numeric-conversion-spelling [from to]
+  (str/join " or " (map #(str "(" % " x)") (get explicit-numeric-conversions [from to]))))
+
+(defn- mixed-numeric-message [op dominant other]
+  (str op " operands must share one numeric type; got " (name dominant) " and "
+       (name other) " -- there is no implicit conversion: write "
+       (numeric-conversion-spelling other dominant) " to convert the "
+       (name other) " into " (name dominant) ", or "
+       (numeric-conversion-spelling dominant other) " to convert the "
+       (name dominant) " into " (name other)))
+
+(defn- numeric-operand-type!
+  "The one numeric type every operand of the plain operator OP shares.
+
+  No float operand: the i64 reading, exactly as before this resolution
+  existed. Otherwise the FIRST float operand type is the dominant one and every
+  other operand must already be that type; a numeric operand of another type
+  is rejected with the message that names both types and the explicit
+  conversions, carrying `:kotoba.error/expected`/`:actual` so
+  `infer-absent-parameter-types` can refine a provisional-i64 parameter to the
+  float its sibling operand demands."
+  [op args types]
+  (let [float-type (some #{:f64 :f32} types)]
+    (if (nil? float-type)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+      (do (doseq [[arg type] (map vector args types)]
+            (when-not (= type float-type)
+              (if (contains? #{:i64 :f32 :f64} type)
+                (reject! (mixed-numeric-message op float-type type) arg
+                         :kotoba.error/numeric-type-mismatch
+                         {:kotoba.error/expected float-type
+                          :kotoba.error/actual type})
+                (require-expression-type! type float-type arg))))
+          (when *numeric-resolution-final*
+            (reject! (str op " on " (name float-type) " operands was not resolved to "
+                          (get-in float-arithmetic-resolution [float-type op])
+                          " before the final type check -- the operand types were"
+                          " not statically known when the type-directed rewrite"
+                          " ran; bind the operands with let, or write the typed"
+                          " operation directly")
+                     (cons op args) :kotoba.error/numeric-resolution-unresolved))
+          float-type))))
+
 (defn- infer-call-type [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
       (contains? arithmetic op)
-      (do (doseq [[arg type] (map vector args types)]
-            (require-expression-type! type :i64 arg))
-          :i64)
+      (if (contains? '#{+ - *} op)
+        (numeric-operand-type! op args types)
+        (do (doseq [[arg type] (map vector args types)]
+              (require-expression-type! type :i64 arg))
+            :i64))
+
+      (contains? float-division-heads op)
+      (let [type (numeric-operand-type! op args types)]
+        (when (= :i64 type)
+          (reject! "/ has no i64 reading -- integer division is quot; / resolves to f64-div or f32-div by operand type"
+                   (cons op args) :kotoba.error/numeric-type-mismatch))
+        type)
 
       (contains? i64-operations op)
       (do (doseq [[arg type] (map vector args types)]
@@ -5153,20 +5259,21 @@
           :i64)
 
       (= op '=)
-      (do (when-not (= (first types) (second types))
-            (reject! "equality operands must have the same value type" args))
-          (when-not (or (contains? #{:i64 :keyword :bool :option-i64 :result-i64 :vector-i64} (first types))
-                        (parametric-result-type? (first types)))
-            (reject! (str "equality type is outside the safe value profile"
-                          (condp = (first types)
-                            :string " -- use string=? for string equality"
-                            :f64 (str " -- use f64-eq for IEEE equality (returns"
-                                      " :bool; NaN is never equal), or compare"
-                                      " f64-to-bits values with = for bitwise"
-                                      " identity")
-                            ""))
-                     args))
-          :bool)
+      (if (some #{:f64 :f32} types)
+        ;; Float equality resolves to `f64-eq`/`f32-eq` (IEEE: NaN is never
+        ;; equal); a float next to an i64 or the other float width is the
+        ;; mixed-type rejection, not "outside the safe value profile".
+        (do (numeric-operand-type! op args types) :bool)
+        (do (when-not (= (first types) (second types))
+              (reject! "equality operands must have the same value type" args))
+            (when-not (or (contains? #{:i64 :keyword :bool :option-i64 :result-i64 :vector-i64} (first types))
+                          (parametric-result-type? (first types)))
+              (reject! (str "equality type is outside the safe value profile"
+                            (condp = (first types)
+                              :string " -- use string=? for string equality"
+                              ""))
+                       args))
+            :bool))
 
       (= op 'bool-not)
       (do (require-expression-type! (first types) :bool (first args)) :bool)
@@ -5403,9 +5510,7 @@
       (do (require-expression-type! (first types) :document (first args)) [:option :f64])
 
       (contains? (disj comparisons '=) op)
-      (do (doseq [[arg type] (map vector args types)]
-            (require-expression-type! type :i64 arg))
-          :bool)
+      (do (numeric-operand-type! op args types) :bool)
 
       (contains? heap-operations op)
       (do (doseq [[arg type] (map vector args types)]
@@ -6403,6 +6508,40 @@
 
 (def ^:dynamic *record-protocol-dispatch* {})
 
+(defn- f64-bits-literal-form?
+  "The closed `(f64-from-bits <integer>)` shape a decimal literal has after
+  desugar (and straight out of the JVM-free reader)."
+  [form]
+  (and (seq? form)
+       (= 'f64-from-bits (first form))
+       (= 2 (count form))
+       (kotoba-integer? (second form))))
+
+(defn- resolve-float-operator
+  "Lower the plain operator OP on OPERANDS that all have FLOAT-TYPE to the
+  typed operation. Arities mirror the i64 reading KIR gives the plain form:
+  unary `-` negates, unary `+`/`*` is the operand, n-ary `+ - *` fold left.
+  `/` and the comparisons are binary; any other arity is left for validation
+  to reject with the plain operator's own arity message."
+  [op float-type operands]
+  (let [typed (get-in float-arithmetic-resolution [float-type op])
+        arity (count operands)]
+    (cond
+      (and (= op '-) (= 1 arity))
+      (list (get float-negation-resolution float-type) (first operands))
+
+      (and (contains? '#{+ *} op) (= 1 arity))
+      (first operands)
+
+      (contains? '#{+ - *} op)
+      (reduce (fn [acc operand] (list typed acc operand))
+              (first operands) (rest operands))
+
+      (= 2 arity)
+      (list typed (first operands) (second operands))
+
+      :else (cons op operands))))
+
 (defn- rewrite-record-projection
   "Type-directed rewrite: `(record-get value :field)` -> the canonical
   `(record-get SCHEMA value :field)`, recovering SCHEMA from the value's
@@ -6795,6 +6934,37 @@
                     rewritten-args))
 
             :else (cons op rewritten-args)))
+
+        ;; Type-directed numeric resolution: `(+ a b)` on two f64 operands is
+        ;; `(f64-add a b)`, on two f32 `(f32-add a b)`; i64 operands are left
+        ;; exactly as written, so a program without floats is byte-identical
+        ;; before and after this branch. Runs here for the same reason
+        ;; `option-or` does: the operand types are known and the descriptor is
+        ;; derivable, so the author writes one spelling. Variadic and chained
+        ;; comparison forms have already been desugared to binary calls, so
+        ;; `(< a b c)` on f64 reaches this as two `<` forms.
+        (contains? type-directed-numeric-heads op)
+        (let [rewritten (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              operand-type (fn [arg] (try (infer-expression-type arg locals signatures)
+                                          (catch #?(:clj Exception :cljs :default) _ nil)))
+              types (mapv operand-type rewritten)
+              ;; An f32 operand puts its sibling decimal literal in an `:f32`
+              ;; context, the same exact-or-refused narrowing `(f32-add x 1.5)`
+              ;; already gets through `contextual-f32-argument-indexes`. The
+              ;; literal reaches this pass as the closed `(f64-from-bits N)`
+              ;; form desugar produced; nothing but that shape is touched.
+              rewritten (if (some #{:f32} types)
+                          (mapv (fn [arg type]
+                                  (if (and (= :f64 type) (f64-bits-literal-form? arg))
+                                    (list 'f32-from-bits
+                                          (f32-literal-bits! (value/i64-bits-to-f64 (second arg))))
+                                    arg))
+                                rewritten types)
+                          rewritten)
+              types (if (some #{:f32} types) (mapv operand-type rewritten) types)]
+          (if (and (seq types) (every? #{:f64 :f32} types) (apply = types))
+            (resolve-float-operator op (first types) rewritten)
+            (cons op rewritten)))
 
         :else
         ;; Force recursive rewrites while the per-analysis protocol dispatch
@@ -7259,9 +7429,10 @@
                                    [name {:params params :param-types param-types
                                           :result result}])
                                  functions))]
-    (doseq [{:keys [name params param-types result body]} functions]
-      (let [actual (infer-expression-type body (zipmap params param-types) signatures)]
-        (require-expression-type! actual result name)))
+    (binding [*numeric-resolution-final* true]
+      (doseq [{:keys [name params param-types result body]} functions]
+        (let [actual (infer-expression-type body (zipmap params param-types) signatures)]
+          (require-expression-type! actual result name))))
     (let [nodes (mapcat #(tree-seq coll? seq (:body %)) functions)
           literal-bytes
           (reduce + 0
