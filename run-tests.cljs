@@ -40,7 +40,16 @@
             ;; byte-identity control on the keyword-keyed literal
             [kotoba.compiler.typed-map-key-types-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
-            [kotoba.compiler.loop-accumulator-type-test]))
+            [kotoba.compiler.loop-accumulator-type-test]
+            ;; conj/disj on a typed set, and a set-item refusal that names
+            ;; the set. Landed as `.cljc` without either list entry, so the
+            ;; nbb half had never run -- and a suite that does not run a file
+            ;; reports the same clean answer as one that runs it and passes.
+            [kotoba.compiler.set-operations-test]
+            ;; a declared type of the wrong SHAPE is refused, not crashed --
+            ;; and 42 of the 76 programs that crashed did so only under nbb,
+            ;; because ClojureScript hashes a bigint to answer `contains?`
+            [kotoba.compiler.malformed-type-argument-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -64,4 +73,6 @@
              'kotoba.compiler.parameter-inference-test
              'kotoba.compiler.rodata-literal-test
              'kotoba.compiler.typed-map-key-types-test
-             'kotoba.compiler.loop-accumulator-type-test)
+             'kotoba.compiler.loop-accumulator-type-test
+             'kotoba.compiler.set-operations-test
+             'kotoba.compiler.malformed-type-argument-test)
