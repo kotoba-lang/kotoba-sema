@@ -17,6 +17,8 @@
             ;; a `let` body is an implicit `do`; the value is the last form
             [kotoba.compiler.let-body-test]
             [kotoba.compiler.kernel-xgetbv-test]
+            ;; xsave: the write half -- CR4 and xsetbv
+            [kotoba.compiler.kernel-xsetbv-test]
             ;; isr: the interrupt entry name and signature rules
             [kotoba.compiler.interrupt-entry-test]
             [kotoba.compiler.oracle-reach-test]
@@ -35,6 +37,7 @@
              'kotoba.compiler.host-nesting-test
              'kotoba.compiler.let-body-test
              'kotoba.compiler.kernel-xgetbv-test
+             'kotoba.compiler.kernel-xsetbv-test
              'kotoba.compiler.interrupt-entry-test
              'kotoba.compiler.oracle-reach-test
              'kotoba.compiler.parameter-annotation-test
