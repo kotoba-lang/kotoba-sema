@@ -52,6 +52,14 @@
             (str "(defn f [] :i64 (kernel-load-u64 "
                  "(+ (kernel-scratch-region) 8) 512 0))"))))))
 
+(deftest a-literal-base-is-a-root-on-both-runtimes
+  ;; Not this stream's operation, and this stream's operation is why it is
+  ;; here: `integer?` is false for the BigInt a `.kotoba` integer literal is
+  ;; under ClojureScript, so the literal-base clause of the provenance rule
+  ;; answered `true` on the JVM and `false` under nbb. Four of the positive
+  ;; cases above were refused that way before `integer-literal?` existed.
+  (is (analyzes? "(defn f [] :i64 (kernel-load-u64 4096 512 0))")))
+
 (deftest a-window-over-the-region-may-not-exceed-the-reservation
   (is (= 16384 frontend/image-scratch-bytes))
   (testing "the reservation itself is admitted"

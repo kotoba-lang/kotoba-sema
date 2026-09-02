@@ -9440,6 +9440,24 @@
   (when (vector? bindings)
     (partition 2 bindings)))
 
+(defn- integer-literal?
+  "True when EXPR is a compile-time integer literal, on BOTH runtimes.
+
+  `integer?` is not that predicate. A `.kotoba` integer literal reaches this
+  pass as a `long` on the JVM and as a **BigInt** on ClojureScript, and
+  `(integer? (js/BigInt 512))` is false -- so every clause in this file that
+  asked `integer?` about a literal answered `true` on one runtime and `false`
+  on the other. The roundtrip is the portable test: a BigInt equals
+  `(js/BigInt x)` of itself, a string does not (`\"512\"` converts but does not
+  equal), and a symbol or a list throws.
+
+  Measured 2026-09-02 under nbb: without this, four of this stream's positive
+  cases were refused on ClojureScript and green on the JVM."
+  [expr]
+  #?(:clj (integer? expr)
+     :cljs (or (integer? expr)
+               (try (= expr (js/BigInt expr)) (catch :default _ false)))))
+
 (defn- traceable-base?
   "True when EXPR is ROOTED: it resolves to a compile-time literal, to
   `kernel-boot-info`, or to a parameter, possibly plus an offset. Under ENV
@@ -9467,7 +9485,11 @@
   [expr env params]
   (letfn [(clean? [expr seen]
             (cond
-              (integer? expr) true
+              ;; `integer?` alone was wrong here on ClojureScript, where a
+              ;; `.kotoba` integer literal is a BigInt -- a literal physical
+              ;; base was a root on the JVM and not one under nbb. See
+              ;; `integer-literal?`.
+              (integer-literal? expr) true
               (and (seq? expr) (= 'kernel-boot-info (first expr))) true
               ;; boot-scratch: a root beside `kernel-boot-info`, and a
               ;; STRONGER one. `kernel-boot-info` answers with a word the
@@ -9599,7 +9621,7 @@
                         ;; close.
                         (when (scratch-rooted? (nth args i) env)
                           (let [length (get args (inc i) ::missing)]
-                            (when (or (not (integer? length))
+                            (when (or (not (integer-literal? length))
                                       (> length image-scratch-bytes))
                               (vswap! overwide conj
                                       {:operation op :window length

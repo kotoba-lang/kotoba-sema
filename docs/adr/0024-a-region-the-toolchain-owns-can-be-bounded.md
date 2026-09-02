@@ -1,4 +1,4 @@
-# ADR-0012: A region the toolchain owns can be bounded, and a name is not an expression
+# ADR-0024: A region the toolchain owns can be bounded, and a name is not an expression
 
 - Status: accepted
 - Date: 2026-09-02
@@ -57,6 +57,22 @@ grammar -- so without the interception a correct program is rejected as
 operation. A local that shadows a function is refused explicitly for the same
 reason: taking it as a name would silently address a function the author was
 not talking about.
+
+## A defect this stream found one line above its own
+
+`traceable-base?` admits a compile-time literal as a root with `(integer?
+expr)`. A `.kotoba` integer literal reaches this pass as a `long` on the JVM
+and as a **BigInt** under ClojureScript, and `(integer? (js/BigInt 512))` is
+false -- so a literal physical base was a provenance root on one runtime and
+not on the other, and had been since the rule was written.
+
+It surfaced because the window ceiling asks the same question about the same
+kind of literal: four of this stream's POSITIVE cases were green on the JVM
+and red under nbb, and the four are all the cases whose length is a literal.
+`integer-literal?` is the portable test -- a BigInt equals `(js/BigInt x)` of
+itself, a string does not, a symbol throws -- and both clauses now use it. The
+cross-runtime assertion is in the suite as its own test, named for the clause
+it is about rather than for this stream's operation.
 
 ## Consequences
 
