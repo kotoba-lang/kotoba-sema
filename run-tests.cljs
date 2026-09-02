@@ -27,7 +27,10 @@
             [kotoba.compiler.parameter-annotation-test]
             [kotoba.compiler.defdesugar-test]
             [kotoba.compiler.match-test]
-            [kotoba.compiler.parameter-inference-test]))
+            [kotoba.compiler.parameter-inference-test]
+            ;; boot-lit: the read-only literal heads, and (loader) the rule
+            ;; that makes one of their addresses a bounded load's region root
+            [kotoba.compiler.rodata-literal-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -46,4 +49,5 @@
              'kotoba.compiler.parameter-annotation-test
              'kotoba.compiler.defdesugar-test
              'kotoba.compiler.match-test
-             'kotoba.compiler.parameter-inference-test)
+             'kotoba.compiler.parameter-inference-test
+             'kotoba.compiler.rodata-literal-test)
