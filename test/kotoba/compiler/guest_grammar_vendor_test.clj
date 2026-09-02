@@ -32,12 +32,13 @@
 
   Measured 2026-09-03: the authority named THREE kernel heads
   (`kernel-load-u8`, `kernel-store-u8`, `kernel-boot-info`) while this
-  frontend admitted 114. Nothing here, in amu or in kotoba-lang reads
+  frontend admitted 114 -- 115 since fwstore's `kernel-uefi-alloc-region`.
+  Nothing here, in amu or in kotoba-lang reads
   `:admitted-builtins`, and nothing anywhere reads it to decide what the
   COMPILER admits -- the tables below do that. Its one reader is
   `kotoba.grammar/admitted-heads` in kotoba-lang/kotoba's vendored loader,
   where a missing head is reported as `:unknown-form`. So the understatement
-  cost one repository 111 false `:unknown-form` reports and nothing failed,
+  cost one repository 112 false `:unknown-form` reports and nothing failed,
   through eight widenings of the tables it describes.
 
   ## The one thing this file cannot do
@@ -57,7 +58,7 @@
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn` at the 2026-09-03 resync
   wave. Change it only as part of that wave, in all four repositories."
-  "67561e57ad2b135d848eac75b46ab430d4404a463159f43775e01134e569988f")
+  "6e1202fd23bc5a2ed6ef432114585c1813f5143d643eb4c8ee9a00b6e798b922")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
@@ -123,4 +124,5 @@
     (testing "the three tables, so a table emptied by a bad merge is not a pass"
       (is (= 53 (count frontend/kernel-memory-operations)))
       (is (= 8 (count frontend/slice-value-operations)))
-      (is (= 53 (count frontend/kernel-privileged-operations))))))
+      ;; fwstore: 54 since .
+      (is (= 54 (count frontend/kernel-privileged-operations))))))

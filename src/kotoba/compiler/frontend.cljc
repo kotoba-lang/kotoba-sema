@@ -577,6 +577,36 @@
     ;; already writes at every `kernel-load-*`/`kernel-store-*`, and
     ;; `image-scratch-bytes` below is the ceiling this file enforces on one.
     kernel-scratch-region 0
+    ;; fwstore: `(kernel-uefi-alloc-region base slot allocate-type
+    ;; memory-type page-count address-hint)` -> the base of the pages the
+    ;; firmware just allocated, or ZERO (kotoba-gmir ADR-0030).
+    ;;
+    ;; `kernel-scratch-region` above gave a UEFI image an OUT-POINTER, so
+    ;; `AllocatePages` became callable and its answer readable. It did not
+    ;; make the answer USABLE. The page is at an address the firmware chose,
+    ;; so it reaches the program through a load, and `traceable-base?` below
+    ;; refuses a base that came from one -- in the caller as well as the
+    ;; callee, because the taint propagates by fixpoint. A Kotoba UEFI
+    ;; application could allocate a page and could not write it.
+    ;;
+    ;; The rule is not widened to admit loaded words. That would delete it:
+    ;; the reason every bounded access means anything is that its base is an
+    ;; address some layer of this toolchain can account for. What is added
+    ;; instead is a new ROOT whose guarantor is the UEFI specification, beside
+    ;; the entry contract (`kernel-boot-info`) and the packager
+    ;; (`kernel-scratch-region`). The instruction that OBTAINS the address is
+    ;; the instruction that produces it, and the out-word the firmware writes
+    ;; through lives in the action's own outgoing frame -- the program never
+    ;; names it, so there is no way to hand this head an address it did not
+    ;; get from `AllocatePages`.
+    ;;
+    ;; THE PAGE COUNT MUST BE A LITERAL, and that is what makes the root worth
+    ;; having rather than merely convenient: `page-count * 4096` is the length
+    ;; the firmware allocated under all three allocate types, so this pass
+    ;; holds the region's SIZE the way it holds the scratch reservation's, and
+    ;; a window declared wider than it is refused here (see
+    ;; `alloc-region-bytes` and `:kotoba.error/kernel-alloc-region-window`).
+    kernel-uefi-alloc-region 6
     ;; sysops: barriers, the timestamp counter and the GS-base swap
     ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
     ;;
@@ -719,6 +749,61 @@
 ;; already bound -- except the 64k tier, which is exactly what the refusal
 ;; below is for.
 (def image-scratch-bytes 16384)
+
+(defn- integer-literal?
+  "True when EXPR is a compile-time integer literal, on BOTH runtimes.
+
+  `integer?` is not that predicate. A `.kotoba` integer literal reaches this
+  pass as a `long` on the JVM and as a **BigInt** on ClojureScript, and
+  `(integer? (js/BigInt 512))` is false -- so every clause in this file that
+  asked `integer?` about a literal answered `true` on one runtime and `false`
+  on the other. The roundtrip is the portable test: a BigInt equals
+  `(js/BigInt x)` of itself, a string does not (`\"512\"` converts but does not
+  equal), and a symbol or a list throws.
+
+  Measured 2026-09-02 under nbb: without this, four of this stream's positive
+  cases were refused on ClojureScript and green on the JVM."
+  [expr]
+  #?(:clj (integer? expr)
+     :cljs (or (integer? expr)
+               (try (= expr (js/BigInt expr)) (catch :default _ false)))))
+
+;; fwstore: the ceiling on `kernel-uefi-alloc-region`'s page count.
+;;
+;; 2^40 pages is 2^52 bytes, so `page-count * 4096` stays an exact i64 on both
+;; runtimes and the comparison against a declared window cannot wrap. It is
+;; NOT a policy about how much memory a boot path may ask for -- that belongs
+;; to the firmware, which answers `EFI_OUT_OF_RESOURCES` -- and it is not a
+;; second window ceiling either.
+;;
+;; The ceiling that BITES is the derived one, and only for small allocations:
+;; every checked window is already bounded by its tier, and the widest tier is
+;; 65536 bytes, so `page-count * 4096` is the tighter of the two exactly when
+;; `page-count` is below 16. What this refuses, concretely, is a 64 KiB window
+;; declared over a one-page allocation.
+(def alloc-region-maximum-pages 1099511627776)
+
+(def ^:private alloc-region-page-bytes 4096)
+
+(defn alloc-region-bytes
+  "The byte length `(kernel-uefi-alloc-region ... page-count ...)` obtained,
+  or nil when EXPR is not one. Public so a build can report what a UEFI image
+  is allowed to address, beside the literal bases `kernel-region-report`
+  already lists."
+  [expr]
+  (when (and (seq? expr) (= 'kernel-uefi-alloc-region (first expr))
+             (= 7 (count expr)))
+    (let [pages (nth expr 5)]
+      (when (integer-literal? pages)
+        ;; A `.kotoba` integer literal is a `long` here and a BigInt under
+        ;; ClojureScript, and JavaScript REFUSES to multiply a BigInt by a
+        ;; number -- `4096 * 1n` is a TypeError, not a coercion. Relational
+        ;; operators do accept the mixture, which is why the comparison
+        ;; against a declared window needs no conversion and this does. The
+        ;; page ceiling keeps the product under 2^52, so the double is exact.
+        #?(:clj (* alloc-region-page-bytes (long pages))
+           :cljs (* alloc-region-page-bytes (js/Number pages)))))))
+
 
 (def rodata-literal-encodings
   "Which `kotoba.gmir` encoding each head names. `bytes-literal-length` is
@@ -6322,6 +6407,27 @@
               (reject! "kernel memory operation arity mismatch" form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
+        ;; fwstore: the allocation that answers with an address is the one
+        ;; privileged head with a constraint on an OPERAND, and it has to be
+        ;; here rather than beside the window check below: the window check
+        ;; only runs when the region reaches a base position, and a page count
+        ;; that is not a literal is wrong whether or not the program ever
+        ;; writes to what it allocated. The region-provenance rule's promise
+        ;; is that this pass knows the length -- a promise it cannot keep for
+        ;; an expression.
+        (= op 'kernel-uefi-alloc-region)
+        (do (when-not (= (get kernel-privileged-operations op) (count args))
+              (reject! "kernel privileged operation arity mismatch" form))
+            (let [pages (nth args 4 ::missing)]
+              (when-not (integer-literal? pages)
+                (reject! "kernel-uefi-alloc-region page count must be a literal"
+                         form :kotoba.error/kernel-alloc-region-pages))
+              (when-not (and (<= 1 pages) (<= pages alloc-region-maximum-pages))
+                (reject! (str "kernel-uefi-alloc-region page count must be "
+                              "between 1 and " alloc-region-maximum-pages)
+                         form :kotoba.error/kernel-alloc-region-pages)))
+            (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
+
         (contains? kernel-privileged-operations op)
         (do (when-not (= (get kernel-privileged-operations op) (count args))
               (reject! "kernel privileged operation arity mismatch" form))
@@ -9973,23 +10079,9 @@
   (when (vector? bindings)
     (partition 2 bindings)))
 
-(defn- integer-literal?
-  "True when EXPR is a compile-time integer literal, on BOTH runtimes.
-
-  `integer?` is not that predicate. A `.kotoba` integer literal reaches this
-  pass as a `long` on the JVM and as a **BigInt** on ClojureScript, and
-  `(integer? (js/BigInt 512))` is false -- so every clause in this file that
-  asked `integer?` about a literal answered `true` on one runtime and `false`
-  on the other. The roundtrip is the portable test: a BigInt equals
-  `(js/BigInt x)` of itself, a string does not (`\"512\"` converts but does not
-  equal), and a symbol or a list throws.
-
-  Measured 2026-09-02 under nbb: without this, four of this stream's positive
-  cases were refused on ClojureScript and green on the JVM."
-  [expr]
-  #?(:clj (integer? expr)
-     :cljs (or (integer? expr)
-               (try (= expr (js/BigInt expr)) (catch :default _ false)))))
+;; fwstore: `integer-literal?` used to be defined here. It moved up beside
+;; `image-scratch-bytes`, because `validate-expr` -- three thousand lines
+;; earlier -- has to ask the same question about a page count.
 
 (defn- traceable-base?
   "True when EXPR is ROOTED: it resolves to a compile-time literal, to
@@ -10032,6 +10124,26 @@
               ;; the compiler holds. The bound below is what makes that
               ;; second fact worth having.
               (and (seq? expr) (= 'kernel-scratch-region (first expr))) true
+              ;; fwstore: the third root, and the one whose guarantor is
+              ;; outside this toolchain. `kernel-boot-info` is rooted by the
+              ;; entry contract and `kernel-scratch-region` by the packager;
+              ;; this one is rooted by the UEFI specification, which says
+              ;; `AllocatePages` either fails or returns `page-count` 4 KiB
+              ;; pages the caller owns.
+              ;;
+              ;; What makes that a fact this pass may rely on rather than a
+              ;; claim the author makes is that the head is the ALLOCATION.
+              ;; The program cannot present an address to it: the out-word the
+              ;; firmware writes through belongs to the emitted call's own
+              ;; frame. So there is no shape of source in which this root
+              ;; names memory the firmware did not just hand over -- which is
+              ;; exactly what an `(adopt address length)` head could not have
+              ;; said.
+              ;;
+              ;; A FAILED allocation answers zero, and zero is refused by the
+              ;; null-base clause every bounded operation emits. The rule
+              ;; here admits the root; the machine still checks the base.
+              (and (seq? expr) (= 'kernel-uefi-alloc-region (first expr))) true
               ;; A checked sub-window. Its own parent base sits in argument
               ;; position 0 and is validated as a base in its own right by
               ;; `kernel-base-uses`, so recursing here would double-report.
@@ -10074,11 +10186,20 @@
   scratch region is NOT reported here, because that narrowing carries its own
   emitted check against the parent window, and the parent window is the one
   this ceiling bounds. What this answers is 'is the window being declared
-  RIGHT NOW the reservation itself'."
+  RIGHT NOW the reservation itself'.
+
+  fwstore: an `if` whose EITHER arm is the region counts. `traceable-base?`
+  above already follows both arms, so `(if c (kernel-scratch-region) other)`
+  was a rooted base with NO ceiling -- the 16384 bound simply did not apply to
+  it, and a 65536-byte window over it compiled. Answering true when either arm
+  is the reservation is the conservative direction: the window is checked
+  against the smaller region whenever one of the two is reachable."
   [expr env]
   (letfn [(rooted? [expr seen]
             (cond
               (and (seq? expr) (= 'kernel-scratch-region (first expr))) true
+              (and (seq? expr) (= 'if (first expr)) (= 4 (count expr)))
+              (or (rooted? (nth expr 2) seen) (rooted? (nth expr 3) seen))
               (symbol? expr)
               (cond
                 (contains? seen expr) false
@@ -10086,6 +10207,35 @@
                 :else false)
               :else false))]
     (rooted? expr #{})))
+
+(defn- alloc-region-ceiling
+  "fwstore: the byte length of the smallest `kernel-uefi-alloc-region` EXPR
+  can resolve to under ENV, or nil when it can resolve to none.
+
+  The scratch region's ceiling is one constant, so `scratch-rooted?` above
+  only has to answer yes or no. This one differs per call site -- the page
+  count is a literal of the head -- so a base that can come from two
+  allocations has to be bounded by the SMALLER of them, which is the only
+  answer that is right on both paths.
+
+  A `kernel-subregion` of an allocation is not reported, for
+  `scratch-rooted?`'s reason: the narrowing carries its own emitted check
+  against the parent window, and the parent window is the one this bounds."
+  [expr env]
+  (letfn [(ceiling [expr seen]
+            (cond
+              (alloc-region-bytes expr) (alloc-region-bytes expr)
+              (and (seq? expr) (= 'if (first expr)) (= 4 (count expr)))
+              (let [a (ceiling (nth expr 2) seen)
+                    b (ceiling (nth expr 3) seen)]
+                (cond (and a b) (min a b) :else (or a b)))
+              (symbol? expr)
+              (cond
+                (contains? seen expr) nil
+                (contains? env expr) (ceiling (get env expr) (conj seen expr))
+                :else nil)
+              :else nil))]
+    (ceiling expr #{})))
 
 (defn- derived-base?
   "True when EXPR narrows a region to a sub-window. Now always a checked
@@ -10109,6 +10259,11 @@
         literals (volatile! #{})
         derived (volatile! [])
         overwide (volatile! [])
+        ;; fwstore: kept apart from `overwide` so the refusal can name the
+        ;; region it is about. "exceeds the 16384-byte reservation" sends a
+        ;; reader to the packager; "exceeds the 4096 bytes allocated" sends
+        ;; them to their own page count, and those are different mistakes.
+        overwide-alloc (volatile! [])
         calls (volatile! [])]
     (letfn [(base! [expr env]
               (cond
@@ -10177,7 +10332,27 @@
                                       (> length image-scratch-bytes))
                               (vswap! overwide conj
                                       {:operation op :window length
-                                       :reserved image-scratch-bytes})))))
+                                       :reserved image-scratch-bytes}))))
+                        ;; fwstore: the same check over a region whose size
+                        ;; is a fact per CALL SITE rather than one constant.
+                        ;; `page-count * 4096` is what the firmware allocated,
+                        ;; so a wider window is a write past the pages -- and
+                        ;; no emitted check catches it, because the emitted
+                        ;; check compares an index against the length the
+                        ;; SOURCE declared, and here the source is the thing
+                        ;; that is wrong.
+                        ;;
+                        ;; A non-literal length is refused for the reason the
+                        ;; scratch clause refuses one: an expression cannot be
+                        ;; compared against a ceiling, and admitting it leaves
+                        ;; exactly the hole the check exists to close.
+                        (when-let [region (alloc-region-ceiling (nth args i) env)]
+                          (let [length (get args (inc i) ::missing)]
+                            (when (or (not (integer-literal? length))
+                                      (> length region))
+                              (vswap! overwide-alloc conj
+                                      {:operation op :window length
+                                       :allocated region})))))
                       (doseq [arg args] (walk arg env)))
 
                     :else
@@ -10188,6 +10363,7 @@
       (walk body {})
       {:problems @problems :params @used-params
        :literals @literals :derived @derived :overwide @overwide
+       :overwide-alloc @overwide-alloc
        :calls @calls})))
 
 (defn kernel-region-report
@@ -10282,7 +10458,7 @@
                 functions)
       (let [{:keys [tainted]} (kernel-region-report functions)]
         (doseq [{:keys [name params body]} functions]
-          (let [{:keys [problems calls overwide]}
+          (let [{:keys [problems calls overwide overwide-alloc]}
                 (kernel-base-uses body (set params) function-names)]
             (when-let [offender (first problems)]
               (reject! "kernel memory base must name a region, not compute one"
@@ -10295,6 +10471,13 @@
               (reject! (str "scratch region window exceeds the "
                             image-scratch-bytes "-byte reservation")
                        offender :kotoba.error/kernel-scratch-window))
+            ;; fwstore: and the same for pages the firmware allocated. The
+            ;; length is a fact of the CALL SITE -- `page-count * 4096` -- so
+            ;; the message carries the number rather than naming a constant.
+            (when-let [offender (first overwide-alloc)]
+              (reject! (str "window exceeds the " (:allocated offender)
+                            " bytes this allocation obtained")
+                       offender :kotoba.error/kernel-alloc-region-window))
             ;; an argument flowing into a base position must be traceable too,
             ;; or the caller becomes the hole the callee's own check closed
             (doseq [[callee i arg env] calls
