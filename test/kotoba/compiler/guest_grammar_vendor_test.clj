@@ -53,7 +53,8 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [kotoba.compiler.frontend :as frontend]))
+            [kotoba.compiler.frontend :as frontend]
+            [kotoba.sema :as sema]))
 
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn` at the 2026-09-03 resync
@@ -80,9 +81,11 @@
   (into #{} (map name) x))
 
 (defn- frontend-kernel-heads []
-  (head-names (concat (keys frontend/kernel-memory-operations)
-                      (keys frontend/slice-value-operations)
-                      (keys frontend/kernel-privileged-operations))))
+  ;; Through the same public accessor a CONSUMER has to use
+  ;; (`kotoba.sema/kernel-operation-heads`), not the three tables directly.
+  ;; The tables are still asserted below, because this repository owns them
+  ;; and an accessor that silently lost a family would otherwise pass.
+  (head-names sema/kernel-operation-heads))
 
 (defn- grammar-kernel-heads [grammar]
   (into #{} (filter #(or (str/starts-with? % "kernel-")
@@ -121,7 +124,14 @@
     (is (empty? extra)
         (str "the authority names heads the frontend does not admit: "
              (pr-str (sort extra))))
-    (testing "the three tables, so a table emptied by a bad merge is not a pass"
+    (testing "the accessor is the union of the three tables, so a family
+              dropped from it -- or a table emptied by a bad merge -- is not a
+              pass"
+      (is (= admitted
+             (head-names (concat (keys frontend/kernel-memory-operations)
+                                 (keys frontend/slice-value-operations)
+                                 (keys frontend/kernel-privileged-operations))))))
+    (testing "and the tables are non-empty"
       (is (= 53 (count frontend/kernel-memory-operations)))
       (is (= 8 (count frontend/slice-value-operations)))
       ;; fwstore: 54 since .
