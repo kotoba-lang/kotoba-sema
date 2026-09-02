@@ -32,14 +32,19 @@
   (str src "\n(defn main [] 0)"))
 
 (deftest the-table-is-four-widths-by-four-tiers-plus-the-slice-family
-  (is (= 43 (count frontend/kernel-memory-operations))
-      "32 window operations, 8 slice operations, kernel-subregion, the lock pair")
-  (is (= 16 (count (filter #(str/starts-with? (name %) "kernel-load-")
+  ;; Counted per family, not as a table total: other streams add to this same
+  ;; map (the general atomics, for one), and a total would make their work
+  ;; fail this test for no reason of its own.
+  (is (= 16 (count (filter #(str/starts-with? (name %) "kernel-load-u")
                            (keys frontend/kernel-memory-operations))))
       "four widths by four tiers of loads")
-  (is (= 16 (count (filter #(str/starts-with? (name %) "kernel-store-")
+  (is (= 16 (count (filter #(str/starts-with? (name %) "kernel-store-u")
                            (keys frontend/kernel-memory-operations))))
       "and the same for stores")
+  (is (= 8 (count (filter #(str/starts-with? (name %) "slice-")
+                          (keys frontend/kernel-memory-operations))))
+      "four widths of element-indexed load/store")
+  (is (contains? frontend/kernel-memory-operations 'kernel-subregion))
   (doseq [op every-load]
     (is (= 3 (get frontend/kernel-memory-operations (symbol op))) op))
   (doseq [op every-store]

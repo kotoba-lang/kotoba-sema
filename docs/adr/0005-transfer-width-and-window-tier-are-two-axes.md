@@ -1,4 +1,4 @@
-# ADR-0003: Transfer width and window tier are two axes
+# ADR-0005: Transfer width and window tier are two axes
 
 - Status: accepted
 - Date: 2026-09-02
@@ -40,12 +40,19 @@ and in different profile maps in `kotoba.kir`.
 
 ## Evidence
 
-`clojure -M:test` — 115 tests, 633 assertions, 0 failures.
+`clojure -M:test` — 122 tests, 708 assertions, 0 failures (after merging
+`kotoba-lang/main`, which brought the sysops atomics and the UEFI boundary
+spellings into the same table).
 
 The new namespace `kotoba.compiler.kernel-memory-widths-test` covers all forty
 operations for arity, `:i64` typing, reserved-name status, the provenance taint
 (`:tainted` = `#{0}`, `:abi-boundary` = `['base]`), and the computed-base
 refusal.
+
+It counts **per family**, not as a table total. A total was written first and
+went red on the merge that brought the general atomics in — a test that fails
+because a different stream did its own work correctly is measuring the wrong
+thing.
 
 Discriminated in both directions rather than asserted:
 
