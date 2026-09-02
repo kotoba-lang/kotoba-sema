@@ -6,7 +6,7 @@
          :git/sha "86d88bd58299cf575e9dfa2ab4789a0baa166614"}
         io.github.kotoba-lang/kotoba-hir
         {:git/url "https://github.com/kotoba-lang/kotoba-hir.git"
-         :git/sha "808c3adcec45588b040cb2e67eace0dae65d57d8"}
+         :git/sha "ac8e70514ee3c9b87ae71324e6e714447acc971c"}
         io.github.kotoba-lang/kotoba-kir
         {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
          :git/sha "c4149fb120ece017ce87d0ef5e40547a2e6f3ee3"}}
