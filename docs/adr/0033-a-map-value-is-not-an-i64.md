@@ -1,4 +1,4 @@
-# 0032 — a map value is not an i64
+# 0033 — a map value is not an i64
 
 Status: accepted
 Date: 2026-09-03
