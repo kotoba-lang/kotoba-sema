@@ -1568,6 +1568,26 @@
   [error]
   (some? (:phase (ex-data error))))
 
+(def definition-heads
+  "The closed set of heads `analyze*` dispatches a TOP-LEVEL form on.
+
+  Its only job is to be the spellable vocabulary for `definition-failure!`,
+  the way `reserved-function-names` is for `internal-failure!`. The rule that
+  set enforces -- nothing a user chose may ride out in a `:kotoba.error/code`
+  -- holds here for a stronger reason than membership: a form reaches the
+  definition layer only because `analyze*` MATCHED its head against one of
+  these literals, so the value passed to the guard cannot be anything else.
+
+  Saying it separately is what makes that true. `def`, `defrecord`,
+  `defprotocol`, `definterface`, `extend-type`, `extend-protocol`,
+  `defdesugar`, `defmulti` and `defmethod` are NOT in
+  `reserved-function-names` -- a program is not forbidden to name a function
+  `def` -- so widening `internal-failure!`'s vocabulary to cover them would
+  have let a user-chosen function name reach the envelope from the expression
+  chokepoints. Two vocabularies, two call sites, no overlap."
+  '#{ns def defn defn- defrecord defprotocol definterface
+     extend-type extend-protocol defdesugar defmulti defmethod})
+
 (defn internal-failure!
   "Re-raise a HOST error that escaped a compiler pass, naming what it escaped
   from. A deliberate rejection is rethrown untouched.
@@ -1640,6 +1660,73 @@
                                :kotoba.error/cause cause}
                         operation (assoc :kotoba.error/operation operation)
                         span (assoc :span span)))))))
+
+(defn- definition-failure!
+  "The definition-layer sibling of `internal-failure!`.
+
+  `internal-failure!` is installed at three PER-EXPRESSION chokepoints
+  (`desugar-expr`, `validate-expr`, `infer-expression-type`). Top-level form
+  handling runs before any of them, so a host error escaping there reached
+  `kotoba.sema/analyze` with no `ex-data` at all and the CLI could say only
+  `internal compiler error` -- exit 70 with `:code :kotoba/internal-error` and
+  nothing else. Measured 2026-09-03 on amu 57ba0ee0: `(defn)`, `(defn nil
+  [] 0)`, `(defn 42 [] 0)` and twelve siblings all arrived that way, because
+  `expand-defn-parts` called `(name source-name)` on whatever sat in the name
+  position (`Doesn't support name: 42`).
+
+  Those fifteen are now REFUSED by name (see `expand-defn-parts`), which is
+  the right answer for a caller who typed something wrong: exit 65, not 70.
+  This function is the other half -- the backstop for a host error nobody has
+  measured yet. It keeps `:phase :internal` and therefore exit 70, because a
+  compiler that broke is not a caller who typed something wrong. What changes
+  is that 70 now says WHICH DECLARATION it broke reading.
+
+  What travels is compiler vocabulary and source position, never user data:
+  the head, the span, and the host exception's own message. The head is spelled
+  into the code only when it is in `definition-heads` -- see that var for why
+  it is a separate vocabulary from `reserved-function-names` rather than an
+  addition to it. The FORM is deliberately not attached, for the same reason
+  `internal-failure!` does not attach it: `kotoba.compiler.diagnostic/from-error`
+  copies `:span` into the envelope and never `:form`, and this must not become
+  the first place a source fragment leaks into one.
+
+  `form` may be nil. Three passes (`expand-record-protocol-forms`,
+  `expand-closed-multimethod-forms`, `expand-defdesugar-forms`) run over the
+  whole form vector rather than one declaration, so there is no single form to
+  point at. Naming an arbitrary one of them would produce a span that looks
+  like it located the problem and did not; the operation is reported without a
+  span instead."
+  [error head form]
+  (if (or (compiler-rejection? error)
+          ;; Same carve-out as `internal-failure!`: `analyze` owns host stack
+          ;; exhaustion one frame further out and refuses it by name.
+          (kir/host-stack-exhausted? error))
+    (throw error)
+    (let [named? (contains? definition-heads head)
+          span (or (get (meta form) :span) (form-span form))
+          cause (ex-message error)]
+      (throw (ex-info (str "internal compiler failure while reading "
+                           (if named? (str "a `" head "` declaration")
+                               "a top-level declaration")
+                           (when span (str " at line " (:line span)
+                                           " column " (:column span)))
+                           ": " cause)
+                      (cond-> {:phase :internal
+                               :kotoba.error/code
+                               (if named?
+                                 (keyword "kotoba.error.internal-operation" (name head))
+                                 :kotoba.error/internal-operation-failure)
+                               :kotoba.error/cause cause}
+                        named? (assoc :kotoba.error/operation head)
+                        span (assoc :span span)))))))
+
+(defn- guarding-definition
+  "Run `thunk` for one top-level declaration, naming `head` if a host error
+  escapes it. A deliberate refusal passes through untouched."
+  [head form thunk]
+  (try (thunk)
+       (catch #?(:clj Throwable :cljs :default) error
+         (definition-failure! error head form))))
 
 (defn- reject-call-arity!
   "One sentence for a wrong argument count at a call to a module function, in
@@ -11606,6 +11693,34 @@
   argument-count dispatch (ADR 0017)."
   [form constants]
   (let [[op source-name & declaration0] form
+        ;; The name is checked HERE, before anything reads it, because the
+        ;; very next line calls `(name source-name)` and `name` is defined on
+        ;; a symbol / keyword / string and nothing else. Measured 2026-09-03
+        ;; on amu 57ba0ee0, fifteen shapes reached it and raised a raw host
+        ;; error -- `(defn)` and `(defn nil [] 0)` (nil), `(defn 42 [] 0)`,
+        ;; `(defn 1.5 [] 0)`, `(defn true [] 0)`, `(defn [f] [] 0)`,
+        ;; `(defn {} [] 0)`, `(defn #{} [] 0)`, `(defn (f) [] 0)`, the same
+        ;; nine under `defn-`, and the multi-arity spellings -- so
+        ;; `Doesn't support name: 42` left as exit 70 `internal compiler
+        ;; error`. `(defn "f" [] 0)` and `(defn :f [] 0)` did NOT crash, only
+        ;; because `name` happens to accept a string and a keyword; they were
+        ;; refused 200 lines later with `invalid function name`. One arity of
+        ;; the same declaration was guarded and the others were not.
+        ;;
+        ;; The wording is that sibling's, verbatim, and so is the code. A
+        ;; caller who wrote a name that is not a bounded simple symbol gets
+        ;; one sentence for that fact whichever non-symbol they wrote; a
+        ;; second phrasing here would only mean the compiler knew two things
+        ;; where there is one.
+        ;;
+        ;; Rejecting on FORM rather than on the name is what gives the reader
+        ;; somewhere to act: `nil`, `42` and `{}` carry no reader metadata, so
+        ;; a refusal pointed at the name has no span at all. The offending
+        ;; value travels in `ex-data` instead, where the CLI envelope does not
+        ;; copy it.
+        _ (when-not (valid-name? source-name)
+            (reject! "invalid function name" form :kotoba.error/subset-reject
+                     {:function source-name}))
         [docstring declaration] (if (string? (first declaration0))
                                   [(first declaration0) (rest declaration0)]
                                   [nil declaration0])]
@@ -12792,11 +12907,28 @@
             (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
-        record-protocol-expansion (expand-record-protocol-forms forms)
+        ;; The definition layer's backstop, installed at every entry point
+        ;; that turns a top-level declaration into parts. A deliberate
+        ;; refusal passes through untouched; a HOST error that escapes now
+        ;; names the declaration it escaped from instead of arriving at
+        ;; `kotoba.sema/analyze` with no ex-data at all. See
+        ;; `definition-failure!` for why these three pass `nil` for the form.
+        ;;
+        ;; The three thunks FORCE their sequence result. A guard around a
+        ;; call that returns a lazy seq catches nothing -- the host error is
+        ;; raised where the seq is realised, which is after `try` has
+        ;; returned -- and it looks exactly like a guard that works. The
+        ;; per-declaration guards below return eager vectors already.
+        record-protocol-expansion (guarding-definition
+                                   'defrecord nil
+                                   #(update (expand-record-protocol-forms forms)
+                                            :forms vec))
         forms (:forms record-protocol-expansion)
         protocol-dispatch (:dispatch record-protocol-expansion)
-        forms (expand-closed-multimethod-forms forms)
-        forms (expand-defdesugar-forms forms)
+        forms (guarding-definition 'defmulti nil
+                                   #(vec (expand-closed-multimethod-forms forms)))
+        forms (guarding-definition 'defdesugar nil
+                                   #(vec (expand-defdesugar-forms forms)))
         namespaces (filter #(and (seq? %) (= 'ns (first %))) forms)
         defs (filter #(and (seq? %) (contains? '#{defn defn-} (first %))) forms)
         constant-forms (filter #(and (seq? %) (= 'def (first %))) forms)
@@ -12806,7 +12938,8 @@
         _ (when (> (count namespaces) 1)
             (reject! "at most one namespace form is admitted" namespaces :kotoba.error/namespace-count))
         namespace-info (when-let [namespace-form (first namespaces)]
-                         (namespace-parts namespace-form))
+                         (guarding-definition 'ns namespace-form
+                                              #(namespace-parts namespace-form)))
         declared-schemas (or (:schemas namespace-info) {})
         record-schemas (:record-schemas record-protocol-expansion)
         schema-collisions (set/intersection (set (keys declared-schemas))
@@ -12826,7 +12959,8 @@
                               (when merged-schemas (schema/identities merged-schemas)))
         raw-constants (into {}
                         (map (fn [form]
-                               (let [{:keys [name value]} (def-parts form)]
+                               (let [{:keys [name value]}
+                                     (guarding-definition 'def form #(def-parts form))]
                                  (when-not (valid-name? name)
                                    (reject! "invalid constant name" name))
                                  (when (contains? reserved-function-names name)
@@ -12842,7 +12976,11 @@
         source-names (mapv second defs)
         _ (when-not (= (count source-names) (count (distinct source-names)))
             (reject! "duplicate function name" defs))
-        def-parts (vec (mapcat #(expand-defn-parts % constants) defs))
+        def-parts (vec (mapcat (fn [form]
+                                 (guarding-definition
+                                  (first form) form
+                                  #(expand-defn-parts form constants)))
+                               defs))
         function-arities
         (reduce (fn [out {:keys [source-name logical-arity raw-params]}]
                   (if (vector? raw-params)
