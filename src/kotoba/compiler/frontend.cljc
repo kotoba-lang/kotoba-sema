@@ -885,6 +885,25 @@
 ;; dispatches on the head name before signatures are consulted, so a
 ;; `(defn conj ...)` would otherwise be shadowed silently.
 (def set-operations '#{conj disj})
+;; `count` is declared admitted by the language authority
+;; (`lang/guest-grammar.edn`: "bounded pair-chain walk"; `surface-status.edn`
+;; `:persistent-collection-semantics` lists it first among the operations it
+;; claims on three backends) and had no implementation here at all. Measured
+;; 2026-09-03 against sema `df383ba0`: `(count [7 8 9])`, `(count #{:a})`,
+;; `(count (typed-map-new [:map :i64 :i64]))` -- every receiver, every
+;; collection -- reached validation as an unknown call and was refused
+;; `operation has no admitted lowering`, the message for a head nothing
+;; rewrote, which says nothing about collections. `vector-count`,
+;; `vector-f64-count`, `hetero-vector-count`, `typed-set-count` and
+;; `typed-map-count` all sat next to it, already lowered, already returning
+;; `:i64`. Nothing was missing but the dispatch. It is the same defect
+;; `contains?`, `dissoc`, `conj` and `disj` had earlier the same day.
+;;
+;; RESERVED as well as implemented, for the reason `conj` is: the rewrite
+;; dispatches on the head name before signatures are consulted, so before this
+;; a `(defn count ...)` was ACCEPTED -- measured -- and its calls would have
+;; been rewritten out from under it silently.
+(def collection-count-operations '#{count})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
@@ -1108,7 +1127,8 @@
              ;; declared i64.
              (set (keys image-symbol-operations))
              list-operations predicate-operations logical-operations map-operations
-             map-presence-operations set-operations typed-map-operations
+             map-presence-operations set-operations collection-count-operations
+             typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
              variant-operations
@@ -6763,6 +6783,52 @@
                {:kotoba.error/expected expected
                 :kotoba.error/actual actual}))))
 
+(defn- collection-head-advice
+  "What the caller should write instead, for a receiver this friendly head does
+  not answer.
+
+  A refusal that only reports a type mismatch reads as a defect in the
+  caller's program. Measured 2026-09-03 against sema `df383ba0`:
+  `(first [7 8 9])` was refused `expression type mismatch: expected i64, got
+  vector-i64`, because `first` desugars to `pair-first` and the pair
+  accessors are declared over the legacy i64 pair chain -- so the reader was
+  told their vector was the wrong type for an operation whose Clojure meaning
+  it satisfies exactly. The same shape as `contains?` on a set before
+  2026-09-03, one level worse: `operation has no admitted lowering` at least
+  names the operation.
+
+  Returns a sentence, or nil when nothing specific is known -- nil means the
+  generic refusal is the honest one, not that the receiver is fine."
+  [type]
+  (cond
+    (typed-set-type? type)
+    (str "A typed set answers to typed-set-count, typed-set-contains, "
+         "typed-set-conj, typed-set-disj and typed-set-nth; conj and disj "
+         "also reach it through the friendly surface")
+
+    (canonical-typed-map-type? type)
+    (str "A canonical typed map answers to typed-map-count, typed-map-get, "
+         "typed-map-entry-at, typed-map-assoc and typed-map-dissoc; get, "
+         "assoc, contains? and dissoc also reach it through the friendly "
+         "surface")
+
+    (= :map type)
+    (str "The legacy keyword-keyed bounded map answers to get and assoc and "
+         "has no other primitive at all -- not count, not presence, not "
+         "removal")
+
+    (canonical-list-type? type)
+    (str "A canonical [:list T] has typed-list-new and no accessor primitive "
+         "at all; a bounded vector literal is the sequence this profile can "
+         "walk")
+
+    (= :string type)
+    (str "A string has no element count in this profile: string-byte-length "
+         "counts UTF-8 BYTES, not characters, and naming it here would give "
+         "two different answers the same spelling")
+
+    :else nil))
+
 (defn- infer-call-type [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -7647,6 +7713,40 @@
             (infer-call-type 'map-get
                              [value key (if (= 3 (count args)) default 0)]
                              locals signatures)))
+        ;; `count` and the pair accessors need a TYPE here as well as a
+        ;; lowering below, for the reason `nth` has one: parameter inference
+        ;; runs before `rewrite-record-projections`, and it reads a refused
+        ;; operand's required type out of the refusal's ex-data. A head that
+        ;; only gained a rewrite would still be REFUSED during that earlier
+        ;; pass, and the `:kotoba.error/expected :i64` of that refusal was
+        ;; then attributed to an unrelated synthesized parameter. Measured
+        ;; 2026-09-03: with the rewrite alone,
+        ;;   (+ (pair-first [1 4 2]) (reduce add 4 [1 2 3]))
+        ;; produced a `reduce` loop helper whose collection parameter was
+        ;; typed `:i64` instead of `:vector-i64`, and the program was refused
+        ;; naming `__kotoba_reduce_v_1` -- a binding the author never wrote.
+        ;; With this arm the helper is typed `:vector-i64` and the program
+        ;; runs. `(vector-at [1 4 2] 0)` written by hand always worked, which
+        ;; is how the difference was isolated: identical bodies, different
+        ;; `:param-types`.
+        count
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (if (or (= :vector-i64 value-type) (= :vector-f64 value-type)
+                  (heterogeneous-vector-type? value-type)
+                  (typed-set-type? value-type)
+                  (canonical-typed-map-type? value-type))
+            :i64
+            (infer-call-type op args locals signatures)))
+        (pair-first pair-second)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [pair-first :vector-i64] :i64
+            [pair-first :vector-f64] :f64
+            [pair-second :vector-i64] :vector-i64
+            [pair-second :vector-f64] :vector-f64
+            (infer-call-type op args locals signatures)))
         nth
         (let [[value index & defaults] args
               value-type (infer-expression-type value locals signatures)]
@@ -8912,6 +9012,108 @@
                 (reject! "vector nth requires value, index, and optional default" form))
               (cons (if (= 3 (count rewritten-args)) 'vector-f64-get 'vector-f64-at)
                     rewritten-args))
+
+            ;; A receiver `nth` does not index. Before this the arm fell
+            ;; through to `(cons op ...)` and validation reported `operation
+            ;; has no admitted lowering` -- true of `nth` on nothing, since
+            ;; `nth` on a bounded vector has been lowered since the vector
+            ;; landed. Only receivers this profile can NAME are refused here;
+            ;; an unknown or not-yet-inferred receiver (nil) still passes
+            ;; through, so an earlier invalid binding keeps reporting its own
+            ;; error rather than this one.
+            (collection-head-advice value-type)
+            (reject! (str "nth indexes a bounded vector; got "
+                          (pr-str value-type) ". "
+                          (collection-head-advice value-type))
+                     form :kotoba.error/nth-receiver)
+
+            :else (cons op rewritten-args)))
+
+        ;; `count` on any admitted collection.
+        ;;
+        ;; Declared admitted on three backends by `lang/guest-grammar.edn` and
+        ;; by `surface-status.edn` `:persistent-collection-semantics`, and
+        ;; implemented on none of them: measured 2026-09-03 against sema
+        ;; `df383ba0`, `(count [7 8 9])` was refused `operation has no
+        ;; admitted lowering` -- on a vector, a list, a set, a typed map, the
+        ;; keyword map and a string alike. Every primitive it needs was
+        ;; already there and already returning `:i64`.
+        (contains? collection-count-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              ;; See `contains?` above: this arm REFUSES, so swallowing the
+              ;; receiver's own refusal would replace a precise message with
+              ;; `got nil`. The exception is carried out and rethrown.
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! "count requires exactly one collection"
+                     form :kotoba.error/count-arity))
+          (cond
+            (= :vector-i64 value-type) (list 'vector-count receiver)
+            (= :vector-f64 value-type) (list 'vector-f64-count receiver)
+            (heterogeneous-vector-type? value-type)
+            (list 'hetero-vector-count value-type receiver)
+            (typed-set-type? value-type) (list 'typed-set-count value-type receiver)
+            (canonical-typed-map-type? value-type)
+            (list 'typed-map-count value-type receiver)
+            :else
+            (reject! (str "count requires a bounded vector, a typed set or a "
+                          "canonical typed map; got " (pr-str value-type) "."
+                          (if-let [advice (collection-head-advice value-type)]
+                            (str " " advice)
+                            ""))
+                     form :kotoba.error/count-receiver)))
+
+        ;; `first` / `second` / `rest` on a bounded vector.
+        ;;
+        ;; These three desugar to `pair-first` / `pair-first` of `pair-second`
+        ;; / `pair-second` before any type is known, so the dispatch has to
+        ;; happen on the PAIR heads, here, where the receiver's type is
+        ;; inferable. That is also why the fix reaches a `pair-first` written
+        ;; literally in the source: after desugaring there is one head, not
+        ;; two, and the language authority's own `collections/higher_order`
+        ;; fixture spells it that way over a `filter` result -- which is a
+        ;; bounded vector, not the pair chain the fixture was written against.
+        ;;
+        ;; `vector-at` and `vector-drop` are exactly Clojure's `first` and
+        ;; `rest` for a vector, and both were already lowered. An EMPTY vector
+        ;; traps rather than answering nil, as `nth` without a default does;
+        ;; there is no nil in this profile to answer with.
+        ;;
+        ;; Every OTHER receiver passes through unchanged -- the pair accessors
+        ;; are the closure, lazy-cell, cursor and destructuring vocabulary of
+        ;; this desugarer, all of them i64 pairs -- so a program that does not
+        ;; call one on a vector lowers byte for byte as before.
+        (contains? '#{pair-first pair-second} op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              value-type (when (= 1 (count rewritten-args))
+                           (try (infer-expression-type receiver locals signatures)
+                                (catch #?(:clj Exception :cljs :default) _ nil)))
+              first? (= op 'pair-first)]
+          (cond
+            (= :vector-i64 value-type)
+            (if first? (list 'vector-at receiver 0) (list 'vector-drop receiver 1))
+
+            (= :vector-f64 value-type)
+            (if first?
+              (list 'vector-f64-at receiver 0)
+              (list 'vector-f64-drop receiver 1))
+
+            (collection-head-advice value-type)
+            (reject! (str (if first? "first (pair-first)" "rest (pair-second)")
+                          " reads a pair chain or a bounded vector; got "
+                          (pr-str value-type) ". "
+                          (collection-head-advice value-type))
+                     form (if first?
+                            :kotoba.error/pair-first-receiver
+                            :kotoba.error/pair-second-receiver))
 
             :else (cons op rewritten-args)))
 
