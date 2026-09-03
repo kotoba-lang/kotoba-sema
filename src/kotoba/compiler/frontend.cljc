@@ -5335,6 +5335,19 @@
         ;; sources stay direct for stable KIR; three-to-five source handles
         ;; share one typed heterogeneous-vector state value, so synthesized
         ;; loop helpers stay inside the five-word ABI even with a callback.
+        ;; mapv/filterv surface aliases: the T4.5 map/filter lowerings already
+        ;; return eager bounded vector-i64 results, so mapv/filterv are pure
+        ;; surface sugar — same lowering, same KIR CIDs, zero new backend work.
+        ;; Arity is validated here first so the alias fails closed with its own
+        ;; name in the diagnostic rather than delegating a wrong shape.
+        mapv
+        (do (when-not (<= 2 (count args) 6)
+              (reject! "mapv requires a callback and one to five vector-i64 collections" form))
+            (desugar-expr (with-meta (cons 'map args) (meta form))))
+        filterv
+        (do (when-not (= 2 (count args))
+              (reject! "filterv requires pred and one vector-i64 collection" form))
+            (desugar-expr (with-meta (cons 'filter args) (meta form))))
         map
         (do
           (when-not (<= 2 (count args) 6)
