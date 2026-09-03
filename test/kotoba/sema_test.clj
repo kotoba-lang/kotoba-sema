@@ -215,8 +215,18 @@
            (set (vals sema/source-operation-registry))))
     ;; The assertion is contiguity, not a fixed ceiling -- it moves when the
     ;; registry legitimately grows and fails when a gap is left.
-    (is (= (range 1 31) (sort (vals sema/capability-registry)))
-        "wire ids stay contiguous from 1; a gap means named source will reject")))
+    ;;
+    ;; It said that and did not do it. `(range 1 31)` IS a fixed ceiling: the
+    ;; catalog grew to 32 wire ids and this went red for the one reason the
+    ;; comment promised it would not -- legitimate growth. Measured 2026-09-03.
+    ;; Written against the registry's own size, it now moves with growth and
+    ;; still fails on a gap, a duplicate, or an id that does not start at 1.
+    ;; The floor is what keeps an emptied registry from passing vacuously.
+    (let [ids (sort (vals sema/capability-registry))]
+      (is (<= 24 (count ids))
+          "the registry must not shrink below the ids this suite names by hand")
+      (is (= (range 1 (inc (count ids))) ids)
+          "wire ids stay contiguous from 1; a gap means named source will reject"))))
 
 (deftest typed-eval-is-catalogued-and-contextually-typed
   (is (= 30 (get sema/capability-registry :code/eval)))
