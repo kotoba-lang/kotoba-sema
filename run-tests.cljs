@@ -68,7 +68,10 @@
             ;; a malformed top-level DECLARATION is refused, not crashed --
             ;; fifteen spellings of a non-symbol in a `defn` name position
             ;; reached `(name source-name)` and raised a raw host error
-            [kotoba.compiler.malformed-definition-form-test]))
+            [kotoba.compiler.malformed-definition-form-test]
+            ;; the dual of the one above: a declaration that compiled and was
+            ;; then silently dropped
+            [kotoba.compiler.dropped-declaration-form-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -98,4 +101,5 @@
              'kotoba.compiler.collection-heads-test
              'kotoba.compiler.vector-end-and-map-projection-test
              'kotoba.compiler.malformed-type-argument-test
-             'kotoba.compiler.malformed-definition-form-test)
+             'kotoba.compiler.malformed-definition-form-test
+             'kotoba.compiler.dropped-declaration-form-test)
