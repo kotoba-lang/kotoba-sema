@@ -51,6 +51,13 @@
             ;; nbb half had never run -- and a suite that does not run a file
             ;; reports the same clean answer as one that runs it and passes.
             [kotoba.compiler.set-operations-test]
+            ;; `count` on every collection that has a count primitive, and the
+            ;; pair accessors reaching a bounded vector -- the heads the
+            ;; language authority declared on three backends and nothing
+            ;; implemented. The `case` this adds to inference dispatches on
+            ;; `[op value-type]`, and ClojureScript is where a `case` over
+            ;; composite constants has broken before, so it belongs here.
+            [kotoba.compiler.collection-heads-test]
             ;; a declared type of the wrong SHAPE is refused, not crashed --
             ;; and 42 of the 76 programs that crashed did so only under nbb,
             ;; because ClojureScript hashes a bigint to answer `contains?`
@@ -81,4 +88,5 @@
              'kotoba.compiler.typed-map-value-types-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
+             'kotoba.compiler.collection-heads-test
              'kotoba.compiler.malformed-type-argument-test)
