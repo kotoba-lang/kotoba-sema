@@ -908,6 +908,27 @@
 ;; a `(defn count ...)` was ACCEPTED -- measured -- and its calls would have
 ;; been rewritten out from under it silently.
 (def collection-count-operations '#{count})
+;; `peek`, `pop`, `keys` and `vals`. Declared admitted by
+;; `lang/guest-grammar.edn` `:sugar` on #{:compiler :kotoba-wasm :kotoba-cljs}
+;; and by `lang/surface-status.edn` `:persistent-collection-semantics`, and
+;; implemented by nothing until 2026-09-03: measured against sema `7d46f89e`,
+;; all four are refused `operation has no admitted lowering` at every arity
+;; and every receiver shape. On that day an agent corrected the AUTHORITY to
+;; stop claiming them, for a sound reason -- there was no rear-truncating
+;; vector operation and no map key/value projection, so `pop`, and therefore
+;; `(peek (pop v))`, could not be lowered from anything that existed. The
+;; owner's direction the same day was the other way: add the primitives. They
+;; are `vector-take`, `vector-f64-take`, `typed-list-nth`, `typed-map-keys`
+;; and `typed-map-vals` in kotoba-kir, and this is the head half.
+;;
+;; RESERVED as well as implemented, for the reason `count` and `conj` are: the
+;; rewrite dispatches on the head name before signatures are consulted, so a
+;; `(defn peek ...)` would otherwise be accepted and its calls rewritten out
+;; from under it silently. `seq` and `last` are NOT reserved -- no authority
+;; claims them, nothing implements them, and taking a name away without
+;; implementing it is a regression.
+(def vector-end-operations '#{peek pop})
+(def map-projection-operations '#{keys vals})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
@@ -918,7 +939,15 @@
 (def variant-operations '#{variant-new variant-match})
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
-(def canonical-list-operations '#{typed-list-new})
+;; `typed-list-nth` lands here with the constructor that could not be indexed.
+;; `vector-at`, `vector-get` and `vector-drop` all require `:vector-i64` and
+;; refuse a `[:list T]` by type, so a list could be built and counted --
+;; `vector-count` walks the list carrier, measured 2026-09-03 -- and never
+;; read an element out of. It arrives with `keys`/`vals`, whose projection IS
+;; a `[:list T]`. There is deliberately no `typed-list-count`: `vector-count`
+;; already does that work.
+(def canonical-list-operations
+  '#{typed-list-new typed-list-nth})
 (def bytes-operations
   '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2})
 (def heterogeneous-vector-operations
@@ -929,10 +958,15 @@
      typed-set-disj typed-set-equal typed-set-nth})
 (def canonical-typed-map-operations
   '#{typed-map-new typed-map-count typed-map-contains typed-map-get
-     typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal})
+     typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal
+     typed-map-keys typed-map-vals})
 (def record-operations '#{record-new record-get record-assoc record-equal})
+;; `vector-take` is `vector-drop`'s mirror -- drop keeps the tail after the
+;; first n, take keeps the head. There was no rear truncation at all before
+;; 2026-09-03, which is the whole reason Clojure's vector `pop` -- every item
+;; but the LAST -- could not be lowered from anything that existed.
 (def typed-vector-operations
-  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
+  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-take 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
 (def ^:private contextual-string-argument-indexes
   "Builtin argument positions whose declared type selects the closed string
   closure dispatcher. This is elaboration context, not dynamic overloading."
@@ -1018,11 +1052,12 @@
     vector-f64-get {0 :vector-f64 2 :f64}
     vector-f64-at {0 :vector-f64}
     vector-f64-drop {0 :vector-f64}
+    vector-f64-take {0 :vector-f64}
     vector-f64-assoc {0 :vector-f64 2 :f64}
     vector-f64-conj {0 :vector-f64 1 :f64}})
 (def typed-f64-vector-operations
   '{vector-f64-count 1 vector-f64-get 3 vector-f64-at 2 vector-f64-drop 2
-    vector-f64-assoc 3 vector-f64-conj 2})
+    vector-f64-take 2 vector-f64-assoc 3 vector-f64-conj 2})
 (def compact-graph-operations
   '{string-index-new 0 string-index-count 1 string-index-contains 2
     string-index-get 2 string-index-assoc 3
@@ -1132,6 +1167,7 @@
              (set (keys image-symbol-operations))
              list-operations predicate-operations logical-operations map-operations
              map-presence-operations set-operations collection-count-operations
+             vector-end-operations map-projection-operations
              typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
@@ -5174,6 +5210,12 @@
                               (desugar-expected-value item-type %)
                               (desugar-expr %))
                            (rest args)))))
+        typed-list-nth
+        (do (when-not (= 3 (count args))
+              (reject! "typed-list-nth requires type, value, and index" form))
+            (list 'typed-list-nth (first args)
+                  (desugar-expected-value (first args) (second args))
+                  (desugar-expr (nth args 2))))
         typed-set-count
         (do (when-not (= 2 (count args))
               (reject! "typed-set-count requires type and value" form))
@@ -5260,6 +5302,11 @@
             (list 'typed-map-entry-at (first args)
                   (desugar-expected-value (first args) (second args))
                   (desugar-expr (nth args 2))))
+        (typed-map-keys typed-map-vals)
+        (do (when-not (= 2 (count args))
+              (reject! (str op " requires type and value") form))
+            (list op (first args)
+                  (desugar-expected-value (first args) (second args))))
         typed-map-assoc
         (do (when-not (= 4 (count args))
               (reject! "typed-map-assoc requires type, value, key, and item" form))
@@ -6464,6 +6511,15 @@
           (doseq [item items]
             (validate-expr item locals functions (inc depth) budget)))
 
+        (= op 'typed-list-nth)
+        (let [[type value index] args]
+          (when-not (= 3 (count args)) (reject! "typed list nth shape is invalid" form))
+          (validate-value-type! type)
+          (when-not (canonical-list-type? type)
+            (reject! "typed list nth requires [:list item-type]" form))
+          (validate-expr value locals functions (inc depth) budget)
+          (validate-expr index locals functions (inc depth) budget))
+
         (= op 'bytes-empty)
         (when-not (empty? args)
           (reject! "bytes-empty does not accept operands" form))
@@ -6576,6 +6632,15 @@
             (reject! "typed map entry projection requires [:map key-type value-type]" form))
           (validate-expr value locals functions (inc depth) budget)
           (validate-expr index locals functions (inc depth) budget))
+
+        (contains? '#{typed-map-keys typed-map-vals} op)
+        (let [[type value] args]
+          (when-not (= 2 (count args))
+            (reject! "typed map projection shape is invalid" form))
+          (validate-value-type! type)
+          (when-not (canonical-typed-map-type? type)
+            (reject! "typed map projection requires [:map key-type value-type]" form))
+          (validate-expr value locals functions (inc depth) budget))
 
         (= op 'typed-map-assoc)
         (let [[type map-value key item] args]
@@ -7056,9 +7121,10 @@
          "removal")
 
     (canonical-list-type? type)
-    (str "A canonical [:list T] has typed-list-new and no accessor primitive "
-         "at all; a bounded vector literal is the sequence this profile can "
-         "walk")
+    (str "A canonical [:list T] answers to vector-count -- which walks the "
+         "list carrier, measured -- and to typed-list-nth; count and nth "
+         "reach it through the friendly surface. It has no rear operation, "
+         "so peek and pop do not reach it")
 
     (= :string type)
     (str "A string has no element count in this profile: string-byte-length "
@@ -7174,6 +7240,14 @@
       (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
 
+      ;; `vector-drop`'s mirror, and typed identically: both take a bounded
+      ;; vector and a count and answer a bounded vector. Which END they keep
+      ;; is not a type-level difference, which is why one arm is a copy of the
+      ;; other and not a variation on it.
+      (= op 'vector-take)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
+
       ;; `vector-assoc!` types identically, because it IS the same
       ;; operation: the bang only tells a backend it may lower the update
       ;; to a store, and `check-affine-writes!` is what earns that. A
@@ -7207,6 +7281,10 @@
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :f64)
 
       (= op 'vector-f64-drop)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
+
+      (= op 'vector-f64-take)
       (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
 
@@ -7826,6 +7904,12 @@
             (require-expression-type! (infer-expression-type item locals signatures)
                                       (second type) item))
           type)
+        typed-list-nth
+        (let [[type value index] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
+          (second type))
         bytes-empty :bytes
         bytes-count
         (let [[value] args]
@@ -7973,8 +8057,30 @@
           (if (or (= :vector-i64 value-type) (= :vector-f64 value-type)
                   (heterogeneous-vector-type? value-type)
                   (typed-set-type? value-type)
-                  (canonical-typed-map-type? value-type))
+                  (canonical-typed-map-type? value-type)
+                  (canonical-list-type? value-type))
             :i64
+            (infer-call-type op args locals signatures)))
+        ;; `peek`/`pop`/`keys`/`vals` need a type here for the same reason
+        ;; `count` and `nth` do: `infer-absent-parameter-types` runs BEFORE
+        ;; `rewrite-record-projections` and reads a refused operand's required
+        ;; type out of the refusal's ex-data, so a head with only a rewrite is
+        ;; still refused during that earlier pass and its expected type is
+        ;; attributed to an unrelated synthesized parameter.
+        (peek pop)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [peek :vector-i64] :i64
+            [peek :vector-f64] :f64
+            [pop :vector-i64] :vector-i64
+            [pop :vector-f64] :vector-f64
+            (infer-call-type op args locals signatures)))
+        (keys vals)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (if (canonical-typed-map-type? value-type)
+            [:list (if (= op 'keys) (second value-type) (nth value-type 2))]
             (infer-call-type op args locals signatures)))
         (pair-first pair-second)
         (let [value-type (when (= 1 (count args))
@@ -8017,6 +8123,15 @@
                 (reject! "vector nth requires value, index, and optional default" form))
               (infer-call-type (if (= 3 (count args)) 'vector-f64-get 'vector-f64-at)
                                args locals signatures))
+
+            ;; A `[:list T]` indexes through `typed-list-nth`, which has no
+            ;; defaulting form -- there is no list `vector-get` -- so the
+            ;; two-argument shape is the only one, and the three-argument one
+            ;; is refused by the rewrite rather than silently dropping the
+            ;; default.
+            (canonical-list-type? value-type)
+            (if (= 2 (count args)) (second value-type)
+                (infer-call-type op args locals signatures))
 
             :else (infer-call-type op args locals signatures)))
         hetero-vector-assoc
@@ -8110,6 +8225,17 @@
           (require-expression-type! (infer-expression-type value locals signatures) type value)
           (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
           [:option [:vector [(second type) (nth type 2)]]])
+        ;; `[:list K]` / `[:list V]`. Not `[:set K]` even for the keys, whose
+        ;; distinctness a set would carry faithfully: the VALUES are not
+        ;; distinct, so the same carrier for `vals` would silently drop every
+        ;; repeated value, and one projection typed as a set while the other
+        ;; is a list would make `(nth (keys m) i)` and `(nth (vals m) i)` two
+        ;; different kinds of index over what is meant to be one entry.
+        (typed-map-keys typed-map-vals)
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          [:list (if (= op 'typed-map-keys) (second type) (nth type 2))])
         typed-map-assoc
         (let [[type value key item] args]
           (validate-value-type! type)
@@ -9269,6 +9395,22 @@
             ;; an unknown or not-yet-inferred receiver (nil) still passes
             ;; through, so an earlier invalid binding keeps reporting its own
             ;; error rather than this one.
+            ;; A `[:list T]` indexes through `typed-list-nth`, the accessor
+            ;; that arrived with `keys`/`vals` -- their projection IS a list,
+            ;; and a projection nothing can read an element out of is a value
+            ;; no program can use. There is no defaulting form, because there
+            ;; is no list `vector-get`: the three-argument shape is refused
+            ;; rather than silently dropping the default the author wrote.
+            (canonical-list-type? value-type)
+            (do (when-not (= 2 (count rewritten-args))
+                  (reject! (str "nth on a canonical [:list T] takes a value "
+                                "and an index and has no defaulting form; "
+                                "typed-list-nth traps on an index out of "
+                                "range, as vector nth without a default does")
+                           form :kotoba.error/nth-receiver))
+                (list 'typed-list-nth value-type
+                      (first rewritten-args) (second rewritten-args)))
+
             (collection-head-advice value-type)
             (reject! (str "nth indexes a bounded vector; got "
                           (pr-str value-type) ". "
@@ -9309,6 +9451,14 @@
             (typed-set-type? value-type) (list 'typed-set-count value-type receiver)
             (canonical-typed-map-type? value-type)
             (list 'typed-map-count value-type receiver)
+            ;; `vector-count` walks a `[:list T]` carrier, for any item type,
+            ;; and has since the carrier landed. Measured 2026-09-03:
+            ;; `(vector-count (typed-list-new [:list :string] "a" "b"))` is 2.
+            ;; The refusal this arm used to raise for a list said the type had
+            ;; "no accessor primitive at all", which was wrong about counting;
+            ;; the count was reachable by hand and only the friendly head was
+            ;; missing. That is why no `typed-list-count` was added for it.
+            (canonical-list-type? value-type) (list 'vector-count receiver)
             :else
             (reject! (str "count requires a bounded vector, a typed set or a "
                           "canonical typed map; got " (pr-str value-type) "."
@@ -9316,6 +9466,149 @@
                             (str " " advice)
                             ""))
                      form :kotoba.error/count-receiver)))
+
+        ;; `peek` and `pop` on a bounded vector -- Clojure's END.
+        ;;
+        ;; In Clojure these two are RECEIVER-DEPENDENT: on a vector `peek` is
+        ;; the last item and `pop` is every item but the last; on a list
+        ;; `peek` is the first and `pop` is the rest. This profile has both a
+        ;; bounded vector and a `[:list T]`, so the reading cannot be picked
+        ;; once and applied everywhere. What each receiver does:
+        ;;
+        ;;   bounded i64/f64 vector  the END. `(vector-at v (- (count v) 1))`
+        ;;                           and `(vector-take v (- (count v) 1))`.
+        ;;   the legacy i64 pair chain
+        ;;                           REFUSED, and this is the ambiguous one.
+        ;;                           The pair chain is this profile's list, so
+        ;;                           Clojure's list reading would say `peek` is
+        ;;                           `pair-first` -- but the pair chain is
+        ;;                           typed `:i64`, which is also the type of
+        ;;                           every ordinary integer, so `(peek 5)` and
+        ;;                           `(peek some-chain)` are the same program
+        ;;                           to this frontend. Answering either way
+        ;;                           would read an integer as a heap pair or
+        ;;                           refuse a chain that is a list. The head
+        ;;                           that says which one is meant already
+        ;;                           exists and is unambiguous: `first` and
+        ;;                           `rest`, which lower to exactly the pair
+        ;;                           accessors. So this refuses and names them.
+        ;;   [:list T]               REFUSED: it has `vector-count` and
+        ;;                           `typed-list-nth` but no rear operation and
+        ;;                           no drop, so neither reading is buildable.
+        ;;   typed set, typed map, keyword map, string
+        ;;                           REFUSED, naming each one's own primitives.
+        ;;
+        ;; EMPTINESS. Clojure's `pop` on an empty collection throws and `peek`
+        ;; returns nil. Neither is available: emptiness is not statically
+        ;; known here, and there is no nil in this profile to answer with. Of
+        ;; the four shapes that were open -- a not-found argument as
+        ;; `(nth v i default)` takes, a trap, a typed abort, or refusing the
+        ;; operation -- this takes the TRAP, because that is what the
+        ;; neighbours already do: `vector-at` traps out of range, `vector-drop`
+        ;; traps, `typed-set-nth` traps, and `nth` WITHOUT a default is
+        ;; already the empty-vector trap spelled differently. `pop` needs no
+        ;; special case at all for it: an empty vector makes the count 0 and
+        ;; the argument -1, and -1 is out of `vector-take`'s range.
+        ;;
+        ;; The cost is real and is this: a program that does not know its
+        ;; vector is non-empty cannot ask these two heads safely, and must
+        ;; write `(if (= (count v) 0) ... (peek v))` -- the guard `count` made
+        ;; spellable on 2026-09-03. An `[:option T]` return would have carried
+        ;; the emptiness in the type instead, and was not taken: it would make
+        ;; `peek` the only collection head that does, `(peek (pop v))` would
+        ;; stop composing, and `[:option T]` on an `if` arm was measured the
+        ;; same day to make wasm32 refuse a whole project. A `(peek v
+        ;; not-found)` arity is the cheap widening if one is ever wanted --
+        ;; `vector-get` is already the primitive for it -- and is deliberately
+        ;; not added here without a caller asking for it.
+        (contains? vector-end-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              ;; As in `count`: this arm REFUSES, so swallowing the receiver's
+              ;; own refusal would replace a precise message with `got nil`.
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)
+              peek? (= op 'peek)
+              code (if peek? :kotoba.error/peek-receiver :kotoba.error/pop-receiver)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! (str op " requires exactly one collection")
+                     form (if peek?
+                            :kotoba.error/peek-arity
+                            :kotoba.error/pop-arity)))
+          (if-let [[at-op count-op take-op]
+                   (case value-type
+                     :vector-i64 '[vector-at vector-count vector-take]
+                     :vector-f64 '[vector-f64-at vector-f64-count vector-f64-take]
+                     nil)]
+            ;; The receiver is bound ONCE. Both readings need it twice -- for
+            ;; the count and for the index -- and duplicating the expression
+            ;; would evaluate it twice, which for a receiver that traps means
+            ;; trapping twice and for one that costs fuel means paying twice.
+            ;; This is the shape the heterogeneous `vector-drop` arm above
+            ;; already uses for the same reason.
+            (let [value-name (synthetic (if peek? "peek" "pop"))
+                  last-index (list '- (list count-op value-name) 1)]
+              (list 'let [value-name receiver]
+                    (if peek?
+                      (list at-op value-name last-index)
+                      (list take-op value-name last-index))))
+            (reject! (str (if peek? "peek" "pop")
+                          " takes from the END of a bounded vector, as it does"
+                          " in Clojure; got " (pr-str value-type) ". "
+                          (or (collection-head-advice value-type)
+                              (str "The legacy i64 pair chain is this "
+                                   "profile's list, and Clojure reads peek "
+                                   "and pop on a list from the FRONT -- but "
+                                   "a pair chain and an ordinary integer are "
+                                   "the same type here, so that reading "
+                                   "cannot be told from reading an integer as "
+                                   "a pair. Write first and rest, which lower "
+                                   "to pair-first and pair-second and say "
+                                   "which was meant")))
+                     form code)))
+
+        ;; `keys` and `vals` on a canonical typed map.
+        ;;
+        ;; Both answer a `[:list T]` in the map's own entry order -- the order
+        ;; `typed-map-entry-at` walks -- so `(nth (keys m) i)` and
+        ;; `(nth (vals m) i)` name the two halves of one entry. Neither is a
+        ;; set: a map's keys are distinct and its VALUES are not, so a set
+        ;; carrier for `vals` would silently drop every repeated value and
+        ;; answer a shorter collection than the map has entries.
+        (contains? map-projection-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)
+              keys? (= op 'keys)
+              code (if keys? :kotoba.error/keys-receiver :kotoba.error/vals-receiver)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! (str op " requires exactly one map")
+                     form (if keys?
+                            :kotoba.error/keys-arity
+                            :kotoba.error/vals-arity)))
+          (if (canonical-typed-map-type? value-type)
+            (list (if keys? 'typed-map-keys 'typed-map-vals) value-type receiver)
+            (reject! (str (if keys? "keys" "vals")
+                          " projects a canonical typed map; got "
+                          (pr-str value-type) ". "
+                          (if (= :map value-type)
+                            (str "The legacy keyword-keyed bounded map answers "
+                                 "to get and assoc and has no projection "
+                                 "primitive; write the canonical [:map K V] "
+                                 "with typed-map-new to project it")
+                            (or (collection-head-advice value-type)
+                                (str "Only a canonical [:map K V] has a key "
+                                     "and value projection"))))
+                     form code)))
 
         ;; `first` / `second` / `rest` on a bounded vector.
         ;;

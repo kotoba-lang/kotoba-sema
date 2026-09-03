@@ -58,6 +58,9 @@
             ;; `[op value-type]`, and ClojureScript is where a `case` over
             ;; composite constants has broken before, so it belongs here.
             [kotoba.compiler.collection-heads-test]
+            ;; peek/pop from the END of a bounded vector, keys/vals off a
+            ;; canonical typed map, and count/nth reaching a [:list T]
+            [kotoba.compiler.vector-end-and-map-projection-test]
             ;; a declared type of the wrong SHAPE is refused, not crashed --
             ;; and 42 of the 76 programs that crashed did so only under nbb,
             ;; because ClojureScript hashes a bigint to answer `contains?`
@@ -93,5 +96,6 @@
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
              'kotoba.compiler.collection-heads-test
+             'kotoba.compiler.vector-end-and-map-projection-test
              'kotoba.compiler.malformed-type-argument-test
              'kotoba.compiler.malformed-definition-form-test)
