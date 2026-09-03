@@ -12334,6 +12334,26 @@
      extend-type extend-protocol defdesugar
      if let let* do fn loop recur quote var recur-to})
 
+(def ^:private unspellable-definition-heads
+  "The declaration heads a TEMPLATE BODY may hold that can be nothing at all.
+
+  `structural-heads` above governs the template's NAME. This governs its body,
+  and it is a much smaller set, because a template body is substituted into an
+  expression position where most declaration heads are ordinary function
+  names. Measured 2026-09-03 at 5917518b: `(defn defrecord [x] (+ x 1))` is an
+  admitted program and `(defdesugar t [y] (defrecord y))` is an admitted CALL
+  to it that computes 5 for `(t 4)`. Nine of the twelve definition heads
+  behave that way, so a blanket `no declaration in a body` would refuse
+  working source.
+
+  What is left is derived rather than chosen: a head in `definition-heads` is
+  not a declaration once it sits in an expression position, and a head in
+  `reserved-function-names` may not be defined as a function, so a head in
+  BOTH can be neither. `#{ns defn defn-}`, today. Written as the intersection
+  so that it follows either vocabulary if one of them moves -- a hand-listed
+  copy would keep refusing a head that had just become spellable."
+  (set/intersection definition-heads reserved-function-names))
+
 (defn- desugar-template-parts
   "Read one `(defdesugar name [params] body)` into `{:name :params :body}`."
   [form]
@@ -12366,6 +12386,21 @@
     (let [body (first tail)]
       (when (> (count (tree-seq coll? seq body)) max-desugar-template-nodes)
         (reject! "desugar template body exceeds node limit" form))
+      ;; A body holding one of these was ADMITTED and then dropped. Measured
+      ;; 2026-09-03 at 5917518b: `(defdesugar t [] (defn g [] 0))` compiled to
+      ;; a HIR byte-identical to the same program with the line deleted, and
+      ;; CALLING it reached `operation has no admitted lowering` -- a sentence
+      ;; about an operation, naming neither the template nor the declaration
+      ;; written inside it. Refused here instead, where the caller wrote it,
+      ;; and refused whether or not the template is ever called: the form is
+      ;; inert in every program, so there is nothing a later use could make of
+      ;; it. Head position only -- a bare symbol is not a form, and is already
+      ;; answered where unresolved symbols are.
+      (doseq [node (tree-seq coll? seq body)]
+        (when (and (seq? node)
+                   (contains? unspellable-definition-heads (first node)))
+          (reject! "desugar template body may not contain a reserved head form"
+                   form)))
       {:name name :params (vec params) :body body})))
 
 (defn- substitute-template-parameters
@@ -12587,8 +12622,30 @@
                        :else form))
                    forms))))))
 
+(def protocol-declaration-heads
+  "The two heads `expand-record-protocol-forms` reads with
+  `protocol-form->info`.
+
+  It exists so the refusal can spell the head the CALLER wrote. Measured
+  2026-09-03 at 5917518b, `(definterface)` answered
+
+      defprotocol requires unique bounded (method [this ...]) signatures
+
+  which names a form the caller did not write and sends them to the wrong
+  place to fix it. One arm serving two heads is the right shape -- an
+  interface and a protocol ARE the same declaration here -- but the sentence
+  has to say which one arrived.
+
+  Spelling a value read from source into a message is safe here for the reason
+  `definition-heads` gives about itself: a form reaches `protocol-form->info`
+  only because the filter in `expand-record-protocol-forms` MATCHED its head
+  against one of these two literals, so the head cannot be anything a program
+  chose. The error CODE stays a literal regardless -- the head travels in the
+  sentence, never in `:kotoba.error/code`."
+  '#{defprotocol definterface})
+
 (defn- protocol-form->info [form]
-  (let [[_ protocol-name & methods] form]
+  (let [[head protocol-name & methods] form]
     (when-not (and (valid-name? protocol-name)
                    (seq methods)
                    (every? #(and (seq? %)
@@ -12600,7 +12657,7 @@
                                  (every? valid-name? (second %)))
                            methods)
                    (= (count methods) (count (distinct (map first methods)))))
-      (reject! "defprotocol requires unique bounded (method [this ...]) signatures"
+      (reject! (str head " requires unique bounded (method [this ...]) signatures")
                form :kotoba.error/protocol-declaration))
     {:name protocol-name
      :methods (into {} (map (fn [[method-name params]] [method-name params]) methods))}))
@@ -12677,6 +12734,45 @@
           (reject! "protocol extension section requires a protocol name and methods"
                    whole-form :kotoba.error/protocol-extension))
         (recur tail (conj out [protocol-name methods]))))))
+
+(defn- extend-type-form->implementations
+  "Read one `(extend-type Record Protocol (method [this ...] body) ...)`.
+
+  The mirror of `extend-protocol-form->info` below, and it exists for the same
+  reason that one does: to say up front what the form NEEDS, instead of
+  letting an empty section list mean `nothing to check`.
+
+  Measured 2026-09-03 at 5917518b, `extend-type` was the only member of this
+  family that ADMITTED a malformed declaration. `(extend-type)`,
+  `(extend-type nil)` and `(extend-type 42)` all exited 0. The arm destructured
+  `record-name` and `extra`, handed `extra` to `protocol-extension-groups` --
+  whose loop returns `[]` on the first iteration when the remainder is empty --
+  and `mapcat` over no groups called nothing. Nothing else in the arm ever
+  looked at `record-name`. The whole-source pass then removed the form along
+  with the well-formed declarations, so the program compiled with the
+  extension the caller wrote silently absent: the HIR was byte-identical to
+  the same program with the line deleted, even next to a declared record and a
+  declared protocol.
+
+  The sentence is `extend-protocol`'s with its two nouns swapped, because the
+  two forms differ only in which side is named first and a second phrasing
+  would mean the compiler knew two things where there is one. It is raised on
+  the FORM, so the span points somewhere the reader can act -- `nil`, `42` and
+  `{}` carry no reader metadata of their own.
+
+  Eager on purpose. The caller used to build these with a lazy `mapcat`, which
+  is survivable while every refusal inside is reached during realisation, but
+  a guard whose `reject!` fires outside the sequence that forced it is a guard
+  that looks like it works."
+  [protocols records form]
+  (let [[_ record-name & extra] form]
+    (when-not (and (get records record-name) (seq extra))
+      (reject! "extend-type requires one declared record and bounded protocol sections"
+               form :kotoba.error/protocol-extension))
+    (into [] (mapcat (fn [[protocol-name methods]]
+                       (extension-implementations protocols records protocol-name
+                                                  record-name methods form)))
+          (protocol-extension-groups extra form))))
 
 (defn- extend-protocol-form->info [protocols records form]
   (let [[_ protocol-name & sections] form]
@@ -13025,7 +13121,7 @@
                                    forms)
                              (symbol "kotoba.user"))
         protocol-forms (filter #(and (seq? %)
-                                     (contains? '#{defprotocol definterface} (first %)))
+                                     (contains? protocol-declaration-heads (first %)))
                                forms)
         protocol-infos (mapv protocol-form->info protocol-forms)
         protocols (into {} (map (juxt :name identity)) protocol-infos)
@@ -13051,12 +13147,8 @@
             (reject! "duplicate record name" record-forms :kotoba.error/record-declaration))
         extend-type-forms (filter #(and (seq? %) (= 'extend-type (first %))) forms)
         extend-type-impls
-        (mapcat (fn [[_ record-name & extra :as form]]
-                  (mapcat (fn [[protocol-name methods]]
-                            (extension-implementations protocols records protocol-name
-                                                       record-name methods form))
-                          (protocol-extension-groups extra form)))
-                extend-type-forms)
+        (into [] (mapcat #(extend-type-form->implementations protocols records %))
+              extend-type-forms)
         extend-protocol-forms
         (filter #(and (seq? %) (= 'extend-protocol (first %))) forms)
         extend-protocol-infos
