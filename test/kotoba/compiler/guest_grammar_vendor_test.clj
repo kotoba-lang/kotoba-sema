@@ -57,9 +57,24 @@
             [kotoba.sema :as sema]))
 
 (def authority-grammar-sha256
-  "sha256 of kotoba-lang `lang/guest-grammar.edn` at the 2026-09-03 resync
-  wave. Change it only as part of that wave, in all four repositories."
-  "6e1202fd23bc5a2ed6ef432114585c1813f5143d643eb4c8ee9a00b6e798b922")
+  "sha256 of kotoba-lang `lang/guest-grammar.edn`.
+
+  Advanced 2026-09-03 from `6e1202fd` with the map-literal VALUE type: the
+  authority said the value type was `always :i64` and gave the reason too --
+  \"a literal has no annotation and inference runs after desugaring, so the
+  value half cannot be read off the source\". That is true of an arbitrary
+  value expression and false of a literal one, and this repository's
+  `desugar-map` now reads the value type off the literal's own values. The
+  authority sentence would have been false the moment the frontend landed, so
+  the two move together.
+
+  kotoba-lang moves with this commit. amu and kotoba are BEHIND until each
+  resyncs, and each one's own pin still matches its own copy, so neither goes
+  red on its own main -- but amu's
+  `every-classpath-copy-of-the-grammar-is-the-same-grammar` compares ITS copy
+  against the one in the kotoba-sema it pins, so amu's pin advance and its
+  grammar resync have to be the same commit (amu ADR 0330's postscript)."
+  "871f3873ae30a33ba7461c8664094b42396c0c4d79612668d11b0b29a2c0172f")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

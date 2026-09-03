@@ -39,6 +39,11 @@
             ;; or string key, the order the entry chain is walked in, and the
             ;; byte-identity control on the keyword-keyed literal
             [kotoba.compiler.typed-map-key-types-test]
+            ;; the VALUE half of the same defect: a literal's value type
+            ;; was fixed at `:i64` while the typed-map layer already
+            ;; carried every other one, plus the two float refusals said
+            ;; as two facts and the byte-identity control
+            [kotoba.compiler.typed-map-value-types-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
             [kotoba.compiler.loop-accumulator-type-test]
             ;; conj/disj on a typed set, and a set-item refusal that names
@@ -73,6 +78,7 @@
              'kotoba.compiler.parameter-inference-test
              'kotoba.compiler.rodata-literal-test
              'kotoba.compiler.typed-map-key-types-test
+             'kotoba.compiler.typed-map-value-types-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
              'kotoba.compiler.malformed-type-argument-test)
