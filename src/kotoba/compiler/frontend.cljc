@@ -5157,6 +5157,21 @@
                   x3)))
         ;; Product Value ABI v1: surface aliases that lower to ops already
         ;; qualified on every product backend (wasm / KIR / native string slice).
+        ;; `str` surface alias: 2+ parts lower to the nested `string-concat`
+        ;; already qualified on wasm/KIR/js, so the runtime cost is exactly the
+        ;; cost of hand-writing `(string-concat a b ...)` — no new backend
+        ;; lowering, no new fuel shape. A single string argument is identity.
+        ;; Non-string parts fail closed at type check (`string-concat`
+        ;; requires two :string operands) rather than silently coercing.
+        str
+        (do (when-not (pos? (count args))
+              (reject! "str requires at least one argument" form))
+            (if (= 1 (count args))
+              (desugar-expr (first args))
+              (reduce (fn [acc part]
+                        (list 'string-concat acc part))
+                      (desugar-result-expr :string (first args))
+                      (mapv #(desugar-result-expr :string %) (rest args)))))
         string-length
         (do (when-not (= 1 (count args))
               (reject! "string-length requires one string" form))
