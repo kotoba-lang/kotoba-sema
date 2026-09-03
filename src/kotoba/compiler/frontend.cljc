@@ -3243,16 +3243,73 @@
       (and (seq? form)
            (true? (:kotoba.reader/f64-literal (meta form))))))
 
-(def ^:private map-literal-key-types
-  "The key types a BARE map literal may carry, and the value type each of them
-  gets. A literal has no annotation, so both halves have to be read off the
-  source: the key type from the key literals, and the value type from nowhere
-  at all -- the values are arbitrary expressions whose types are not known
-  until inference, which runs after this. `:i64` is what the keyword-keyed
-  literal has always meant by a value, so that is what the other key types
-  mean by one too. A literal wanting any other value type is written with
-  `typed-map-new`, which says both halves."
-  {:keyword :i64 :i64 :i64 :string :i64})
+(def ^:private map-literal-value-constructors
+  "Canonical constructors that DECLARE the type of the value they build, as
+  their first argument, and the descriptor head each one must produce.
+
+  Every head here is a reserved name (they are unioned into `reserved-names`
+  through `canonical-typed-map-operations`, `typed-set-operations`,
+  `record-operations` and `heterogeneous-vector-operations`), so a user
+  function cannot shadow one and make this read a descriptor off an unrelated
+  call. The descriptor's own head is checked as well, so a malformed first
+  argument falls through to `nil` -- unknown -- rather than becoming a map
+  value type nothing validated."
+  '{typed-map-new :map
+    typed-set-new :set
+    record-new :record
+    hetero-vector-new :vector})
+
+(defn- map-literal-value-type
+  "The value type a literal's VALUE expression determines ON ITS OWN, or `nil`
+  when it is an arbitrary expression whose type only inference can know.
+
+  This is the map-value analogue of `closed-vector-literal-type`, and it is
+  deliberately syntactic: `desugar-map` runs before inference, so the only
+  types available here are the ones the source spells out. Floating literals
+  are recognized so they can be refused BY NAME (see `desugar-map`) rather
+  than reaching the generic arm."
+  [form]
+  (cond
+    (boolean? form) :bool
+    (kotoba-integer? form) :i64
+    (string? form) :string
+    (keyword? form) :keyword
+    (f64-literal-key? form) :f64
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= 'f64-from-bits head) :f64
+        (= 'f32-from-bits head) :f32
+        :else
+        (let [declared (get map-literal-value-constructors head)
+              descriptor (second form)]
+          (when (and declared (vector? descriptor) (seq descriptor)
+                     (= declared (first descriptor)))
+            descriptor))))
+    :else nil))
+
+(defn- map-literal-type-description
+  "A value type said the way the SOURCE says it, for a refusal message --
+  `:string`, not `string`. The refusal names `typed-map-new` as the way to
+  write the map the program wanted, and a reader has to be able to paste the
+  type into it; `(name :string)` would print a descriptor that does not read."
+  [type]
+  (pr-str type))
+
+(defn- map-literal-key-description-for-message
+  "Which ENTRY a refusal is about. A Clojure map literal has no positions, so
+  the entry is named by its key -- which is what the reader wrote, and what
+  the canonical order is keyed on.
+
+  An integer key goes through `str` and not `pr-str`, because a `.kotoba`
+  integer literal is a JS bigint under `:cljs` and `pr-str` renders that as
+  `#object[BigInt 1]`. Measured 2026-09-03: the first draft used `pr-str` for
+  every key, was green on the JVM, and printed `map literal value at key
+  #object[BigInt 1] ...` under nbb -- the SAME refusal saying two different
+  things on the two runtimes this file claims. A string key keeps `pr-str`,
+  which is what puts the quotes on."
+  [key]
+  (if (kotoba-integer? key) (str key) (pr-str key)))
 
 (defn- map-literal-key-kind [key]
   (cond (keyword? key) :keyword
@@ -3281,6 +3338,80 @@
         (nil? key) "nil"
         :else "unrecognized"))
 
+(defn- map-literal-item-type
+  "The VALUE type of a bounded map literal, read off its own value expressions.
+
+  A literal carries no annotation, so this is the only place the value half
+  can come from. Every value whose type the source spells out has to agree on
+  ONE type; values whose type only inference can know (an ordinary call, a
+  local, an arithmetic form) contribute nothing here and are checked against
+  the agreed type afterwards, exactly as they were checked against `:i64`
+  before. A literal with no typed value at all keeps `:i64`, so an all-unknown
+  literal lowers to the descriptor it always lowered to.
+
+  Three refusals happen here rather than downstream, because downstream has
+  only a type mismatch to report and this has the reason:
+
+  * a FLOATING value, refused on the structured scalar ABI. This is NOT the
+    floating-KEY refusal wearing a different hat. A key needs a total order
+    and a decidable identity, and a float has neither; a value needs neither,
+    and is refused only because `[:map K :f64]` has no encoding --
+    `kotoba.kir.value/validate-value-type!` throws
+    \"direct floating map keys or values are outside the structured scalar
+    ABI\" for it, measured. The two facts are said as two messages.
+  * DISAGREEING value types, naming both types and both entries.
+  * a non-`:i64` literal value under KEYWORD keys, which keep the legacy
+    untagged pair map (see `desugar-map`) and therefore do not get an inferred
+    value type at all."
+  [kind entries]
+  (let [typed (vec (keep (fn [[k v]]
+                           (when-let [t (map-literal-value-type v)] [k t]))
+                         entries))
+        floating (first (filter (fn [[_ t]] (contains? #{:f32 :f64} t)) typed))]
+    (when floating
+      (let [[k t] floating]
+        (reject! (str "map literal value at key "
+                      (map-literal-key-description-for-message k)
+                      " is a floating point literal: map value type " t
+                      " is outside the structured scalar ABI. This is the "
+                      "ABI's refusal and not the floating-key one -- a value "
+                      "needs neither a total order nor a decidable identity, "
+                      "and is refused because the typed map's value slot has "
+                      "no floating encoding")
+                 entries :kotoba.error/floating-map-kv)))
+    (if (= :keyword kind)
+      (do (when-let [[k t] (first (remove (fn [[_ t]] (= :i64 t)) typed))]
+            (reject! (str "map literal with keyword keys carries i64 values; "
+                          "the value at key "
+                          (map-literal-key-description-for-message k) " is "
+                          (map-literal-type-description t)
+                          ". A keyword-keyed literal lowers to the legacy "
+                          "untagged pair map that `map-get`, `map-assoc` and "
+                          "every `match` map pattern are written against, so "
+                          "its value type is not inferred; write "
+                          "(typed-map-new [:map :keyword "
+                          (map-literal-type-description t)
+                          "] ...) for a typed map with keyword keys")
+                     entries :kotoba.error/map-literal-value))
+          :i64)
+      (if-let [[first-key first-type] (first typed)]
+        ;; `=` rather than `distinct`: a value type may be a descriptor
+        ;; vector, and hashing is not something both runtimes agree on for
+        ;; every literal shape (`run-tests.cljs` records the `desugar-case`
+        ;; bigint hashing defect that taught this).
+        (if-let [[other-key other-type]
+                 (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
+          (reject! (str "map literal values must all be one type; the value "
+                        "at key "
+                        (map-literal-key-description-for-message first-key)
+                        " is " (map-literal-type-description first-type)
+                        " and the value at key "
+                        (map-literal-key-description-for-message other-key)
+                        " is " (map-literal-type-description other-type))
+                   entries :kotoba.error/map-literal-value)
+          first-type)
+        :i64))))
+
 (defn- desugar-map
   "Lower a bounded literal into an owned map KIR operation.
 
@@ -3293,6 +3424,22 @@
   `kotoba-lang`'s stdlib recorded `frequencies` and `get-in` as unwritable for
   exactly that reason, even though `typed-map-new` had been generic in its key
   type the whole time -- the refusal was in the LITERAL, not in the map.
+
+  The VALUE half was the same defect one layer over. It was fixed at `:i64`
+  here, so `{1 \"a\"}` was refused with `expression type mismatch: expected
+  i64, got string` -- a generic type error on a program that reads correct --
+  while `(typed-map-new [:map :i64 :string] 1 \"a\")` had worked the whole time.
+  Measured 2026-09-03 on sema df383ba0: the canonical surface already carried
+  `:string`, `:bool`, `:keyword`, record, nested-map, heterogeneous-vector and
+  typed-set values through `typed-map-new`, `typed-map-get`, `assoc`,
+  `dissoc`, `contains?` and `typed-map-entry-at`, and
+  `kotoba.kir.value/bounded-typed-value!` validated every one of them. Only
+  the literal was pinned. `map-literal-item-type` now reads the value type off
+  the literal's own value expressions.
+
+  KEYWORD keys do not get that: their literal stays the legacy pair map, whose
+  values are i64, so a keyword-keyed literal with a non-i64 literal value is
+  refused BY NAME and pointed at `typed-map-new`.
 
   Entries are emitted in the key type's total order (`compare-typed-values` in
   `kotoba.kir.value` is the same order the runtime keeps the entry chain in),
@@ -3326,8 +3473,8 @@
 
       :else
       (let [kind (or (first kinds) :keyword)
-            item-type (get map-literal-key-types kind)
             entries (sort-by key (map-literal-key-order kind) form)
+            item-type (map-literal-item-type kind entries)
             pairs (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)]
         (if (= :keyword kind)
           (apply list 'map-new pairs)
@@ -8849,10 +8996,20 @@
                                                               locals signatures)
                                        (catch #?(:clj Exception :cljs :default) _ nil))]
                               (when (contains? #{:i64 :string} key-type) key-type)))
+              ;; The VALUE half of the retype. This pass runs AFTER
+              ;; desugaring, so unlike `desugar-map` it can ask inference
+              ;; rather than reading literals, and `(assoc {} 1 "a")` gets
+              ;; `[:map :i64 :string]` for the same reason `{1 "a"}` does.
+              ;; `:i64` when inference cannot answer -- the descriptor this
+              ;; site has always built.
+              retyped-item (when retyped-key
+                             (or (try (infer-expression-type (second pairs)
+                                                             locals signatures)
+                                      (catch #?(:clj Exception :cljs :default) _ nil))
+                                 :i64))
               descriptor (cond
                            (canonical-typed-map-type? value-type) value-type
-                           retyped-key [:map retyped-key
-                                        (get map-literal-key-types retyped-key)]
+                           retyped-key [:map retyped-key retyped-item]
                            :else nil)]
           (if descriptor
             (reduce (fn [accumulated [key item]]
