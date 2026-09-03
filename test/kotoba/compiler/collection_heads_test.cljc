@@ -142,10 +142,9 @@
     (let [r (refusal "(count {:a 1})")]
       (is (= :kotoba.error/count-receiver (:code r)))
       (is (re-find #"get and assoc" (:message r)))))
-  (testing "a canonical [:list T], which has a constructor and no accessor"
-    (let [r (refusal "(count (typed-list-new [:list :i64] 1 2))")]
-      (is (= :kotoba.error/count-receiver (:code r)))
-      (is (re-find #"typed-list-new" (:message r)))))
+  ;; A canonical [:list T] was refused here until the collection primitives
+  ;; landed later the same day. It is not a refusal any more --
+  ;; `count-and-nth-now-reach-a-canonical-list` below is the value it has.
   (testing "and an i64, which is no collection at all"
     (is (= :kotoba.error/count-receiver (:code (refusal "(count 1)")))))
   (testing "arity"
@@ -240,14 +239,43 @@
   ;; rewritten out from under it silently.
   (is (= "reserved function name" (definition-refusal "count"))))
 
-(deftest the-heads-that-gained-no-lowering-are-deliberately-not-reserved
-  ;; `peek`, `pop`, `keys` and `vals` are declared admitted by the language
-  ;; authority and implemented by nothing -- there is no `vector-pop`, no
-  ;; `typed-map-keys`, and Clojure's `peek`/`pop` on a vector take from the
-  ;; END, which `vector-drop` (a front drop) cannot express. `seq` and `last`
-  ;; are not declared by any authority at all. Taking those names away without
-  ;; implementing them would be a regression, so this pins the direction:
-  ;; a program may still define them.
-  (doseq [head ["peek" "pop" "keys" "vals" "seq" "last"]]
+(deftest the-heads-no-authority-claims-are-still-not-reserved
+  ;; This assertion was written on 2026-09-03 over `peek`, `pop`, `keys`,
+  ;; `vals`, `seq` and `last`, for a reason that was right for all six on that
+  ;; morning: taking a name away without implementing it is a regression, not
+  ;; a protection.
+  ;;
+  ;; Four of the six no longer belong to it. `peek`, `pop`, `keys` and `vals`
+  ;; gained lowerings later the same day -- `vector-take`, `vector-f64-take`,
+  ;; `typed-list-nth`, `typed-map-keys` and `typed-map-vals` in kotoba-kir --
+  ;; and a head with a rewrite MUST be reserved, because the rewrite
+  ;; dispatches on the name before signatures are consulted. They moved to
+  ;; `kotoba.compiler.vector-end-and-map-projection-test`, which pins both
+  ;; directions there.
+  ;;
+  ;; `seq` and `last` stay here unchanged: no authority claims them, nothing
+  ;; implements them, and the original reason still holds.
+  (doseq [head ["seq" "last"]]
     (is (nil? (definition-refusal head))
         (str "(defn " head " ...) must remain a name a program may define"))))
+
+(deftest the-heads-that-gained-a-lowering-are-no-longer-definable
+  ;; The turn-around, asserted here as well as in the new namespace, so that
+  ;; deleting this file's stale expectation cannot be mistaken for deleting
+  ;; the check.
+  (doseq [head ["peek" "pop" "keys" "vals"]]
+    (is (= "reserved function name" (definition-refusal head)))))
+
+;; --- the refusals this file recorded that are now answers ------------------
+
+(deftest count-and-nth-now-reach-a-canonical-list
+  ;; `count-refuses-a-receiver-with-no-count-and-says-what-to-write` above
+  ;; asserted that `(count (typed-list-new [:list :i64] 1 2))` was refused,
+  ;; naming `typed-list-new` as the type's only primitive. That was the
+  ;; measurement of the morning and is no longer true in either half:
+  ;; `vector-count` was ALREADY walking the list carrier -- measured, for any
+  ;; item type -- so only the dispatch was missing, and `typed-list-nth`
+  ;; closed the indexing half. The assertion above is updated rather than
+  ;; deleted; this is the value it now has.
+  (is (= 2 (i64 "(count (typed-list-new [:list :i64] 1 2))")))
+  (is (= 8 (i64 "(nth (typed-list-new [:list :i64] 7 8) 1)"))))
