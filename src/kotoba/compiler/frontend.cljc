@@ -72,7 +72,11 @@
     ;; into it.
     :stream/accept 25 :stream/send 26
     :net/datagram 27 :link/frame 28 :can/frame 29
-    :code/eval 30})
+    :code/eval 30
+    ;; Screen surface kit (kotoba-lang/screen, ADR-2609031100): observing a
+    ;; screen and acting on it are separate authorities -- seeing is not
+    ;; permission to press.
+    :screen/observe 31 :screen/act 32})
 
 (defn- load-capability-catalog []
   #?(:clj
