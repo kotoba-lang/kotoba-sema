@@ -4615,6 +4615,16 @@
                  (list '> (desugar-expr (first args)) 0))
         neg? (do (when-not (= 1 (count args)) (reject! "neg? requires one operand" form))
                  (list '< (desugar-expr (first args)) 0))
+        ;; min 2-arity surface alias: pure desugar to `if`/`<`, so the KIR is
+        ;; identical to the hand-written form and no new backend lowering is
+        ;; introduced. Other arities fail closed with min's own name in the
+        ;; diagnostic rather than delegating a wrong shape.
+        min (do (when-not (= 2 (count args))
+                  (reject! "min requires exactly two operands" form))
+                (list 'if (list '< (desugar-expr (first args))
+                                   (desugar-expr (second args)))
+                      (desugar-expr (first args))
+                      (desugar-expr (second args))))
         = (if (= 2 (count args))
             (list '= (desugar-expr (first args)) (desugar-expr (second args)))
             (desugar-comparison-chain '= args form))
