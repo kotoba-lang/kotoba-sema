@@ -978,6 +978,7 @@
     string-contains? #{0 1}
     string-split-count #{0 1}
     string-fold-case #{0}
+    string-upper #{0}
     string-code-point-at #{0}
     keyword-from-string #{0}
     symbol #{0}
@@ -1082,7 +1083,7 @@
                          http-response-status 1 log-read-byte-count 1
                          string=? 2 string-concat 2 string-substring 3
                          string-replace-all 3 string-contains? 2 string-split-count 2
-                         string-fold-case 1
+                         string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
 (def xml-operations
@@ -7564,6 +7565,9 @@
           :i64)
 
       (= op 'string-fold-case)
+      (do (require-expression-type! (first types) :string (first args)) :string)
+
+      (= op 'string-upper)
       (do (require-expression-type! (first types) :string (first args)) :string)
 
       (= op 'keyword-from-string)
