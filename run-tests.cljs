@@ -71,7 +71,9 @@
             [kotoba.compiler.malformed-definition-form-test]
             ;; the dual of the one above: a declaration that compiled and was
             ;; then silently dropped
-            [kotoba.compiler.dropped-declaration-form-test]))
+            [kotoba.compiler.dropped-declaration-form-test]
+            ;; string-upper: the mirror of string-fold-case at the type rule
+            [kotoba.compiler.string-upper-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -102,4 +104,5 @@
              'kotoba.compiler.vector-end-and-map-projection-test
              'kotoba.compiler.malformed-type-argument-test
              'kotoba.compiler.malformed-definition-form-test
-             'kotoba.compiler.dropped-declaration-form-test)
+             'kotoba.compiler.dropped-declaration-form-test
+             'kotoba.compiler.string-upper-test)
