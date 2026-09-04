@@ -78,10 +78,96 @@
                             {:end-offset (:position end)}))
     value))
 
-(declare read-form)
-
 (defn- reject! [message data]
   (throw (ex-info message (merge {:phase :read} data))))
+
+(declare read-form read-delimited)
+
+(defn- fn-shorthand-arg-num
+  "Returns the positional arg number of `%`/`%N`, or nil if X is not one."
+  [x]
+  (when (and (symbol? x) (not (namespace x)))
+    (let [n (name x)]
+      (cond
+        (= n "%") 1
+        (re-matches #"%[0-9]+" n)
+        (let [v (js/parseInt (subs n 1) 10)]
+          (when-not (pos? v)
+            (reject! "fn shorthand arg must be %1 or higher" {:token n}))
+          v)))))
+
+(defn- rewrite-fn-shorthand
+  "Rewrites `%`/`%N` symbols against PARAMS (a map N -> param symbol)."
+  [params x]
+  (cond
+    (fn-shorthand-arg-num x)
+    (let [num (fn-shorthand-arg-num x)]
+      (when-not (contains? params num)
+        (reject! (str "%" num " exceeds the shorthand's arg count") {:arg num}))
+      (get params num))
+
+    (seq? x) (apply list (mapv #(rewrite-fn-shorthand params %) x))
+    (vector? x) (mapv #(rewrite-fn-shorthand params %) x)
+    (map? x) (into {} (map (fn [[k v]]
+                             [(rewrite-fn-shorthand params k)
+                              (rewrite-fn-shorthand params v)]))
+                   x)
+    :else x))
+
+(defn- read-fn-shorthand
+  "Reads `#(body...)` as `(fn [p1 p2 ...] (do body...))` -- minimal Clojure
+  `#()` surface sugar. Supports `%` (arg 1) and `%N` (arg N, sparse OK:
+  params only up to the highest N used). `%&` rest args are rejected
+  fail-closed: the admission-gated inline-lambda grammar has no rest-arg
+  shape, so admitting one here would only move the rejection into
+  synthesized code. Empty body is rejected. Zero new backend lowering: the
+  frontend's `(fn ...)` + `(do ...)` lowerings (qualified in the
+  mapv/filterv iteration and by the existing `do` head) do the rest.
+
+  The `do` wrapper is UNCONDITIONAL, even for a single body form: a 1-form
+  `(do X)` collapses to X in the existing `do` desugar, so the KIR matches a
+  hand-written single-expression `(fn ...)`.
+
+  Meta: the synthesized `fn`/`params`/`do` levels carry the `#` position's
+  location plus `:end-offset` at the closing paren, mirroring what
+  `located` attaches to a reader-read collection (`:end-offset` included --
+  measured: a synthesized level WITHOUT `:end-offset` made loop typing read
+  the shorthand's exits as `:i64` while the hand-written form typed as
+  `:vector-i64`, so meta shape is load-bearing, not cosmetic)."
+  [st]
+  (let [st-open (advance (advance st)) ; consume `#` and `(`
+        [st forms] (read-delimited st-open \))]
+    (when (empty? forms)
+      (reject! "#() shorthand requires a body" {}))
+    (when (some #(and (symbol? %) (not (namespace %)) (= "%&" (name %)))
+                (tree-seq coll? seq forms))
+      (reject! "%& rest args are not admitted in #() shorthand" {}))
+    (let [nums (->> (tree-seq coll? seq forms)
+                    (keep fn-shorthand-arg-num)
+                    distinct
+                    sort)
+          n (or (last nums) 0)
+          params (vec (map #(symbol (str "p" %))
+                           (range 1 (inc n))))
+          param-map (zipmap (range 1 (inc n)) params)
+          body-forms (mapv #(rewrite-fn-shorthand param-map %) forms)
+          start-meta (source-location st-open)
+          end-meta (merge (source-location st-open)
+                          {:end-offset (:position st)})]
+      [st (with-meta
+            (list 'fn
+                  (with-meta params start-meta)
+                  ;; Clojure `#()` semantics: the forms inside are the
+                  ;; arguments of ONE call form -- `#(* % 2)` is
+                  ;; `(fn [%1] (* %1 2))`, NOT `(fn [%1] (do * %1 2))`.
+                  ;; `(first forms)` is the callee; the rest are its
+                  ;; arguments. (Measured: treating the contents as `do`
+                  ;; siblings typed the map loop's exit `:i64` and rejected
+                  ;; with loop-result-type; one call form matches the
+                  ;; hand-written `(fn [p1] (* p1 2))` KIR.)
+                  (with-meta (cons (first body-forms) (rest body-forms))
+                             end-meta))
+            end-meta)])))
 
 (defn- skip-ws+comments [st]
   (loop [st st]
@@ -247,6 +333,7 @@
       (= ch \#)
       (let [ch2 (peek-ch2 st)]
         (cond
+          (= ch2 \() (read-fn-shorthand st)
           (= ch2 \{) (let [[st forms] (read-delimited (advance (advance st)) \})]
                        [st (located (set forms) start st) false])
           (= ch2 \?) (let [st (advance (advance st))

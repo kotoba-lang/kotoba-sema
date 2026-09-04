@@ -49,6 +49,9 @@
             ;; a declared type of the wrong SHAPE is refused, not crashed --
             ;; and 42 of the 76 programs that crashed did so only under nbb,
             ;; because ClojureScript hashes a bigint to answer `contains?`
+            ;; the JVM-free reader's `#()` fn shorthand (lang-cosientist
+            ;; iteration 3): one call form, fail-closed rest/empty
+            [kotoba.compiler.kotoba-reader-test]
             [kotoba.compiler.malformed-type-argument-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
@@ -75,4 +78,5 @@
              'kotoba.compiler.typed-map-key-types-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
+             'kotoba.compiler.kotoba-reader-test
              'kotoba.compiler.malformed-type-argument-test)
