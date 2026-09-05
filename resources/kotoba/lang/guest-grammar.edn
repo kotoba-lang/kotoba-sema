@@ -800,3 +800,5 @@
               "F-007 release evidence gate"]
   :this-slice ["package registry resolve (name@version → CID lock)"]
   :next ["selfhost analyzer authority shift" "network package registry backend"]}}
+  {:desugars-to "keyword keys: pair cons-list of pairs (map-new, byte for byte what it always was); :i64 and :string keys: canonical typed map (typed-map-new [:map K :i64])"
+    :value-type "always :i64. A literal has no annotation and inference runs after desugaring, so the value half cannot be read off the source; typed-map-new is the spelling that says both halves"
