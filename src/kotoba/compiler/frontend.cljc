@@ -5660,6 +5660,37 @@
         (do (when-not (= 2 (count args))
               (reject! "filterv requires pred and one vector-i64 collection" form))
             (desugar-expr (with-meta (cons 'filter args) (meta form))))
+        ;; seq/remove surface aliases: `seq` on an eager bounded vector-i64 is
+        ;; the identity (the T4.5 lowerings already consume eager vectors), and
+        ;; `remove` is `filter` with the predicate negated via the existing
+        ;; `not` desugar. Both are pure surface sugar — same lowering, same KIR
+        ;; CIDs as the hand-written expansions, zero new backend work. Arity and
+        ;; pred shape are validated here first so the alias fails closed with
+        ;; its own name in the diagnostic rather than delegating a wrong shape.
+        seq
+        (do (when-not (= 1 (count args))
+              (reject! "seq requires exactly one vector-i64 collection" form))
+            (desugar-expr (with-meta (first args) (meta form))))
+        remove
+        (do (when-not (= 2 (count args))
+              (reject! "remove requires pred and one vector-i64 collection" form))
+            (let [[p-form coll-form] args
+                  wrapped
+                  (cond
+                    (and (seq? p-form) (= 'fn (first p-form)))
+                    (let [[_ params & body] p-form]
+                      (when-not (and (vector? params) (= 1 (count params))
+                                     (every? symbol? params)
+                                     (= 1 (count body)))
+                        (reject! "remove pred must be (fn [x] single-expr)" p-form))
+                      (list 'fn params (list 'not (first body))))
+
+                    (symbol? p-form)
+                    (list 'fn '[x] (list 'not (list p-form 'x)))
+
+                    :else
+                    (reject! "remove pred must be a named function or (fn [x] single-expr)" p-form))]
+              (desugar-expr (with-meta (list 'filter wrapped coll-form) (meta form)))))
         map
         (do
           (when-not (<= 2 (count args) 6)
