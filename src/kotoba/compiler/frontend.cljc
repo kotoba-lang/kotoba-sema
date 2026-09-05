@@ -3205,9 +3205,12 @@
   ;; admitted plain ops `option-some?` / `option-value` (not the -of family,
   ;; which previously desugared into a then/else type mismatch on every input).
   (letfn [(lower [option-form steps]
-            (let [tmp (if *loop-counter*
-                        (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
-                        (synthetic "some-thread"))
+            ;; Iteration 15 canonicalization: one deterministic synthetic temp
+            ;; (`synthetic "some-thread"`) for every spelling, like binding-some.
+            ;; The previous mix of `some-thread__N` (*loop-counter*-derived)
+            ;; inside analyze and gensym outside made equivalent spellings
+            ;; desugar to different KIR (iter 14 determinism defect).
+            (let [tmp (synthetic "some-thread")
                   option-type (or (resolve-option-type option-form) [:option :i64])
                   payload-type (when (and (vector? option-type) (= :option (first option-type)))
                                  (second option-type))
