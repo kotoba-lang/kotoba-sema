@@ -802,3 +802,10 @@
   :next ["selfhost analyzer authority shift" "network package registry backend"]}}
   {:desugars-to "keyword keys: pair cons-list of pairs (map-new, byte for byte what it always was); :i64 and :string keys: canonical typed map (typed-map-new [:map K :i64])"
     :value-type "always :i64. A literal has no annotation and inference runs after desugaring, so the value half cannot be read off the source; typed-map-new is the spelling that says both halves"
+ {:sequences #{let when when-not when-let when-some if-let if-some doseq dotimes}
+  :note "`:sequences` collapse to `do`; `:refuses` take exactly one body expression and say so. Nothing truncates. Measured 2026-09-02: `let` was in neither set -- it accepted several forms and kept the first."}
+  :map-literal {:desugars-to "pair cons-list of pairs" :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}}
+  :contains? {:desugars-to "bounded set membership scan" :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}}
+  :dissoc {:desugars-to "persistent bounded map filter" :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}}
+   locking dosync atom ref reset! swap! volatile! binding var}
+   "kernel-load-u8" "kernel-store-u8" "kernel-boot-info"
