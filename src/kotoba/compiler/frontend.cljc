@@ -82,7 +82,11 @@
     ;; already implements (runtime ids 258 env/read / 253 fs/browse in
     ;; kotoba-core-contracts — distinct id space; the kbb host maps
     ;; wire id -> runtime op).
-    :env/read 33 :fs/browse 34})
+    :env/read 33 :fs/browse 34
+    ;; fs/app-data (runtime id 202): sandboxed read/write on the
+    ;; granted path scope — wire id 35 for the native loader provider
+    ;; table (ADR-2609051100 slice 4).
+    :fs/app-data 35})
 
 (defn- load-capability-catalog []
   #?(:clj
