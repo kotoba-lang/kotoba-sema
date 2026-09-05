@@ -5469,6 +5469,21 @@
                   x3)))
         ;; Product Value ABI v1: surface aliases that lower to ops already
         ;; qualified on every product backend (wasm / KIR / native string slice).
+        ;; `str` surface alias: 2+ parts lower to the nested `string-concat`
+        ;; already qualified on wasm/KIR/js, so the runtime cost is exactly the
+        ;; cost of hand-writing `(string-concat a b ...)` — no new backend
+        ;; lowering, no new fuel shape. A single string argument is identity.
+        ;; Non-string parts fail closed at type check (`string-concat`
+        ;; requires two :string operands) rather than silently coercing.
+        str
+        (do (when-not (pos? (count args))
+              (reject! "str requires at least one argument" form))
+            (if (= 1 (count args))
+              (desugar-expr (first args))
+              (reduce (fn [acc part]
+                        (list 'string-concat acc part))
+                      (desugar-result-expr :string (first args))
+                      (mapv #(desugar-result-expr :string %) (rest args)))))
         string-length
         (do (when-not (= 1 (count args))
               (reject! "string-length requires one string" form))
@@ -5632,6 +5647,19 @@
         ;; sources stay direct for stable KIR; three-to-five source handles
         ;; share one typed heterogeneous-vector state value, so synthesized
         ;; loop helpers stay inside the five-word ABI even with a callback.
+        ;; mapv/filterv surface aliases: the T4.5 map/filter lowerings already
+        ;; return eager bounded vector-i64 results, so mapv/filterv are pure
+        ;; surface sugar — same lowering, same KIR CIDs, zero new backend work.
+        ;; Arity is validated here first so the alias fails closed with its own
+        ;; name in the diagnostic rather than delegating a wrong shape.
+        mapv
+        (do (when-not (<= 2 (count args) 6)
+              (reject! "mapv requires a callback and one to five vector-i64 collections" form))
+            (desugar-expr (with-meta (cons 'map args) (meta form))))
+        filterv
+        (do (when-not (= 2 (count args))
+              (reject! "filterv requires pred and one vector-i64 collection" form))
+            (desugar-expr (with-meta (cons 'filter args) (meta form))))
         map
         (do
           (when-not (<= 2 (count args) 6)
