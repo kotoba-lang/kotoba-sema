@@ -3196,22 +3196,30 @@
 (defn- desugar-some-thread [args form last?]
   (when (empty? args)
     (reject! (if last? "some->> requires an initial option" "some-> requires an initial option") form))
+  (when (< (count args) 2)
+    (reject! (if last? "some->> requires an initial option and at least one step"
+                        "some-> requires an initial option and at least one step") form))
+  ;; Payload-drop thread (Clojure `some->` semantics): the some path returns
+  ;; the threaded payload value and the none path returns a payload-typed
+  ;; bottom, so then/else share one type and 1-step threads admit. Uses the
+  ;; admitted plain ops `option-some?` / `option-value` (not the -of family,
+  ;; which previously desugared into a then/else type mismatch on every input).
   (letfn [(lower [option-form steps]
-            (if (empty? steps)
-              (desugar-expr option-form)
-              (let [tmp (if *loop-counter*
-                          (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
-                          (synthetic "some-thread"))
-                    option-type (or (resolve-option-type option-form) [:option :i64])
-                    payload-type (when (and (vector? option-type) (= :option (first option-type)))
-                                   (second option-type))
-                    payload (list 'option-value-of option-type tmp
-                                  (option-payload-fallback payload-type))
-                    threaded (thread-form payload (first steps) last?)]
-                (list 'let [tmp (desugar-expr option-form)]
-                      (list 'if (list 'option-some?-of option-type tmp)
-                            (lower threaded (rest steps))
-                            (list 'option-none-of option-type))))))]
+            (let [tmp (if *loop-counter*
+                        (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
+                        (synthetic "some-thread"))
+                  option-type (or (resolve-option-type option-form) [:option :i64])
+                  payload-type (when (and (vector? option-type) (= :option (first option-type)))
+                                 (second option-type))
+                  payload (list 'option-value tmp (option-payload-fallback payload-type))
+                  threaded (thread-form payload (first steps) last?)
+                  then-expr (if (= 1 (count steps))
+                              (desugar-expr threaded)
+                              (lower threaded (rest steps)))]
+              (list 'let [tmp (desugar-expr option-form)]
+                    (list 'if (list 'option-some? tmp)
+                          then-expr
+                          (option-payload-fallback payload-type)))))]
     (lower (first args) (rest args))))
 
 (defn- desugar-binding-if [args form when?]
