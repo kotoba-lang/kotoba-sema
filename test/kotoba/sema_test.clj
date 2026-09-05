@@ -215,8 +215,27 @@
            (set (vals sema/source-operation-registry))))
     ;; The assertion is contiguity, not a fixed ceiling -- it moves when the
     ;; registry legitimately grows and fails when a gap is left.
-    (is (= (range 1 31) (sort (vals sema/capability-registry)))
-        "wire ids stay contiguous from 1; a gap means named source will reject")))
+    ;;
+    ;; It said that and did not do it. `(range 1 31)` IS a fixed ceiling: the
+    ;; catalog grew to 32 wire ids and this went red for the one reason the
+    ;; comment promised it would not -- legitimate growth. Measured 2026-09-03.
+    ;; Written against the registry's own size, it now moves with growth and
+    ;; still fails on a gap, a duplicate, or an id that does not start at 1.
+    ;; The floor is what keeps an emptied registry from passing vacuously.
+    (let [ids (sort (vals sema/capability-registry))]
+      ;; The floor said "the ids this suite names by hand" and was 24, while
+      ;; `typed-eval-is-catalogued-and-contextually-typed` below names 30. The
+      ;; message was therefore stronger than the number: a registry that lost
+      ;; :code/eval would clear this floor and be caught only by that other
+      ;; test. Raised to 30 on 2026-09-03 so the number says what the message
+      ;; does. It is a floor, not a ceiling -- the registry is at 32 since
+      ;; :screen/observe and :screen/act were promoted into the authority
+      ;; (ADR-2609031100), and growth is what the contiguity check below is
+      ;; written against.
+      (is (<= 30 (count ids))
+          "the registry must not shrink below the ids this suite names by hand")
+      (is (= (range 1 (inc (count ids))) ids)
+          "wire ids stay contiguous from 1; a gap means named source will reject"))))
 
 (deftest typed-eval-is-catalogued-and-contextually-typed
   (is (= 30 (get sema/capability-registry :code/eval)))
@@ -332,10 +351,29 @@
         {:language-profile :pure-product}))))
 
 (deftest cljs-fallback-is-kept-in-lockstep-with-catalog
-  "CLJS cannot read the classpath resource; forgetting the fallback
-   silently drops named dataspace/transact on that backend."
-  (let [src (slurp (io/file "src/kotoba/compiler/frontend.cljc"))]
-    (is (re-find #":dataspace/transact 24" src)
+  "CLJS cannot read the classpath resource, so the fallback map IS the catalog
+   on that backend -- and on amu's JDK-free nbb route, which is the one most
+   guests are compiled through. Forgetting it drops a capability there while
+   every JVM test stays green.
+
+   This grepped the source text for the single line `:dataspace/transact 24`.
+   A test that names one entry cannot see the others, and on 2026-09-03 that
+   showed: kotoba-sema c823461 moved the fallback and the vendored catalog
+   together to wire ids 31 and 32 while the AUTHORITY named neither, and the
+   only check standing over the pair asked about 24. It compares the whole map
+   to the resource now, in both directions, so a name or an id added to one
+   and not the other is a failure rather than a grep that still passes."
+  (let [fallback @(resolve 'kotoba.compiler.frontend/capability-registry-cljs-fallback)
+        catalog (edn/read-string
+                 (slurp (io/resource "kotoba/lang/capability-catalog.edn")))
+        from-catalog (into {} (map (fn [[k e]] [k (:compiler-wire-id e)]))
+                           (:capabilities catalog))]
+    (is (pos? (count fallback)) "the fallback map must not be empty")
+    (is (= (set (keys from-catalog)) (set (keys fallback)))
+        "every catalogued capability is in the CLJS fallback, and no others")
+    (is (= from-catalog fallback)
+        "the CLJS fallback and the catalog resource agree on every wire id")
+    (is (= 24 (get fallback :dataspace/transact))
         "capability-registry-cljs-fallback must include wire id 24")))
 
 (deftest undeclared-dataspace-capability-is-rejected

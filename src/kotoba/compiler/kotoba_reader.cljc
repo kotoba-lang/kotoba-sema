@@ -91,7 +91,7 @@
       (cond
         (= n "%") 1
         (re-matches #"%[0-9]+" n)
-        (let [v (js/parseInt (subs n 1) 10)]
+        (let [v #?(:clj (Long/parseLong (subs n 1) 10) :cljs (js/parseInt (subs n 1) 10))]
           (when-not (pos? v)
             (reject! "fn shorthand arg must be %1 or higher" {:token n}))
           v)))))

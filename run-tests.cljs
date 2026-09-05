@@ -39,6 +39,11 @@
             ;; or string key, the order the entry chain is walked in, and the
             ;; byte-identity control on the keyword-keyed literal
             [kotoba.compiler.typed-map-key-types-test]
+            ;; the VALUE half of the same defect: a literal's value type
+            ;; was fixed at `:i64` while the typed-map layer already
+            ;; carried every other one, plus the two float refusals said
+            ;; as two facts and the byte-identity control
+            [kotoba.compiler.typed-map-value-types-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
             [kotoba.compiler.loop-accumulator-type-test]
             ;; conj/disj on a typed set, and a set-item refusal that names
@@ -46,13 +51,32 @@
             ;; nbb half had never run -- and a suite that does not run a file
             ;; reports the same clean answer as one that runs it and passes.
             [kotoba.compiler.set-operations-test]
+            ;; `count` on every collection that has a count primitive, and the
+            ;; pair accessors reaching a bounded vector -- the heads the
+            ;; language authority declared on three backends and nothing
+            ;; implemented. The `case` this adds to inference dispatches on
+            ;; `[op value-type]`, and ClojureScript is where a `case` over
+            ;; composite constants has broken before, so it belongs here.
+            [kotoba.compiler.collection-heads-test]
+            ;; peek/pop from the END of a bounded vector, keys/vals off a
+            ;; canonical typed map, and count/nth reaching a [:list T]
+            [kotoba.compiler.vector-end-and-map-projection-test]
             ;; a declared type of the wrong SHAPE is refused, not crashed --
             ;; and 42 of the 76 programs that crashed did so only under nbb,
             ;; because ClojureScript hashes a bigint to answer `contains?`
             ;; the JVM-free reader's `#()` fn shorthand (lang-cosientist
             ;; iteration 3): one call form, fail-closed rest/empty
             [kotoba.compiler.kotoba-reader-test]
-            [kotoba.compiler.malformed-type-argument-test]))
+            [kotoba.compiler.malformed-type-argument-test]
+            ;; a malformed top-level DECLARATION is refused, not crashed --
+            ;; fifteen spellings of a non-symbol in a `defn` name position
+            ;; reached `(name source-name)` and raised a raw host error
+            [kotoba.compiler.malformed-definition-form-test]
+            ;; the dual of the one above: a declaration that compiled and was
+            ;; then silently dropped
+            [kotoba.compiler.dropped-declaration-form-test]
+            ;; string-upper: the mirror of string-fold-case at the type rule
+            [kotoba.compiler.string-upper-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -76,7 +100,13 @@
              'kotoba.compiler.parameter-inference-test
              'kotoba.compiler.rodata-literal-test
              'kotoba.compiler.typed-map-key-types-test
+             'kotoba.compiler.typed-map-value-types-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
+             'kotoba.compiler.collection-heads-test
+             'kotoba.compiler.vector-end-and-map-projection-test
              'kotoba.compiler.kotoba-reader-test
-             'kotoba.compiler.malformed-type-argument-test)
+             'kotoba.compiler.malformed-type-argument-test
+             'kotoba.compiler.malformed-definition-form-test
+             'kotoba.compiler.dropped-declaration-form-test
+             'kotoba.compiler.string-upper-test)

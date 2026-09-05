@@ -9,7 +9,15 @@
          :git/sha "ac8e70514ee3c9b87ae71324e6e714447acc971c"}
         io.github.kotoba-lang/kotoba-kir
         {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
-         :git/sha "d8b0e679c2b3b23f98542c537e5c29df0e587a3a"}}
+         ;; b021a0d1: the five collection primitives the friendly heads in
+         ;; this repository had nothing to lower to -- `vector-take` and
+         ;; `vector-f64-take` (the rear truncation `pop` needs; `vector-drop`
+         ;; drops from the FRONT), `typed-list-nth` (the `[:list T]` accessor
+         ;; `keys`/`vals` need, since their projection IS a list), and
+         ;; `typed-map-keys` / `typed-map-vals`. Without this pin `peek`,
+         ;; `pop`, `keys` and `vals` trap `:unknown-function` at execution
+         ;; even though they are admitted.
+         :git/sha "b021a0d179fb983e8ad7da702252cfa764cd2fc2"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner

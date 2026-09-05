@@ -8,8 +8,10 @@
   (:require [clojure.test :as t :refer [deftest is]]
             [kotoba.compiler.kotoba-reader :as r]))
 
-(def ^:private two (js/BigInt "2"))
-(def ^:private one (js/BigInt "1"))
+#?(:clj  (def ^:private two 2)
+   :cljs (def ^:private two (js/BigInt "2")))
+#?(:clj  (def ^:private one 1)
+   :cljs (def ^:private one (js/BigInt "1")))
 
 (deftest fn-shorthand-reads-as-fn-form
   ;; #() is ONE call form: #(* % 2) == (fn [p1] (* p1 2)).
@@ -26,10 +28,10 @@
          (first (r/read-forms "#(f (+ % 1))")))))
 
 (deftest fn-shorthand-empty-body-rejects
-  (is (thrown? :default (r/read-forms "#()"))))
+  (is (thrown? #?(:clj Throwable :cljs :default) (r/read-forms "#()"))))
 
 (deftest fn-shorthand-rest-arg-rejects
-  (is (thrown? :default (r/read-forms "#(+ %& 1)"))))
+  (is (thrown? #?(:clj Throwable :cljs :default) (r/read-forms "#(+ %& 1)"))))
 
 (deftest fn-shorthand-gap-arg-rejects
   ;; %2 with no %1 in a 1-source map is a shape the map lowering refuses;

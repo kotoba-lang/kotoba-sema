@@ -72,7 +72,17 @@
     ;; into it.
     :stream/accept 25 :stream/send 26
     :net/datagram 27 :link/frame 28 :can/frame 29
-    :code/eval 30})
+    :code/eval 30
+    ;; Screen surface kit (kotoba-lang/screen, ADR-2609031100): observing a
+    ;; screen and acting on it are separate authorities -- seeing is not
+    ;; permission to press.
+    :screen/observe 31 :screen/act 32
+    ;; kbb ops-script surface (ADR-2607181900 readiness gate slice 3):
+    ;; compiler wire ids for the host capabilities kbb's bootstrap host
+    ;; already implements (runtime ids 258 env/read / 253 fs/browse in
+    ;; kotoba-core-contracts — distinct id space; the kbb host maps
+    ;; wire id -> runtime op).
+    :env/read 33 :fs/browse 34})
 
 (defn- load-capability-catalog []
   #?(:clj
@@ -885,6 +895,46 @@
 ;; dispatches on the head name before signatures are consulted, so a
 ;; `(defn conj ...)` would otherwise be shadowed silently.
 (def set-operations '#{conj disj})
+;; `count` is declared admitted by the language authority
+;; (`lang/guest-grammar.edn`: "bounded pair-chain walk"; `surface-status.edn`
+;; `:persistent-collection-semantics` lists it first among the operations it
+;; claims on three backends) and had no implementation here at all. Measured
+;; 2026-09-03 against sema `df383ba0`: `(count [7 8 9])`, `(count #{:a})`,
+;; `(count (typed-map-new [:map :i64 :i64]))` -- every receiver, every
+;; collection -- reached validation as an unknown call and was refused
+;; `operation has no admitted lowering`, the message for a head nothing
+;; rewrote, which says nothing about collections. `vector-count`,
+;; `vector-f64-count`, `hetero-vector-count`, `typed-set-count` and
+;; `typed-map-count` all sat next to it, already lowered, already returning
+;; `:i64`. Nothing was missing but the dispatch. It is the same defect
+;; `contains?`, `dissoc`, `conj` and `disj` had earlier the same day.
+;;
+;; RESERVED as well as implemented, for the reason `conj` is: the rewrite
+;; dispatches on the head name before signatures are consulted, so before this
+;; a `(defn count ...)` was ACCEPTED -- measured -- and its calls would have
+;; been rewritten out from under it silently.
+(def collection-count-operations '#{count})
+;; `peek`, `pop`, `keys` and `vals`. Declared admitted by
+;; `lang/guest-grammar.edn` `:sugar` on #{:compiler :kotoba-wasm :kotoba-cljs}
+;; and by `lang/surface-status.edn` `:persistent-collection-semantics`, and
+;; implemented by nothing until 2026-09-03: measured against sema `7d46f89e`,
+;; all four are refused `operation has no admitted lowering` at every arity
+;; and every receiver shape. On that day an agent corrected the AUTHORITY to
+;; stop claiming them, for a sound reason -- there was no rear-truncating
+;; vector operation and no map key/value projection, so `pop`, and therefore
+;; `(peek (pop v))`, could not be lowered from anything that existed. The
+;; owner's direction the same day was the other way: add the primitives. They
+;; are `vector-take`, `vector-f64-take`, `typed-list-nth`, `typed-map-keys`
+;; and `typed-map-vals` in kotoba-kir, and this is the head half.
+;;
+;; RESERVED as well as implemented, for the reason `count` and `conj` are: the
+;; rewrite dispatches on the head name before signatures are consulted, so a
+;; `(defn peek ...)` would otherwise be accepted and its calls rewritten out
+;; from under it silently. `seq` and `last` are NOT reserved -- no authority
+;; claims them, nothing implements them, and taking a name away without
+;; implementing it is a regression.
+(def vector-end-operations '#{peek pop})
+(def map-projection-operations '#{keys vals})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
@@ -895,7 +945,15 @@
 (def variant-operations '#{variant-new variant-match})
 (def generic-option-operations
   '#{option-some-of option-none-of option-some?-of option-value-of option-match})
-(def canonical-list-operations '#{typed-list-new})
+;; `typed-list-nth` lands here with the constructor that could not be indexed.
+;; `vector-at`, `vector-get` and `vector-drop` all require `:vector-i64` and
+;; refuse a `[:list T]` by type, so a list could be built and counted --
+;; `vector-count` walks the list carrier, measured 2026-09-03 -- and never
+;; read an element out of. It arrives with `keys`/`vals`, whose projection IS
+;; a `[:list T]`. There is deliberately no `typed-list-count`: `vector-count`
+;; already does that work.
+(def canonical-list-operations
+  '#{typed-list-new typed-list-nth})
 (def bytes-operations
   '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2})
 (def heterogeneous-vector-operations
@@ -906,10 +964,15 @@
      typed-set-disj typed-set-equal typed-set-nth})
 (def canonical-typed-map-operations
   '#{typed-map-new typed-map-count typed-map-contains typed-map-get
-     typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal})
+     typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal
+     typed-map-keys typed-map-vals})
 (def record-operations '#{record-new record-get record-assoc record-equal})
+;; `vector-take` is `vector-drop`'s mirror -- drop keeps the tail after the
+;; first n, take keeps the head. There was no rear truncation at all before
+;; 2026-09-03, which is the whole reason Clojure's vector `pop` -- every item
+;; but the LAST -- could not be lowered from anything that existed.
 (def typed-vector-operations
-  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
+  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-take 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
 (def ^:private contextual-string-argument-indexes
   "Builtin argument positions whose declared type selects the closed string
   closure dispatcher. This is elaboration context, not dynamic overloading."
@@ -921,6 +984,7 @@
     string-contains? #{0 1}
     string-split-count #{0 1}
     string-fold-case #{0}
+    string-upper #{0}
     string-code-point-at #{0}
     keyword-from-string #{0}
     symbol #{0}
@@ -995,11 +1059,12 @@
     vector-f64-get {0 :vector-f64 2 :f64}
     vector-f64-at {0 :vector-f64}
     vector-f64-drop {0 :vector-f64}
+    vector-f64-take {0 :vector-f64}
     vector-f64-assoc {0 :vector-f64 2 :f64}
     vector-f64-conj {0 :vector-f64 1 :f64}})
 (def typed-f64-vector-operations
   '{vector-f64-count 1 vector-f64-get 3 vector-f64-at 2 vector-f64-drop 2
-    vector-f64-assoc 3 vector-f64-conj 2})
+    vector-f64-take 2 vector-f64-assoc 3 vector-f64-conj 2})
 (def compact-graph-operations
   '{string-index-new 0 string-index-count 1 string-index-contains 2
     string-index-get 2 string-index-assoc 3
@@ -1024,7 +1089,7 @@
                          http-response-status 1 log-read-byte-count 1
                          string=? 2 string-concat 2 string-substring 3
                          string-replace-all 3 string-contains? 2 string-split-count 2
-                         string-fold-case 1
+                         string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
 (def xml-operations
@@ -1108,7 +1173,9 @@
              ;; declared i64.
              (set (keys image-symbol-operations))
              list-operations predicate-operations logical-operations map-operations
-             map-presence-operations set-operations typed-map-operations
+             map-presence-operations set-operations collection-count-operations
+             vector-end-operations map-projection-operations
+             typed-map-operations
              (set (keys typed-safe-value-operations))
              (set (keys parametric-result-operations))
              variant-operations
@@ -1544,6 +1611,26 @@
   [error]
   (some? (:phase (ex-data error))))
 
+(def definition-heads
+  "The closed set of heads `analyze*` dispatches a TOP-LEVEL form on.
+
+  Its only job is to be the spellable vocabulary for `definition-failure!`,
+  the way `reserved-function-names` is for `internal-failure!`. The rule that
+  set enforces -- nothing a user chose may ride out in a `:kotoba.error/code`
+  -- holds here for a stronger reason than membership: a form reaches the
+  definition layer only because `analyze*` MATCHED its head against one of
+  these literals, so the value passed to the guard cannot be anything else.
+
+  Saying it separately is what makes that true. `def`, `defrecord`,
+  `defprotocol`, `definterface`, `extend-type`, `extend-protocol`,
+  `defdesugar`, `defmulti` and `defmethod` are NOT in
+  `reserved-function-names` -- a program is not forbidden to name a function
+  `def` -- so widening `internal-failure!`'s vocabulary to cover them would
+  have let a user-chosen function name reach the envelope from the expression
+  chokepoints. Two vocabularies, two call sites, no overlap."
+  '#{ns def defn defn- defrecord defprotocol definterface
+     extend-type extend-protocol defdesugar defmulti defmethod})
+
 (defn internal-failure!
   "Re-raise a HOST error that escaped a compiler pass, naming what it escaped
   from. A deliberate rejection is rethrown untouched.
@@ -1616,6 +1703,73 @@
                                :kotoba.error/cause cause}
                         operation (assoc :kotoba.error/operation operation)
                         span (assoc :span span)))))))
+
+(defn- definition-failure!
+  "The definition-layer sibling of `internal-failure!`.
+
+  `internal-failure!` is installed at three PER-EXPRESSION chokepoints
+  (`desugar-expr`, `validate-expr`, `infer-expression-type`). Top-level form
+  handling runs before any of them, so a host error escaping there reached
+  `kotoba.sema/analyze` with no `ex-data` at all and the CLI could say only
+  `internal compiler error` -- exit 70 with `:code :kotoba/internal-error` and
+  nothing else. Measured 2026-09-03 on amu 57ba0ee0: `(defn)`, `(defn nil
+  [] 0)`, `(defn 42 [] 0)` and twelve siblings all arrived that way, because
+  `expand-defn-parts` called `(name source-name)` on whatever sat in the name
+  position (`Doesn't support name: 42`).
+
+  Those fifteen are now REFUSED by name (see `expand-defn-parts`), which is
+  the right answer for a caller who typed something wrong: exit 65, not 70.
+  This function is the other half -- the backstop for a host error nobody has
+  measured yet. It keeps `:phase :internal` and therefore exit 70, because a
+  compiler that broke is not a caller who typed something wrong. What changes
+  is that 70 now says WHICH DECLARATION it broke reading.
+
+  What travels is compiler vocabulary and source position, never user data:
+  the head, the span, and the host exception's own message. The head is spelled
+  into the code only when it is in `definition-heads` -- see that var for why
+  it is a separate vocabulary from `reserved-function-names` rather than an
+  addition to it. The FORM is deliberately not attached, for the same reason
+  `internal-failure!` does not attach it: `kotoba.compiler.diagnostic/from-error`
+  copies `:span` into the envelope and never `:form`, and this must not become
+  the first place a source fragment leaks into one.
+
+  `form` may be nil. Three passes (`expand-record-protocol-forms`,
+  `expand-closed-multimethod-forms`, `expand-defdesugar-forms`) run over the
+  whole form vector rather than one declaration, so there is no single form to
+  point at. Naming an arbitrary one of them would produce a span that looks
+  like it located the problem and did not; the operation is reported without a
+  span instead."
+  [error head form]
+  (if (or (compiler-rejection? error)
+          ;; Same carve-out as `internal-failure!`: `analyze` owns host stack
+          ;; exhaustion one frame further out and refuses it by name.
+          (kir/host-stack-exhausted? error))
+    (throw error)
+    (let [named? (contains? definition-heads head)
+          span (or (get (meta form) :span) (form-span form))
+          cause (ex-message error)]
+      (throw (ex-info (str "internal compiler failure while reading "
+                           (if named? (str "a `" head "` declaration")
+                               "a top-level declaration")
+                           (when span (str " at line " (:line span)
+                                           " column " (:column span)))
+                           ": " cause)
+                      (cond-> {:phase :internal
+                               :kotoba.error/code
+                               (if named?
+                                 (keyword "kotoba.error.internal-operation" (name head))
+                                 :kotoba.error/internal-operation-failure)
+                               :kotoba.error/cause cause}
+                        named? (assoc :kotoba.error/operation head)
+                        span (assoc :span span)))))))
+
+(defn- guarding-definition
+  "Run `thunk` for one top-level declaration, naming `head` if a host error
+  escapes it. A deliberate refusal passes through untouched."
+  [head form thunk]
+  (try (thunk)
+       (catch #?(:clj Throwable :cljs :default) error
+         (definition-failure! error head form))))
 
 (defn- reject-call-arity!
   "One sentence for a wrong argument count at a call to a module function, in
@@ -3223,16 +3377,73 @@
       (and (seq? form)
            (true? (:kotoba.reader/f64-literal (meta form))))))
 
-(def ^:private map-literal-key-types
-  "The key types a BARE map literal may carry, and the value type each of them
-  gets. A literal has no annotation, so both halves have to be read off the
-  source: the key type from the key literals, and the value type from nowhere
-  at all -- the values are arbitrary expressions whose types are not known
-  until inference, which runs after this. `:i64` is what the keyword-keyed
-  literal has always meant by a value, so that is what the other key types
-  mean by one too. A literal wanting any other value type is written with
-  `typed-map-new`, which says both halves."
-  {:keyword :i64 :i64 :i64 :string :i64})
+(def ^:private map-literal-value-constructors
+  "Canonical constructors that DECLARE the type of the value they build, as
+  their first argument, and the descriptor head each one must produce.
+
+  Every head here is a reserved name (they are unioned into `reserved-names`
+  through `canonical-typed-map-operations`, `typed-set-operations`,
+  `record-operations` and `heterogeneous-vector-operations`), so a user
+  function cannot shadow one and make this read a descriptor off an unrelated
+  call. The descriptor's own head is checked as well, so a malformed first
+  argument falls through to `nil` -- unknown -- rather than becoming a map
+  value type nothing validated."
+  '{typed-map-new :map
+    typed-set-new :set
+    record-new :record
+    hetero-vector-new :vector})
+
+(defn- map-literal-value-type
+  "The value type a literal's VALUE expression determines ON ITS OWN, or `nil`
+  when it is an arbitrary expression whose type only inference can know.
+
+  This is the map-value analogue of `closed-vector-literal-type`, and it is
+  deliberately syntactic: `desugar-map` runs before inference, so the only
+  types available here are the ones the source spells out. Floating literals
+  are recognized so they can be refused BY NAME (see `desugar-map`) rather
+  than reaching the generic arm."
+  [form]
+  (cond
+    (boolean? form) :bool
+    (kotoba-integer? form) :i64
+    (string? form) :string
+    (keyword? form) :keyword
+    (f64-literal-key? form) :f64
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= 'f64-from-bits head) :f64
+        (= 'f32-from-bits head) :f32
+        :else
+        (let [declared (get map-literal-value-constructors head)
+              descriptor (second form)]
+          (when (and declared (vector? descriptor) (seq descriptor)
+                     (= declared (first descriptor)))
+            descriptor))))
+    :else nil))
+
+(defn- map-literal-type-description
+  "A value type said the way the SOURCE says it, for a refusal message --
+  `:string`, not `string`. The refusal names `typed-map-new` as the way to
+  write the map the program wanted, and a reader has to be able to paste the
+  type into it; `(name :string)` would print a descriptor that does not read."
+  [type]
+  (pr-str type))
+
+(defn- map-literal-key-description-for-message
+  "Which ENTRY a refusal is about. A Clojure map literal has no positions, so
+  the entry is named by its key -- which is what the reader wrote, and what
+  the canonical order is keyed on.
+
+  An integer key goes through `str` and not `pr-str`, because a `.kotoba`
+  integer literal is a JS bigint under `:cljs` and `pr-str` renders that as
+  `#object[BigInt 1]`. Measured 2026-09-03: the first draft used `pr-str` for
+  every key, was green on the JVM, and printed `map literal value at key
+  #object[BigInt 1] ...` under nbb -- the SAME refusal saying two different
+  things on the two runtimes this file claims. A string key keeps `pr-str`,
+  which is what puts the quotes on."
+  [key]
+  (if (kotoba-integer? key) (str key) (pr-str key)))
 
 (defn- map-literal-key-kind [key]
   (cond (keyword? key) :keyword
@@ -3261,6 +3472,80 @@
         (nil? key) "nil"
         :else "unrecognized"))
 
+(defn- map-literal-item-type
+  "The VALUE type of a bounded map literal, read off its own value expressions.
+
+  A literal carries no annotation, so this is the only place the value half
+  can come from. Every value whose type the source spells out has to agree on
+  ONE type; values whose type only inference can know (an ordinary call, a
+  local, an arithmetic form) contribute nothing here and are checked against
+  the agreed type afterwards, exactly as they were checked against `:i64`
+  before. A literal with no typed value at all keeps `:i64`, so an all-unknown
+  literal lowers to the descriptor it always lowered to.
+
+  Three refusals happen here rather than downstream, because downstream has
+  only a type mismatch to report and this has the reason:
+
+  * a FLOATING value, refused on the structured scalar ABI. This is NOT the
+    floating-KEY refusal wearing a different hat. A key needs a total order
+    and a decidable identity, and a float has neither; a value needs neither,
+    and is refused only because `[:map K :f64]` has no encoding --
+    `kotoba.kir.value/validate-value-type!` throws
+    \"direct floating map keys or values are outside the structured scalar
+    ABI\" for it, measured. The two facts are said as two messages.
+  * DISAGREEING value types, naming both types and both entries.
+  * a non-`:i64` literal value under KEYWORD keys, which keep the legacy
+    untagged pair map (see `desugar-map`) and therefore do not get an inferred
+    value type at all."
+  [kind entries]
+  (let [typed (vec (keep (fn [[k v]]
+                           (when-let [t (map-literal-value-type v)] [k t]))
+                         entries))
+        floating (first (filter (fn [[_ t]] (contains? #{:f32 :f64} t)) typed))]
+    (when floating
+      (let [[k t] floating]
+        (reject! (str "map literal value at key "
+                      (map-literal-key-description-for-message k)
+                      " is a floating point literal: map value type " t
+                      " is outside the structured scalar ABI. This is the "
+                      "ABI's refusal and not the floating-key one -- a value "
+                      "needs neither a total order nor a decidable identity, "
+                      "and is refused because the typed map's value slot has "
+                      "no floating encoding")
+                 entries :kotoba.error/floating-map-kv)))
+    (if (= :keyword kind)
+      (do (when-let [[k t] (first (remove (fn [[_ t]] (= :i64 t)) typed))]
+            (reject! (str "map literal with keyword keys carries i64 values; "
+                          "the value at key "
+                          (map-literal-key-description-for-message k) " is "
+                          (map-literal-type-description t)
+                          ". A keyword-keyed literal lowers to the legacy "
+                          "untagged pair map that `map-get`, `map-assoc` and "
+                          "every `match` map pattern are written against, so "
+                          "its value type is not inferred; write "
+                          "(typed-map-new [:map :keyword "
+                          (map-literal-type-description t)
+                          "] ...) for a typed map with keyword keys")
+                     entries :kotoba.error/map-literal-value))
+          :i64)
+      (if-let [[first-key first-type] (first typed)]
+        ;; `=` rather than `distinct`: a value type may be a descriptor
+        ;; vector, and hashing is not something both runtimes agree on for
+        ;; every literal shape (`run-tests.cljs` records the `desugar-case`
+        ;; bigint hashing defect that taught this).
+        (if-let [[other-key other-type]
+                 (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
+          (reject! (str "map literal values must all be one type; the value "
+                        "at key "
+                        (map-literal-key-description-for-message first-key)
+                        " is " (map-literal-type-description first-type)
+                        " and the value at key "
+                        (map-literal-key-description-for-message other-key)
+                        " is " (map-literal-type-description other-type))
+                   entries :kotoba.error/map-literal-value)
+          first-type)
+        :i64))))
+
 (defn- desugar-map
   "Lower a bounded literal into an owned map KIR operation.
 
@@ -3273,6 +3558,22 @@
   `kotoba-lang`'s stdlib recorded `frequencies` and `get-in` as unwritable for
   exactly that reason, even though `typed-map-new` had been generic in its key
   type the whole time -- the refusal was in the LITERAL, not in the map.
+
+  The VALUE half was the same defect one layer over. It was fixed at `:i64`
+  here, so `{1 \"a\"}` was refused with `expression type mismatch: expected
+  i64, got string` -- a generic type error on a program that reads correct --
+  while `(typed-map-new [:map :i64 :string] 1 \"a\")` had worked the whole time.
+  Measured 2026-09-03 on sema df383ba0: the canonical surface already carried
+  `:string`, `:bool`, `:keyword`, record, nested-map, heterogeneous-vector and
+  typed-set values through `typed-map-new`, `typed-map-get`, `assoc`,
+  `dissoc`, `contains?` and `typed-map-entry-at`, and
+  `kotoba.kir.value/bounded-typed-value!` validated every one of them. Only
+  the literal was pinned. `map-literal-item-type` now reads the value type off
+  the literal's own value expressions.
+
+  KEYWORD keys do not get that: their literal stays the legacy pair map, whose
+  values are i64, so a keyword-keyed literal with a non-i64 literal value is
+  refused BY NAME and pointed at `typed-map-new`.
 
   Entries are emitted in the key type's total order (`compare-typed-values` in
   `kotoba.kir.value` is the same order the runtime keeps the entry chain in),
@@ -3306,8 +3607,8 @@
 
       :else
       (let [kind (or (first kinds) :keyword)
-            item-type (get map-literal-key-types kind)
             entries (sort-by key (map-literal-key-order kind) form)
+            item-type (map-literal-item-type kind entries)
             pairs (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)]
         (if (= :keyword kind)
           (apply list 'map-new pairs)
@@ -4916,6 +5217,12 @@
                               (desugar-expected-value item-type %)
                               (desugar-expr %))
                            (rest args)))))
+        typed-list-nth
+        (do (when-not (= 3 (count args))
+              (reject! "typed-list-nth requires type, value, and index" form))
+            (list 'typed-list-nth (first args)
+                  (desugar-expected-value (first args) (second args))
+                  (desugar-expr (nth args 2))))
         typed-set-count
         (do (when-not (= 2 (count args))
               (reject! "typed-set-count requires type and value" form))
@@ -5002,6 +5309,11 @@
             (list 'typed-map-entry-at (first args)
                   (desugar-expected-value (first args) (second args))
                   (desugar-expr (nth args 2))))
+        (typed-map-keys typed-map-vals)
+        (do (when-not (= 2 (count args))
+              (reject! (str op " requires type and value") form))
+            (list op (first args)
+                  (desugar-expected-value (first args) (second args))))
         typed-map-assoc
         (do (when-not (= 4 (count args))
               (reject! "typed-map-assoc requires type, value, key, and item" form))
@@ -6234,6 +6546,15 @@
           (doseq [item items]
             (validate-expr item locals functions (inc depth) budget)))
 
+        (= op 'typed-list-nth)
+        (let [[type value index] args]
+          (when-not (= 3 (count args)) (reject! "typed list nth shape is invalid" form))
+          (validate-value-type! type)
+          (when-not (canonical-list-type? type)
+            (reject! "typed list nth requires [:list item-type]" form))
+          (validate-expr value locals functions (inc depth) budget)
+          (validate-expr index locals functions (inc depth) budget))
+
         (= op 'bytes-empty)
         (when-not (empty? args)
           (reject! "bytes-empty does not accept operands" form))
@@ -6346,6 +6667,15 @@
             (reject! "typed map entry projection requires [:map key-type value-type]" form))
           (validate-expr value locals functions (inc depth) budget)
           (validate-expr index locals functions (inc depth) budget))
+
+        (contains? '#{typed-map-keys typed-map-vals} op)
+        (let [[type value] args]
+          (when-not (= 2 (count args))
+            (reject! "typed map projection shape is invalid" form))
+          (validate-value-type! type)
+          (when-not (canonical-typed-map-type? type)
+            (reject! "typed map projection requires [:map key-type value-type]" form))
+          (validate-expr value locals functions (inc depth) budget))
 
         (= op 'typed-map-assoc)
         (let [[type map-value key item] args]
@@ -6791,6 +7121,53 @@
                {:kotoba.error/expected expected
                 :kotoba.error/actual actual}))))
 
+(defn- collection-head-advice
+  "What the caller should write instead, for a receiver this friendly head does
+  not answer.
+
+  A refusal that only reports a type mismatch reads as a defect in the
+  caller's program. Measured 2026-09-03 against sema `df383ba0`:
+  `(first [7 8 9])` was refused `expression type mismatch: expected i64, got
+  vector-i64`, because `first` desugars to `pair-first` and the pair
+  accessors are declared over the legacy i64 pair chain -- so the reader was
+  told their vector was the wrong type for an operation whose Clojure meaning
+  it satisfies exactly. The same shape as `contains?` on a set before
+  2026-09-03, one level worse: `operation has no admitted lowering` at least
+  names the operation.
+
+  Returns a sentence, or nil when nothing specific is known -- nil means the
+  generic refusal is the honest one, not that the receiver is fine."
+  [type]
+  (cond
+    (typed-set-type? type)
+    (str "A typed set answers to typed-set-count, typed-set-contains, "
+         "typed-set-conj, typed-set-disj and typed-set-nth; conj and disj "
+         "also reach it through the friendly surface")
+
+    (canonical-typed-map-type? type)
+    (str "A canonical typed map answers to typed-map-count, typed-map-get, "
+         "typed-map-entry-at, typed-map-assoc and typed-map-dissoc; get, "
+         "assoc, contains? and dissoc also reach it through the friendly "
+         "surface")
+
+    (= :map type)
+    (str "The legacy keyword-keyed bounded map answers to get and assoc and "
+         "has no other primitive at all -- not count, not presence, not "
+         "removal")
+
+    (canonical-list-type? type)
+    (str "A canonical [:list T] answers to vector-count -- which walks the "
+         "list carrier, measured -- and to typed-list-nth; count and nth "
+         "reach it through the friendly surface. It has no rear operation, "
+         "so peek and pop do not reach it")
+
+    (= :string type)
+    (str "A string has no element count in this profile: string-byte-length "
+         "counts UTF-8 BYTES, not characters, and naming it here would give "
+         "two different answers the same spelling")
+
+    :else nil))
+
 (defn- infer-call-type [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -6898,6 +7275,14 @@
       (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
 
+      ;; `vector-drop`'s mirror, and typed identically: both take a bounded
+      ;; vector and a count and answer a bounded vector. Which END they keep
+      ;; is not a type-level difference, which is why one arm is a copy of the
+      ;; other and not a variation on it.
+      (= op 'vector-take)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
+
       ;; `vector-assoc!` types identically, because it IS the same
       ;; operation: the bang only tells a backend it may lower the update
       ;; to a store, and `check-affine-writes!` is what earns that. A
@@ -6931,6 +7316,10 @@
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :f64)
 
       (= op 'vector-f64-drop)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
+
+      (= op 'vector-f64-take)
       (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
 
@@ -7210,6 +7599,9 @@
           :i64)
 
       (= op 'string-fold-case)
+      (do (require-expression-type! (first types) :string (first args)) :string)
+
+      (= op 'string-upper)
       (do (require-expression-type! (first types) :string (first args)) :string)
 
       (= op 'keyword-from-string)
@@ -7550,6 +7942,12 @@
             (require-expression-type! (infer-expression-type item locals signatures)
                                       (second type) item))
           type)
+        typed-list-nth
+        (let [[type value index] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
+          (second type))
         bytes-empty :bytes
         bytes-count
         (let [[value] args]
@@ -7675,6 +8073,62 @@
             (infer-call-type 'map-get
                              [value key (if (= 3 (count args)) default 0)]
                              locals signatures)))
+        ;; `count` and the pair accessors need a TYPE here as well as a
+        ;; lowering below, for the reason `nth` has one: parameter inference
+        ;; runs before `rewrite-record-projections`, and it reads a refused
+        ;; operand's required type out of the refusal's ex-data. A head that
+        ;; only gained a rewrite would still be REFUSED during that earlier
+        ;; pass, and the `:kotoba.error/expected :i64` of that refusal was
+        ;; then attributed to an unrelated synthesized parameter. Measured
+        ;; 2026-09-03: with the rewrite alone,
+        ;;   (+ (pair-first [1 4 2]) (reduce add 4 [1 2 3]))
+        ;; produced a `reduce` loop helper whose collection parameter was
+        ;; typed `:i64` instead of `:vector-i64`, and the program was refused
+        ;; naming `__kotoba_reduce_v_1` -- a binding the author never wrote.
+        ;; With this arm the helper is typed `:vector-i64` and the program
+        ;; runs. `(vector-at [1 4 2] 0)` written by hand always worked, which
+        ;; is how the difference was isolated: identical bodies, different
+        ;; `:param-types`.
+        count
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (if (or (= :vector-i64 value-type) (= :vector-f64 value-type)
+                  (heterogeneous-vector-type? value-type)
+                  (typed-set-type? value-type)
+                  (canonical-typed-map-type? value-type)
+                  (canonical-list-type? value-type))
+            :i64
+            (infer-call-type op args locals signatures)))
+        ;; `peek`/`pop`/`keys`/`vals` need a type here for the same reason
+        ;; `count` and `nth` do: `infer-absent-parameter-types` runs BEFORE
+        ;; `rewrite-record-projections` and reads a refused operand's required
+        ;; type out of the refusal's ex-data, so a head with only a rewrite is
+        ;; still refused during that earlier pass and its expected type is
+        ;; attributed to an unrelated synthesized parameter.
+        (peek pop)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [peek :vector-i64] :i64
+            [peek :vector-f64] :f64
+            [pop :vector-i64] :vector-i64
+            [pop :vector-f64] :vector-f64
+            (infer-call-type op args locals signatures)))
+        (keys vals)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (if (canonical-typed-map-type? value-type)
+            [:list (if (= op 'keys) (second value-type) (nth value-type 2))]
+            (infer-call-type op args locals signatures)))
+        (pair-first pair-second)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [pair-first :vector-i64] :i64
+            [pair-first :vector-f64] :f64
+            [pair-second :vector-i64] :vector-i64
+            [pair-second :vector-f64] :vector-f64
+            (infer-call-type op args locals signatures)))
         nth
         (let [[value index & defaults] args
               value-type (infer-expression-type value locals signatures)]
@@ -7707,6 +8161,15 @@
                 (reject! "vector nth requires value, index, and optional default" form))
               (infer-call-type (if (= 3 (count args)) 'vector-f64-get 'vector-f64-at)
                                args locals signatures))
+
+            ;; A `[:list T]` indexes through `typed-list-nth`, which has no
+            ;; defaulting form -- there is no list `vector-get` -- so the
+            ;; two-argument shape is the only one, and the three-argument one
+            ;; is refused by the rewrite rather than silently dropping the
+            ;; default.
+            (canonical-list-type? value-type)
+            (if (= 2 (count args)) (second value-type)
+                (infer-call-type op args locals signatures))
 
             :else (infer-call-type op args locals signatures)))
         hetero-vector-assoc
@@ -7800,6 +8263,17 @@
           (require-expression-type! (infer-expression-type value locals signatures) type value)
           (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
           [:option [:vector [(second type) (nth type 2)]]])
+        ;; `[:list K]` / `[:list V]`. Not `[:set K]` even for the keys, whose
+        ;; distinctness a set would carry faithfully: the VALUES are not
+        ;; distinct, so the same carrier for `vals` would silently drop every
+        ;; repeated value, and one projection typed as a set while the other
+        ;; is a list would make `(nth (keys m) i)` and `(nth (vals m) i)` two
+        ;; different kinds of index over what is meant to be one entry.
+        (typed-map-keys typed-map-vals)
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          [:list (if (= op 'typed-map-keys) (second type) (nth type 2))])
         typed-map-assoc
         (let [[type value key item] args]
           (validate-value-type! type)
@@ -8777,10 +9251,20 @@
                                                               locals signatures)
                                        (catch #?(:clj Exception :cljs :default) _ nil))]
                               (when (contains? #{:i64 :string} key-type) key-type)))
+              ;; The VALUE half of the retype. This pass runs AFTER
+              ;; desugaring, so unlike `desugar-map` it can ask inference
+              ;; rather than reading literals, and `(assoc {} 1 "a")` gets
+              ;; `[:map :i64 :string]` for the same reason `{1 "a"}` does.
+              ;; `:i64` when inference cannot answer -- the descriptor this
+              ;; site has always built.
+              retyped-item (when retyped-key
+                             (or (try (infer-expression-type (second pairs)
+                                                             locals signatures)
+                                      (catch #?(:clj Exception :cljs :default) _ nil))
+                                 :i64))
               descriptor (cond
                            (canonical-typed-map-type? value-type) value-type
-                           retyped-key [:map retyped-key
-                                        (get map-literal-key-types retyped-key)]
+                           retyped-key [:map retyped-key retyped-item]
                            :else nil)]
           (if descriptor
             (reduce (fn [accumulated [key item]]
@@ -8940,6 +9424,275 @@
                 (reject! "vector nth requires value, index, and optional default" form))
               (cons (if (= 3 (count rewritten-args)) 'vector-f64-get 'vector-f64-at)
                     rewritten-args))
+
+            ;; A receiver `nth` does not index. Before this the arm fell
+            ;; through to `(cons op ...)` and validation reported `operation
+            ;; has no admitted lowering` -- true of `nth` on nothing, since
+            ;; `nth` on a bounded vector has been lowered since the vector
+            ;; landed. Only receivers this profile can NAME are refused here;
+            ;; an unknown or not-yet-inferred receiver (nil) still passes
+            ;; through, so an earlier invalid binding keeps reporting its own
+            ;; error rather than this one.
+            ;; A `[:list T]` indexes through `typed-list-nth`, the accessor
+            ;; that arrived with `keys`/`vals` -- their projection IS a list,
+            ;; and a projection nothing can read an element out of is a value
+            ;; no program can use. There is no defaulting form, because there
+            ;; is no list `vector-get`: the three-argument shape is refused
+            ;; rather than silently dropping the default the author wrote.
+            (canonical-list-type? value-type)
+            (do (when-not (= 2 (count rewritten-args))
+                  (reject! (str "nth on a canonical [:list T] takes a value "
+                                "and an index and has no defaulting form; "
+                                "typed-list-nth traps on an index out of "
+                                "range, as vector nth without a default does")
+                           form :kotoba.error/nth-receiver))
+                (list 'typed-list-nth value-type
+                      (first rewritten-args) (second rewritten-args)))
+
+            (collection-head-advice value-type)
+            (reject! (str "nth indexes a bounded vector; got "
+                          (pr-str value-type) ". "
+                          (collection-head-advice value-type))
+                     form :kotoba.error/nth-receiver)
+
+            :else (cons op rewritten-args)))
+
+        ;; `count` on any admitted collection.
+        ;;
+        ;; Declared admitted on three backends by `lang/guest-grammar.edn` and
+        ;; by `surface-status.edn` `:persistent-collection-semantics`, and
+        ;; implemented on none of them: measured 2026-09-03 against sema
+        ;; `df383ba0`, `(count [7 8 9])` was refused `operation has no
+        ;; admitted lowering` -- on a vector, a list, a set, a typed map, the
+        ;; keyword map and a string alike. Every primitive it needs was
+        ;; already there and already returning `:i64`.
+        (contains? collection-count-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              ;; See `contains?` above: this arm REFUSES, so swallowing the
+              ;; receiver's own refusal would replace a precise message with
+              ;; `got nil`. The exception is carried out and rethrown.
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! "count requires exactly one collection"
+                     form :kotoba.error/count-arity))
+          (cond
+            (= :vector-i64 value-type) (list 'vector-count receiver)
+            (= :vector-f64 value-type) (list 'vector-f64-count receiver)
+            (heterogeneous-vector-type? value-type)
+            (list 'hetero-vector-count value-type receiver)
+            (typed-set-type? value-type) (list 'typed-set-count value-type receiver)
+            (canonical-typed-map-type? value-type)
+            (list 'typed-map-count value-type receiver)
+            ;; `vector-count` walks a `[:list T]` carrier, for any item type,
+            ;; and has since the carrier landed. Measured 2026-09-03:
+            ;; `(vector-count (typed-list-new [:list :string] "a" "b"))` is 2.
+            ;; The refusal this arm used to raise for a list said the type had
+            ;; "no accessor primitive at all", which was wrong about counting;
+            ;; the count was reachable by hand and only the friendly head was
+            ;; missing. That is why no `typed-list-count` was added for it.
+            (canonical-list-type? value-type) (list 'vector-count receiver)
+            :else
+            (reject! (str "count requires a bounded vector, a typed set or a "
+                          "canonical typed map; got " (pr-str value-type) "."
+                          (if-let [advice (collection-head-advice value-type)]
+                            (str " " advice)
+                            ""))
+                     form :kotoba.error/count-receiver)))
+
+        ;; `peek` and `pop` on a bounded vector -- Clojure's END.
+        ;;
+        ;; In Clojure these two are RECEIVER-DEPENDENT: on a vector `peek` is
+        ;; the last item and `pop` is every item but the last; on a list
+        ;; `peek` is the first and `pop` is the rest. This profile has both a
+        ;; bounded vector and a `[:list T]`, so the reading cannot be picked
+        ;; once and applied everywhere. What each receiver does:
+        ;;
+        ;;   bounded i64/f64 vector  the END. `(vector-at v (- (count v) 1))`
+        ;;                           and `(vector-take v (- (count v) 1))`.
+        ;;   the legacy i64 pair chain
+        ;;                           REFUSED, and this is the ambiguous one.
+        ;;                           The pair chain is this profile's list, so
+        ;;                           Clojure's list reading would say `peek` is
+        ;;                           `pair-first` -- but the pair chain is
+        ;;                           typed `:i64`, which is also the type of
+        ;;                           every ordinary integer, so `(peek 5)` and
+        ;;                           `(peek some-chain)` are the same program
+        ;;                           to this frontend. Answering either way
+        ;;                           would read an integer as a heap pair or
+        ;;                           refuse a chain that is a list. The head
+        ;;                           that says which one is meant already
+        ;;                           exists and is unambiguous: `first` and
+        ;;                           `rest`, which lower to exactly the pair
+        ;;                           accessors. So this refuses and names them.
+        ;;   [:list T]               REFUSED: it has `vector-count` and
+        ;;                           `typed-list-nth` but no rear operation and
+        ;;                           no drop, so neither reading is buildable.
+        ;;   typed set, typed map, keyword map, string
+        ;;                           REFUSED, naming each one's own primitives.
+        ;;
+        ;; EMPTINESS. Clojure's `pop` on an empty collection throws and `peek`
+        ;; returns nil. Neither is available: emptiness is not statically
+        ;; known here, and there is no nil in this profile to answer with. Of
+        ;; the four shapes that were open -- a not-found argument as
+        ;; `(nth v i default)` takes, a trap, a typed abort, or refusing the
+        ;; operation -- this takes the TRAP, because that is what the
+        ;; neighbours already do: `vector-at` traps out of range, `vector-drop`
+        ;; traps, `typed-set-nth` traps, and `nth` WITHOUT a default is
+        ;; already the empty-vector trap spelled differently. `pop` needs no
+        ;; special case at all for it: an empty vector makes the count 0 and
+        ;; the argument -1, and -1 is out of `vector-take`'s range.
+        ;;
+        ;; The cost is real and is this: a program that does not know its
+        ;; vector is non-empty cannot ask these two heads safely, and must
+        ;; write `(if (= (count v) 0) ... (peek v))` -- the guard `count` made
+        ;; spellable on 2026-09-03. An `[:option T]` return would have carried
+        ;; the emptiness in the type instead, and was not taken: it would make
+        ;; `peek` the only collection head that does, `(peek (pop v))` would
+        ;; stop composing, and `[:option T]` on an `if` arm was measured the
+        ;; same day to make wasm32 refuse a whole project. A `(peek v
+        ;; not-found)` arity is the cheap widening if one is ever wanted --
+        ;; `vector-get` is already the primitive for it -- and is deliberately
+        ;; not added here without a caller asking for it.
+        (contains? vector-end-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              ;; As in `count`: this arm REFUSES, so swallowing the receiver's
+              ;; own refusal would replace a precise message with `got nil`.
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)
+              peek? (= op 'peek)
+              code (if peek? :kotoba.error/peek-receiver :kotoba.error/pop-receiver)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! (str op " requires exactly one collection")
+                     form (if peek?
+                            :kotoba.error/peek-arity
+                            :kotoba.error/pop-arity)))
+          (if-let [[at-op count-op take-op]
+                   (case value-type
+                     :vector-i64 '[vector-at vector-count vector-take]
+                     :vector-f64 '[vector-f64-at vector-f64-count vector-f64-take]
+                     nil)]
+            ;; The receiver is bound ONCE. Both readings need it twice -- for
+            ;; the count and for the index -- and duplicating the expression
+            ;; would evaluate it twice, which for a receiver that traps means
+            ;; trapping twice and for one that costs fuel means paying twice.
+            ;; This is the shape the heterogeneous `vector-drop` arm above
+            ;; already uses for the same reason.
+            (let [value-name (synthetic (if peek? "peek" "pop"))
+                  last-index (list '- (list count-op value-name) 1)]
+              (list 'let [value-name receiver]
+                    (if peek?
+                      (list at-op value-name last-index)
+                      (list take-op value-name last-index))))
+            (reject! (str (if peek? "peek" "pop")
+                          " takes from the END of a bounded vector, as it does"
+                          " in Clojure; got " (pr-str value-type) ". "
+                          (or (collection-head-advice value-type)
+                              (str "The legacy i64 pair chain is this "
+                                   "profile's list, and Clojure reads peek "
+                                   "and pop on a list from the FRONT -- but "
+                                   "a pair chain and an ordinary integer are "
+                                   "the same type here, so that reading "
+                                   "cannot be told from reading an integer as "
+                                   "a pair. Write first and rest, which lower "
+                                   "to pair-first and pair-second and say "
+                                   "which was meant")))
+                     form code)))
+
+        ;; `keys` and `vals` on a canonical typed map.
+        ;;
+        ;; Both answer a `[:list T]` in the map's own entry order -- the order
+        ;; `typed-map-entry-at` walks -- so `(nth (keys m) i)` and
+        ;; `(nth (vals m) i)` name the two halves of one entry. Neither is a
+        ;; set: a map's keys are distinct and its VALUES are not, so a set
+        ;; carrier for `vals` would silently drop every repeated value and
+        ;; answer a shorter collection than the map has entries.
+        (contains? map-projection-operations op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              inferred (when (= 1 (count rewritten-args))
+                         (try {:type (infer-expression-type receiver locals signatures)}
+                              (catch #?(:clj Exception :cljs :default) e {:refusal e})))
+              _ (when-let [refusal (:refusal inferred)] (throw refusal))
+              value-type (:type inferred)
+              keys? (= op 'keys)
+              code (if keys? :kotoba.error/keys-receiver :kotoba.error/vals-receiver)]
+          (when-not (= 1 (count rewritten-args))
+            (reject! (str op " requires exactly one map")
+                     form (if keys?
+                            :kotoba.error/keys-arity
+                            :kotoba.error/vals-arity)))
+          (if (canonical-typed-map-type? value-type)
+            (list (if keys? 'typed-map-keys 'typed-map-vals) value-type receiver)
+            (reject! (str (if keys? "keys" "vals")
+                          " projects a canonical typed map; got "
+                          (pr-str value-type) ". "
+                          (if (= :map value-type)
+                            (str "The legacy keyword-keyed bounded map answers "
+                                 "to get and assoc and has no projection "
+                                 "primitive; write the canonical [:map K V] "
+                                 "with typed-map-new to project it")
+                            (or (collection-head-advice value-type)
+                                (str "Only a canonical [:map K V] has a key "
+                                     "and value projection"))))
+                     form code)))
+
+        ;; `first` / `second` / `rest` on a bounded vector.
+        ;;
+        ;; These three desugar to `pair-first` / `pair-first` of `pair-second`
+        ;; / `pair-second` before any type is known, so the dispatch has to
+        ;; happen on the PAIR heads, here, where the receiver's type is
+        ;; inferable. That is also why the fix reaches a `pair-first` written
+        ;; literally in the source: after desugaring there is one head, not
+        ;; two, and the language authority's own `collections/higher_order`
+        ;; fixture spells it that way over a `filter` result -- which is a
+        ;; bounded vector, not the pair chain the fixture was written against.
+        ;;
+        ;; `vector-at` and `vector-drop` are exactly Clojure's `first` and
+        ;; `rest` for a vector, and both were already lowered. An EMPTY vector
+        ;; traps rather than answering nil, as `nth` without a default does;
+        ;; there is no nil in this profile to answer with.
+        ;;
+        ;; Every OTHER receiver passes through unchanged -- the pair accessors
+        ;; are the closure, lazy-cell, cursor and destructuring vocabulary of
+        ;; this desugarer, all of them i64 pairs -- so a program that does not
+        ;; call one on a vector lowers byte for byte as before.
+        (contains? '#{pair-first pair-second} op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver (first rewritten-args)
+              value-type (when (= 1 (count rewritten-args))
+                           (try (infer-expression-type receiver locals signatures)
+                                (catch #?(:clj Exception :cljs :default) _ nil)))
+              first? (= op 'pair-first)]
+          (cond
+            (= :vector-i64 value-type)
+            (if first? (list 'vector-at receiver 0) (list 'vector-drop receiver 1))
+
+            (= :vector-f64 value-type)
+            (if first?
+              (list 'vector-f64-at receiver 0)
+              (list 'vector-f64-drop receiver 1))
+
+            (collection-head-advice value-type)
+            (reject! (str (if first? "first (pair-first)" "rest (pair-second)")
+                          " reads a pair chain or a bounded vector; got "
+                          (pr-str value-type) ". "
+                          (collection-head-advice value-type))
+                     form (if first?
+                            :kotoba.error/pair-first-receiver
+                            :kotoba.error/pair-second-receiver))
 
             :else (cons op rewritten-args)))
 
@@ -11271,6 +12024,34 @@
   argument-count dispatch (ADR 0017)."
   [form constants]
   (let [[op source-name & declaration0] form
+        ;; The name is checked HERE, before anything reads it, because the
+        ;; very next line calls `(name source-name)` and `name` is defined on
+        ;; a symbol / keyword / string and nothing else. Measured 2026-09-03
+        ;; on amu 57ba0ee0, fifteen shapes reached it and raised a raw host
+        ;; error -- `(defn)` and `(defn nil [] 0)` (nil), `(defn 42 [] 0)`,
+        ;; `(defn 1.5 [] 0)`, `(defn true [] 0)`, `(defn [f] [] 0)`,
+        ;; `(defn {} [] 0)`, `(defn #{} [] 0)`, `(defn (f) [] 0)`, the same
+        ;; nine under `defn-`, and the multi-arity spellings -- so
+        ;; `Doesn't support name: 42` left as exit 70 `internal compiler
+        ;; error`. `(defn "f" [] 0)` and `(defn :f [] 0)` did NOT crash, only
+        ;; because `name` happens to accept a string and a keyword; they were
+        ;; refused 200 lines later with `invalid function name`. One arity of
+        ;; the same declaration was guarded and the others were not.
+        ;;
+        ;; The wording is that sibling's, verbatim, and so is the code. A
+        ;; caller who wrote a name that is not a bounded simple symbol gets
+        ;; one sentence for that fact whichever non-symbol they wrote; a
+        ;; second phrasing here would only mean the compiler knew two things
+        ;; where there is one.
+        ;;
+        ;; Rejecting on FORM rather than on the name is what gives the reader
+        ;; somewhere to act: `nil`, `42` and `{}` carry no reader metadata, so
+        ;; a refusal pointed at the name has no span at all. The offending
+        ;; value travels in `ex-data` instead, where the CLI envelope does not
+        ;; copy it.
+        _ (when-not (valid-name? source-name)
+            (reject! "invalid function name" form :kotoba.error/subset-reject
+                     {:function source-name}))
         [docstring declaration] (if (string? (first declaration0))
                                   [(first declaration0) (rest declaration0)]
                                   [nil declaration0])]
@@ -11591,6 +12372,26 @@
      extend-type extend-protocol defdesugar
      if let let* do fn loop recur quote var recur-to})
 
+(def ^:private unspellable-definition-heads
+  "The declaration heads a TEMPLATE BODY may hold that can be nothing at all.
+
+  `structural-heads` above governs the template's NAME. This governs its body,
+  and it is a much smaller set, because a template body is substituted into an
+  expression position where most declaration heads are ordinary function
+  names. Measured 2026-09-03 at 5917518b: `(defn defrecord [x] (+ x 1))` is an
+  admitted program and `(defdesugar t [y] (defrecord y))` is an admitted CALL
+  to it that computes 5 for `(t 4)`. Nine of the twelve definition heads
+  behave that way, so a blanket `no declaration in a body` would refuse
+  working source.
+
+  What is left is derived rather than chosen: a head in `definition-heads` is
+  not a declaration once it sits in an expression position, and a head in
+  `reserved-function-names` may not be defined as a function, so a head in
+  BOTH can be neither. `#{ns defn defn-}`, today. Written as the intersection
+  so that it follows either vocabulary if one of them moves -- a hand-listed
+  copy would keep refusing a head that had just become spellable."
+  (set/intersection definition-heads reserved-function-names))
+
 (defn- desugar-template-parts
   "Read one `(defdesugar name [params] body)` into `{:name :params :body}`."
   [form]
@@ -11623,6 +12424,21 @@
     (let [body (first tail)]
       (when (> (count (tree-seq coll? seq body)) max-desugar-template-nodes)
         (reject! "desugar template body exceeds node limit" form))
+      ;; A body holding one of these was ADMITTED and then dropped. Measured
+      ;; 2026-09-03 at 5917518b: `(defdesugar t [] (defn g [] 0))` compiled to
+      ;; a HIR byte-identical to the same program with the line deleted, and
+      ;; CALLING it reached `operation has no admitted lowering` -- a sentence
+      ;; about an operation, naming neither the template nor the declaration
+      ;; written inside it. Refused here instead, where the caller wrote it,
+      ;; and refused whether or not the template is ever called: the form is
+      ;; inert in every program, so there is nothing a later use could make of
+      ;; it. Head position only -- a bare symbol is not a form, and is already
+      ;; answered where unresolved symbols are.
+      (doseq [node (tree-seq coll? seq body)]
+        (when (and (seq? node)
+                   (contains? unspellable-definition-heads (first node)))
+          (reject! "desugar template body may not contain a reserved head form"
+                   form)))
       {:name name :params (vec params) :body body})))
 
 (defn- substitute-template-parameters
@@ -11844,8 +12660,30 @@
                        :else form))
                    forms))))))
 
+(def protocol-declaration-heads
+  "The two heads `expand-record-protocol-forms` reads with
+  `protocol-form->info`.
+
+  It exists so the refusal can spell the head the CALLER wrote. Measured
+  2026-09-03 at 5917518b, `(definterface)` answered
+
+      defprotocol requires unique bounded (method [this ...]) signatures
+
+  which names a form the caller did not write and sends them to the wrong
+  place to fix it. One arm serving two heads is the right shape -- an
+  interface and a protocol ARE the same declaration here -- but the sentence
+  has to say which one arrived.
+
+  Spelling a value read from source into a message is safe here for the reason
+  `definition-heads` gives about itself: a form reaches `protocol-form->info`
+  only because the filter in `expand-record-protocol-forms` MATCHED its head
+  against one of these two literals, so the head cannot be anything a program
+  chose. The error CODE stays a literal regardless -- the head travels in the
+  sentence, never in `:kotoba.error/code`."
+  '#{defprotocol definterface})
+
 (defn- protocol-form->info [form]
-  (let [[_ protocol-name & methods] form]
+  (let [[head protocol-name & methods] form]
     (when-not (and (valid-name? protocol-name)
                    (seq methods)
                    (every? #(and (seq? %)
@@ -11857,7 +12695,7 @@
                                  (every? valid-name? (second %)))
                            methods)
                    (= (count methods) (count (distinct (map first methods)))))
-      (reject! "defprotocol requires unique bounded (method [this ...]) signatures"
+      (reject! (str head " requires unique bounded (method [this ...]) signatures")
                form :kotoba.error/protocol-declaration))
     {:name protocol-name
      :methods (into {} (map (fn [[method-name params]] [method-name params]) methods))}))
@@ -11934,6 +12772,45 @@
           (reject! "protocol extension section requires a protocol name and methods"
                    whole-form :kotoba.error/protocol-extension))
         (recur tail (conj out [protocol-name methods]))))))
+
+(defn- extend-type-form->implementations
+  "Read one `(extend-type Record Protocol (method [this ...] body) ...)`.
+
+  The mirror of `extend-protocol-form->info` below, and it exists for the same
+  reason that one does: to say up front what the form NEEDS, instead of
+  letting an empty section list mean `nothing to check`.
+
+  Measured 2026-09-03 at 5917518b, `extend-type` was the only member of this
+  family that ADMITTED a malformed declaration. `(extend-type)`,
+  `(extend-type nil)` and `(extend-type 42)` all exited 0. The arm destructured
+  `record-name` and `extra`, handed `extra` to `protocol-extension-groups` --
+  whose loop returns `[]` on the first iteration when the remainder is empty --
+  and `mapcat` over no groups called nothing. Nothing else in the arm ever
+  looked at `record-name`. The whole-source pass then removed the form along
+  with the well-formed declarations, so the program compiled with the
+  extension the caller wrote silently absent: the HIR was byte-identical to
+  the same program with the line deleted, even next to a declared record and a
+  declared protocol.
+
+  The sentence is `extend-protocol`'s with its two nouns swapped, because the
+  two forms differ only in which side is named first and a second phrasing
+  would mean the compiler knew two things where there is one. It is raised on
+  the FORM, so the span points somewhere the reader can act -- `nil`, `42` and
+  `{}` carry no reader metadata of their own.
+
+  Eager on purpose. The caller used to build these with a lazy `mapcat`, which
+  is survivable while every refusal inside is reached during realisation, but
+  a guard whose `reject!` fires outside the sequence that forced it is a guard
+  that looks like it works."
+  [protocols records form]
+  (let [[_ record-name & extra] form]
+    (when-not (and (get records record-name) (seq extra))
+      (reject! "extend-type requires one declared record and bounded protocol sections"
+               form :kotoba.error/protocol-extension))
+    (into [] (mapcat (fn [[protocol-name methods]]
+                       (extension-implementations protocols records protocol-name
+                                                  record-name methods form)))
+          (protocol-extension-groups extra form))))
 
 (defn- extend-protocol-form->info [protocols records form]
   (let [[_ protocol-name & sections] form]
@@ -12282,7 +13159,7 @@
                                    forms)
                              (symbol "kotoba.user"))
         protocol-forms (filter #(and (seq? %)
-                                     (contains? '#{defprotocol definterface} (first %)))
+                                     (contains? protocol-declaration-heads (first %)))
                                forms)
         protocol-infos (mapv protocol-form->info protocol-forms)
         protocols (into {} (map (juxt :name identity)) protocol-infos)
@@ -12308,12 +13185,8 @@
             (reject! "duplicate record name" record-forms :kotoba.error/record-declaration))
         extend-type-forms (filter #(and (seq? %) (= 'extend-type (first %))) forms)
         extend-type-impls
-        (mapcat (fn [[_ record-name & extra :as form]]
-                  (mapcat (fn [[protocol-name methods]]
-                            (extension-implementations protocols records protocol-name
-                                                       record-name methods form))
-                          (protocol-extension-groups extra form)))
-                extend-type-forms)
+        (into [] (mapcat #(extend-type-form->implementations protocols records %))
+              extend-type-forms)
         extend-protocol-forms
         (filter #(and (seq? %) (= 'extend-protocol (first %))) forms)
         extend-protocol-infos
@@ -12457,11 +13330,28 @@
             (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
-        record-protocol-expansion (expand-record-protocol-forms forms)
+        ;; The definition layer's backstop, installed at every entry point
+        ;; that turns a top-level declaration into parts. A deliberate
+        ;; refusal passes through untouched; a HOST error that escapes now
+        ;; names the declaration it escaped from instead of arriving at
+        ;; `kotoba.sema/analyze` with no ex-data at all. See
+        ;; `definition-failure!` for why these three pass `nil` for the form.
+        ;;
+        ;; The three thunks FORCE their sequence result. A guard around a
+        ;; call that returns a lazy seq catches nothing -- the host error is
+        ;; raised where the seq is realised, which is after `try` has
+        ;; returned -- and it looks exactly like a guard that works. The
+        ;; per-declaration guards below return eager vectors already.
+        record-protocol-expansion (guarding-definition
+                                   'defrecord nil
+                                   #(update (expand-record-protocol-forms forms)
+                                            :forms vec))
         forms (:forms record-protocol-expansion)
         protocol-dispatch (:dispatch record-protocol-expansion)
-        forms (expand-closed-multimethod-forms forms)
-        forms (expand-defdesugar-forms forms)
+        forms (guarding-definition 'defmulti nil
+                                   #(vec (expand-closed-multimethod-forms forms)))
+        forms (guarding-definition 'defdesugar nil
+                                   #(vec (expand-defdesugar-forms forms)))
         namespaces (filter #(and (seq? %) (= 'ns (first %))) forms)
         defs (filter #(and (seq? %) (contains? '#{defn defn-} (first %))) forms)
         constant-forms (filter #(and (seq? %) (= 'def (first %))) forms)
@@ -12471,7 +13361,8 @@
         _ (when (> (count namespaces) 1)
             (reject! "at most one namespace form is admitted" namespaces :kotoba.error/namespace-count))
         namespace-info (when-let [namespace-form (first namespaces)]
-                         (namespace-parts namespace-form))
+                         (guarding-definition 'ns namespace-form
+                                              #(namespace-parts namespace-form)))
         declared-schemas (or (:schemas namespace-info) {})
         record-schemas (:record-schemas record-protocol-expansion)
         schema-collisions (set/intersection (set (keys declared-schemas))
@@ -12491,7 +13382,8 @@
                               (when merged-schemas (schema/identities merged-schemas)))
         raw-constants (into {}
                         (map (fn [form]
-                               (let [{:keys [name value]} (def-parts form)]
+                               (let [{:keys [name value]}
+                                     (guarding-definition 'def form #(def-parts form))]
                                  (when-not (valid-name? name)
                                    (reject! "invalid constant name" name))
                                  (when (contains? reserved-function-names name)
@@ -12507,7 +13399,11 @@
         source-names (mapv second defs)
         _ (when-not (= (count source-names) (count (distinct source-names)))
             (reject! "duplicate function name" defs))
-        def-parts (vec (mapcat #(expand-defn-parts % constants) defs))
+        def-parts (vec (mapcat (fn [form]
+                                 (guarding-definition
+                                  (first form) form
+                                  #(expand-defn-parts form constants)))
+                               defs))
         function-arities
         (reduce (fn [out {:keys [source-name logical-arity raw-params]}]
                   (if (vector? raw-params)
