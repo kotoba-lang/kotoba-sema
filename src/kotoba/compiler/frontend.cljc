@@ -76,7 +76,13 @@
     ;; Screen surface kit (kotoba-lang/screen, ADR-2609031100): observing a
     ;; screen and acting on it are separate authorities -- seeing is not
     ;; permission to press.
-    :screen/observe 31 :screen/act 32})
+    :screen/observe 31 :screen/act 32
+    ;; kbb ops-script surface (ADR-2607181900 readiness gate slice 3):
+    ;; compiler wire ids for the host capabilities kbb's bootstrap host
+    ;; already implements (runtime ids 258 env/read / 253 fs/browse in
+    ;; kotoba-core-contracts — distinct id space; the kbb host maps
+    ;; wire id -> runtime op).
+    :env/read 33 :fs/browse 34})
 
 (defn- load-capability-catalog []
   #?(:clj
