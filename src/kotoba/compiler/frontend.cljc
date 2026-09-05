@@ -983,6 +983,7 @@
     string-replace-all #{0 1 2}
     string-contains? #{0 1}
     string-split-count #{0 1}
+    string-index-of #{0 1}
     string-fold-case #{0}
     string-upper #{0}
     string-code-point-at #{0}
@@ -1089,6 +1090,7 @@
                          http-response-status 1 log-read-byte-count 1
                          string=? 2 string-concat 2 string-substring 3
                          string-replace-all 3 string-contains? 2 string-split-count 2
+                         string-index-of 2
                          string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
@@ -7587,6 +7589,11 @@
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
           :bool)
+
+      (= op 'string-index-of)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          :i64)
 
       (= op 'string-split-count)
       (do (doseq [[arg type] (map vector args types)]
