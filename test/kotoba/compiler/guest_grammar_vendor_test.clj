@@ -59,6 +59,8 @@
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn`.
 
+  Advanced 2026-09-05 again for the string-search surface slice
+  (string-index-of / string-contains? / string-split-count in :predicates).
   Advanced 2026-09-05 to `9d701ea9` with the kbb slice 2 string heads
   (env-read + fs-browse; prior authority #550 was `811e3d5e`). The authority
   grammar moved and this repository's vendored copy moves with it in the same
@@ -70,7 +72,7 @@
   `every-classpath-copy-of-the-grammar-is-the-same-grammar` compares ITS copy
   against the one in the kotoba-sema it pins, so amu's pin advance and its
   grammar resync have to be the same commit (amu ADR 0330's postscript)."
-  "9d701ea9a803a4b3d7dc4245274a9a901ab4ac506ebd401282b2acdf7747dd9c")
+  "3e41eb84a57a1fcc84dc0ec0b6a5ec1fd535c39e2cf6cfc14418fc1ec4567483")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
