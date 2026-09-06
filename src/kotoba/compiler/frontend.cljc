@@ -1583,6 +1583,46 @@
         (integer? offset) (assoc :offset offset)
         (integer? end-offset) (assoc :end-offset end-offset)))))
 
+;; ADR-544 step 1 (pure S-expression core + cljk surface): the pure head set
+;; (lam app rel query perform handle ref) is admitted as DESUGARING source
+;; forms. `lam` and `app` lower onto the existing lambda / application
+;; machinery: `(lam [params] body...)` -> `(fn [params] body...)`, and
+;; `(app f a...)` -> `(f a...)` (a plain prefix application, whose head f may
+;; itself be a computed closure expression). `rel query perform handle ref`
+;; are NOT given a lowering here -- they stay rejected until their semantics
+;; land; this rewrite alone is the honest first slice (lam/app).
+;;
+;; The rewrite runs on the SEXPR tree right after read-forms, BEFORE
+;; reject-reserved-source-symbols! and check-pure-product-source-forms!, so
+;; the rest of the compiler (desugar, validate, lift-lambda) sees only the
+;; already-lowered fn/application forms. Per the language's structural
+;; semantics, `quote` is skipped (it is structural-only; a quoted lam is not a
+;; call).
+(defn- rewrite-pure-app-form [form]
+  (cond
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= 'quote head)
+        form
+        (= 'lam head)
+        (let [rewritten (cons 'fn (map rewrite-pure-app-form (rest form)))]
+          (with-meta rewritten (meta form)))
+        (= 'app head)
+        (let [rewritten (map rewrite-pure-app-form (rest form))]
+          (with-meta rewritten (meta form)))
+        :else
+        (with-meta (map rewrite-pure-app-form form) (meta form))))
+    (vector? form)
+    (mapv rewrite-pure-app-form form)
+    (map? form)
+    (into {} (map (fn [[k v]] [(rewrite-pure-app-form k) (rewrite-pure-app-form v)])) form)
+    :else
+    form))
+
+(defn- rewrite-pure-application-forms [forms]
+  (mapv rewrite-pure-app-form forms))
+
 (defn- reject!
   "Reject a source form. Always attaches `:phase :subset`, a source `:span`
   when available, and a stable `:kotoba.error/code` (T3.1).
@@ -13336,7 +13376,8 @@
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
-        forms (mapv annotate-doseq-collection-kinds (read-forms source))
+        forms (rewrite-pure-application-forms
+               (mapv annotate-doseq-collection-kinds (read-forms source)))
         _ (when-not admit-linked-synthetics?
             (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
