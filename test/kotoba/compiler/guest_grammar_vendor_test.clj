@@ -72,7 +72,7 @@
   `every-classpath-copy-of-the-grammar-is-the-same-grammar` compares ITS copy
   against the one in the kotoba-sema it pins, so amu's pin advance and its
   grammar resync have to be the same commit (amu ADR 0330's postscript)."
-  "91726497cb66cb94b9407005312a2a3a6e4bfd5b67293e282d99a9c96a57636c")
+  "c02fcc5a8cb09a6d9d6fa9633ff0fb5a272e393040ef0d5a089f3c7355791d71")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
