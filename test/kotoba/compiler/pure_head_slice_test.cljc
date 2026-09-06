@@ -100,16 +100,70 @@
                           "(defn run [n :i64] :i64 (app (ref inc1) (app (ref inc1) n)))")
                      [1])))))
 
-(deftest ref-takes-exactly-one-simple-symbol
-  (testing "a literal is refused by name, not by whatever trips over it later"
-    (is (= :kotoba.error/pure-ref-argument
+(deftest ref-takes-exactly-one-name-this-module-defines
+  (testing "a literal"
+    (is (= :kotoba.error/ambient-forbidden
            (:code (refusal "(defn run [n :i64] :i64 (app (ref 1) n))")))))
   (testing "two names"
-    (is (= :kotoba.error/pure-ref-argument
+    (is (= :kotoba.error/ambient-forbidden
            (:code (refusal "(defn run [n :i64] :i64 (app (ref a b) n))")))))
   (testing "none"
-    (is (= :kotoba.error/pure-ref-argument
-           (:code (refusal "(defn run [n :i64] :i64 (app (ref) n))"))))))
+    (is (= :kotoba.error/ambient-forbidden
+           (:code (refusal "(defn run [n :i64] :i64 (app (ref) n))")))))
+  (testing "a name the module does not define"
+    (is (= :kotoba.error/ambient-forbidden
+           (:code (refusal "(defn run [n :i64] :i64 (app (ref nowhere) n))"))))))
+
+;; ---------------------------------------------------------------------------
+;; `ref` is also Clojure's STM constructor, which this language forbids.
+;;
+;; `lang/surface-status.edn` `:no-ambient-mutation` names `ref` on the
+;; `:authority` shielding axis and `lang/guest-grammar.edn` `:forbidden-heads`
+;; lists it beside `dosync`, `locking`, `volatile!`, `var` and `binding`.
+;; The pure-head rewrite runs BEFORE `forbidden-heads` is consulted, so an
+;; unrestricted pure `ref` takes that refusal away silently -- and did:
+;; measured 2026-09-06 against a2f86f87, `(let [r (ref n)] n)` was ADMITTED.
+;;
+;; A definition name is the one shape the two readings do not share. STM's
+;; `(ref x)` takes an initial VALUE; ADR-544's `(ref name)` names a definition.
+
+(deftest the-stm-reading-of-ref-keeps-its-security-refusal
+  (doseq [[what source]
+          [["an initial value that is a literal"
+            "(defn run [n :i64] :i64 (let [r (ref 0)] n))"]
+           ["an initial value that is a local"
+            "(defn run [n :i64] :i64 (let [r (ref n)] n))"]
+           ["read back through deref"
+            "(defn run [n :i64] :i64 (let [r (ref n)] (deref r)))"]
+           ["inside dosync"
+            "(defn run [n :i64] :i64 (dosync (ref n)))"]
+           ["altered"
+            "(defn run [n :i64] :i64 (let [r (ref n)] (alter r inc)))"]
+           ["commuted"
+            "(defn run [n :i64] :i64 (let [r (ref n)] (commute r inc)))"]
+           ["ref-set"
+            "(defn run [n :i64] :i64 (let [r (ref n)] (ref-set r 1)))"]]]
+    (let [r (refusal source)]
+      (is (= :kotoba.error/ambient-forbidden (:code r))
+          (str what " must keep the ambient-mutation refusal, not merely be "
+               "refused -- a `no admitted lowering` here would mean the "
+               "security constraint had stopped firing and something else "
+               "happened to catch it. Got: " (pr-str r))))))
+
+(deftest the-definition-name-restriction-is-what-separates-the-two-readings
+  ;; The negative control for the test above. If this ever goes red because
+  ;; the pure reading stopped working, the STM assertions became vacuous --
+  ;; they would pass for a `ref` that was refused everywhere.
+  (is (= 2 (answer (str "(defn inc1 [x :i64] :i64 (+ x 1))\n"
+                        "(defn run [n :i64] :i64 (app (ref inc1) n))")
+                   [1]))
+      "the pure reading must still work, or the STM refusals above prove nothing")
+  ;; And the discriminator itself: the SAME source shape, one name defined and
+  ;; one not. Nothing but the definition set differs.
+  (is (nil? (refusal (str "(defn thing [x :i64] :i64 x)\n"
+                          "(defn run [n :i64] :i64 (app (ref thing) n))"))))
+  (is (= :kotoba.error/ambient-forbidden
+         (:code (refusal "(defn run [n :i64] :i64 (app (ref thing) n))")))))
 
 ;; ---------------------------------------------------------------------------
 ;; perform

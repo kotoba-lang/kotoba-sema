@@ -1627,6 +1627,30 @@
 ;; skipped (it is structural-only; a quoted lam is not a call).
 (declare reject!)
 
+(def ^:dynamic *pure-definition-names*
+  "The top-level names a module defines, collected before the pure-head
+  rewrite walks it. `(ref name)` is admitted only for a name in this set.
+
+  Why the restriction exists, and why it is not incidental: `ref` is ALSO
+  Clojure's STM constructor, and this language forbids it --
+  `lang/surface-status.edn` `:no-ambient-mutation` names `ref` on the
+  `:authority` shielding axis and `lang/guest-grammar.edn` `:forbidden-heads`
+  lists it beside `dosync`, `locking`, `volatile!`, `var` and `binding`.
+  Because this rewrite runs BEFORE `forbidden-heads` is consulted, an
+  unrestricted pure `ref` would silently take that refusal away: measured
+  2026-09-06 against kotoba-sema a2f86f87, `(let [r (ref n)] n)` was
+  ADMITTED, where before slice 2 it was refused
+  `dynamic loading, interop, mutation, and metaprogramming are forbidden`.
+
+  A definition name is the one shape the two readings do not share. STM's
+  `(ref x)` takes an INITIAL VALUE; ADR-544's `(ref name)` names a
+  definition. Restricting to names the module actually defines keeps the pure
+  reading and gives every other shape its security refusal back.
+
+  Names introduced by `defrecord` / `defmulti` / `defdesugar` expansion are
+  NOT here: those passes run after this one. `(ref <generated-name>)` is
+  refused, which is the fail-closed direction.")
+
 (defn- nothing-rewritten?
   "True when every rewritten child is the very object it started as.
   `identical?` and not `=`, because the point is to return the ORIGINAL
@@ -1644,7 +1668,7 @@
         (= 'quote head)
         form
         (= 'lam head)
-        (let [rewritten (cons 'fn (map rewrite-pure-app-form (rest form)))]
+        (let [rewritten (cons 'fn (mapv rewrite-pure-app-form (rest form)))]
           (with-meta rewritten (meta form)))
         (= 'app head)
         ;; `(app)` used to rewrite to `()`, and an empty call form is not a
@@ -1654,13 +1678,17 @@
         (do (when (empty? (rest form))
               (reject! "app requires an operator: (app f arg ...)"
                        form :kotoba.error/pure-app-operator))
-            (let [rewritten (map rewrite-pure-app-form (rest form))]
+            (let [rewritten (apply list (mapv rewrite-pure-app-form (rest form)))]
               (with-meta rewritten (meta form))))
         (= 'ref head)
         (let [arguments (rest form)]
-          (when-not (and (= 1 (count arguments)) (simple-symbol? (first arguments)))
-            (reject! "ref names one definition: (ref name)"
-                     form :kotoba.error/pure-ref-argument))
+          (when-not (and (= 1 (count arguments))
+                         (simple-symbol? (first arguments))
+                         (contains? *pure-definition-names* (first arguments)))
+            (reject! (str "ref names one definition this module defines: "
+                          "(ref name). Every other shape of `ref` is Clojure's "
+                          "STM constructor, and state must not be ambient")
+                     form :kotoba.error/ambient-forbidden))
           ;; The span of the `(ref name)` form, not of the bare symbol: a
           ;; later refusal about this name should point at what the author
           ;; wrote. `vary-meta` rather than `with-meta` so a symbol that
@@ -1675,7 +1703,7 @@
                           "(perform :kind/op value ...)")
                      form :kotoba.error/pure-perform-capability))
           (let [rewritten (list* 'cap-call (first arguments)
-                                 (map rewrite-pure-app-form (rest arguments)))]
+                                 (mapv rewrite-pure-app-form (rest arguments)))]
             ;; The head the AUTHOR wrote, kept on the rewritten form. Without
             ;; it a `:pure-product` module containing `perform` was refused
             ;; `form outside pure-product profile: cap-call` -- naming a head
@@ -1726,8 +1754,22 @@
     :else
     form))
 
+(defn- top-level-definition-names
+  "The names a module's top level defines, read syntactically. This runs
+  before any expansion, so it sees exactly the `def` / `defn` / `defn-` an
+  author wrote."
+  [forms]
+  (into #{}
+        (keep (fn [form]
+                (when (and (seq? form)
+                           (contains? '#{def defn defn-} (first form))
+                           (simple-symbol? (second form)))
+                  (second form))))
+        forms))
+
 (defn- rewrite-pure-application-forms [forms]
-  (mapv rewrite-pure-app-form forms))
+  (binding [*pure-definition-names* (top-level-definition-names forms)]
+    (mapv rewrite-pure-app-form forms)))
 
 (defn- reject!
   "Reject a source form. Always attaches `:phase :subset`, a source `:span`
