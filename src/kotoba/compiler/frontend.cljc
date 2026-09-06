@@ -1694,6 +1694,61 @@
           ;; wrote. `vary-meta` rather than `with-meta` so a symbol that
           ;; already carries reader metadata keeps it.
           (vary-meta (first arguments) merge (meta form)))
+        ;; `rel` / `query` -- the relational pair, onto the kgraph, which is
+        ;; the language's only relational plane (ADR-2607198300 calls it "the
+        ;; language's in-mem EAVT view"). `rel` asserts a datom, `query` reads
+        ;; one back.
+        ;;
+        ;; This adds NO authority. Measured 2026-09-06: `kgraph-assert!` and
+        ;; `kgraph-get` are both already admitted under
+        ;; `:language-profile :pure-product`, so a module can do this today by
+        ;; spelling the primitives; the pure heads are a second spelling of an
+        ;; operation the profile already permits.
+        ;;
+        ;; `query` inherits the primitive's sentinel: `kgraph-get` answers
+        ;; i64 MIN for an absent (e,a). It is NOT wrapped in an `[:option T]`
+        ;; here, and that is deliberate -- a datom whose value IS i64 MIN is
+        ;; indistinguishable from an absent one, so an option would promise a
+        ;; totality the store does not have. Hiding a real ambiguity behind a
+        ;; type is worse than carrying it in the open.
+        (= 'rel head)
+        (let [arguments (rest form)]
+          (when-not (= 3 (count arguments))
+            (reject! "rel asserts one datom: (rel entity attribute value)"
+                     form :kotoba.error/pure-rel-arity))
+          (with-meta (list* 'kgraph-assert! (mapv rewrite-pure-app-form arguments))
+            (meta form)))
+        (= 'query head)
+        (let [arguments (rest form)]
+          (when-not (= 2 (count arguments))
+            (reject! (str "query reads one datom: (query entity attribute). "
+                          "It is a point read, not a pattern query -- there is "
+                          "no relational pattern form in this language yet")
+                     form :kotoba.error/pure-query-arity))
+          (with-meta (list* 'kgraph-get (mapv rewrite-pure-app-form arguments))
+            (meta form)))
+        ;; `handle` -- the elimination form for the one ability a guest can
+        ;; actually handle.
+        ;;
+        ;; Kotoba has two: capability effects, whose answer comes from the HOST
+        ;; and which a guest is not permitted to intercept, and `:abort`
+        ;; (lang/abort-ability.edn), which `try` eliminates. `handle` is `try`.
+        ;;
+        ;; That this cannot reach the capability half is not a convention, it
+        ;; is enforced, and it was measured before this landed: `(try (cap-call
+        ;; :clock/now 0) (catch e 7))` is refused `try body cannot abort; there
+        ;; is nothing to catch`, because a cap-call contributes no `:abort` to
+        ;; the row. So the pure spelling inherits exactly that refusal --
+        ;; `handle` cannot be used to intercept an effect the host answers.
+        ;;
+        ;; `perform` and `handle` are therefore NOT a matched pair here, and
+        ;; the asymmetry is real rather than hidden: `perform` introduces a
+        ;; capability effect that only the host answers, `handle` eliminates
+        ;; the abort ability. Recorded in lang/surface-status.edn.
+        (= 'handle head)
+        (let [rewritten (cons 'try (mapv rewrite-pure-app-form (rest form)))]
+          (with-meta rewritten
+            (assoc (meta form) :kotoba/pure-source-head 'handle)))
         (= 'perform head)
         (let [arguments (rest form)]
           (when-not (and (seq arguments)
