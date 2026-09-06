@@ -4817,6 +4817,36 @@
                                  arg))
                               args)))
 
+        ;; `mapv` and `filterv` are SURFACE ALIASES of `map` and `filter`, and
+        ;; neither is declared by the grammar authority -- not in `:sugar`, not
+        ;; in `:admitted-builtins` (measured 2026-09-06). The `case` below
+        ;; rewrote them unconditionally, so a module that DEFINES a function
+        ;; called `mapv` had its own definition silently overridden by the
+        ;; alias, and the alias requires `vector-i64` sources.
+        ;;
+        ;; `lang/stdlib/core.kotoba` defines exactly that: a `mapv` over pair
+        ;; chains, with a comment explaining that the `map` head refuses a
+        ;; stored callback so it walks the chain itself. The alias took the
+        ;; name anyway, and every function in that module became uncallable
+        ;; through the oracle harness -- 772 errors in
+        ;; `kotoba.lang.stdlib-core-oracle-test`, all of them one refusal
+        ;; re-reported per assertion, because the namespace shares one `delay`.
+        ;;
+        ;; Measured 2026-09-06: `mapv` was the ONLY name where a built-in beat
+        ;; a user definition. `keep`, `remove`, `sort`, `distinct`,
+        ;; `interpose`, `partition`, `juxt2` and `frequencies` all resolve to
+        ;; the module's own function; the identical body renamed to `mapv2`
+        ;; compiles and runs. So this is not a general shadowing policy -- it
+        ;; is one undeclared alias claiming a name it was never given.
+        ;;
+        ;; A DECLARED head is a different question: `map` and `filter` are in
+        ;; the authority, and whether a module may define one is a decision
+        ;; nobody has made. This changes only the two that the authority does
+        ;; not declare.
+        (and (contains? '#{mapv filterv} op)
+             (top-level-function-symbol? op))
+        (apply list op (map desugar-expr args))
+
         :else
         (case op
         list (binding [*contextual-closure-result-type* contextual-result-type]

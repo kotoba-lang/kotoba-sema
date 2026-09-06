@@ -81,7 +81,9 @@
             ;; unregistered for one commit, and the bug it now pins -- a call
             ;; form used as a map key, hashing its own bigint literal -- is
             ;; only reachable from this side.
-            [kotoba.compiler.pure-head-slice-test]))
+            [kotoba.compiler.pure-head-slice-test]
+            ;; one undeclared surface alias taking a name the module defined
+            [kotoba.compiler.mapv-alias-shadowing-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -115,4 +117,5 @@
              'kotoba.compiler.malformed-definition-form-test
              'kotoba.compiler.dropped-declaration-form-test
              'kotoba.compiler.string-upper-test
-             'kotoba.compiler.pure-head-slice-test)
+             'kotoba.compiler.pure-head-slice-test
+             'kotoba.compiler.mapv-alias-shadowing-test)
