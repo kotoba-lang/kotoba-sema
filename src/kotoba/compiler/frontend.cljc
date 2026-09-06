@@ -1585,19 +1585,48 @@
 
 ;; ADR-544 step 1 (pure S-expression core + cljk surface): the pure head set
 ;; (lam app rel query perform handle ref) is admitted as DESUGARING source
-;; forms. `lam` and `app` lower onto the existing lambda / application
-;; machinery: `(lam [params] body...)` -> `(fn [params] body...)`, and
-;; `(app f a...)` -> `(f a...)` (a plain prefix application, whose head f may
-;; itself be a computed closure expression). `rel query perform handle ref`
-;; are NOT given a lowering here -- they stay rejected until their semantics
-;; land; this rewrite alone is the honest first slice (lam/app).
+;; forms. Each admitted head lowers onto machinery the frontend already has,
+;; so NOTHING new reaches validation, inference or any backend -- a pure-head
+;; module produces the HIR its clojure-shaped twin produces.
+;;
+;;   (lam [params] body...)   -> (fn [params] body...)      lambda lift
+;;   (app f a...)             -> (f a...)                   prefix application
+;;   (ref name)               -> name                       definition reference
+;;   (perform :kind/op v...)  -> (cap-call :kind/op v...)    capability call
+;;
+;; `rel query handle` are NOT given a lowering here. They stay rejected with
+;; `operation has no admitted lowering`. Naming them in this comment is not
+;; admitting them: `rel`/`query` need a relational value model this compiler
+;; does not have, and `handle` needs an effect handler, which is a different
+;; thing from the abort ability's `try`/`catch` (lang/abort-ability.edn) and
+;; has no primitive to desugar onto. A head with no existing primitive cannot
+;; be "desugared to existing primitives", so it waits.
+;;
+;; `ref` is deliberately narrow. It takes ONE simple symbol and evaluates to
+;; that symbol -- it is the pure spelling of naming a definition, not a
+;; content-address dereference. `(ref cid:...)` from the ADR's identity
+;; pipeline is a later slice and needs the retrieved-definition machinery;
+;; admitting a wider `ref` now would mean admitting a spelling whose meaning
+;; is not yet decided.
+;;
+;; `perform` is the pure spelling of `cap-call` and carries exactly its
+;; authority -- no more. The capability keyword is resolved by the existing
+;; `resolve-capability-keyword!` against the registry, the namespace's
+;; declared `:capabilities` set is checked against it by the existing
+;; declare-then-check, and because this rewrite runs BEFORE
+;; `check-pure-product-source-forms!` a `perform` in a `:pure-product` module
+;; is already a `cap-call` when that check reads the tree -- so it is refused
+;; by the head set that already refuses `cap-call`, with no second list to
+;; keep in step. The NUMERIC id form is not admitted: wire ids are ABI, not
+;; source vocabulary (ADR-2607279200 Consequences).
 ;;
 ;; The rewrite runs on the SEXPR tree right after read-forms, BEFORE
 ;; reject-reserved-source-symbols! and check-pure-product-source-forms!, so
 ;; the rest of the compiler (desugar, validate, lift-lambda) sees only the
-;; already-lowered fn/application forms. Per the language's structural
-;; semantics, `quote` is skipped (it is structural-only; a quoted lam is not a
-;; call).
+;; already-lowered forms. Per the language's structural semantics, `quote` is
+;; skipped (it is structural-only; a quoted lam is not a call).
+(declare reject!)
+
 (defn- nothing-rewritten?
   "True when every rewritten child is the very object it started as.
   `identical?` and not `=`, because the point is to return the ORIGINAL
@@ -1618,8 +1647,43 @@
         (let [rewritten (cons 'fn (map rewrite-pure-app-form (rest form)))]
           (with-meta rewritten (meta form)))
         (= 'app head)
-        (let [rewritten (map rewrite-pure-app-form (rest form))]
-          (with-meta rewritten (meta form)))
+        ;; `(app)` used to rewrite to `()`, and an empty call form is not a
+        ;; shape any later pass names -- the operator went missing and the
+        ;; message came from whatever tripped over the hole first. Refuse it
+        ;; here, where the operator is the thing that is absent.
+        (do (when (empty? (rest form))
+              (reject! "app requires an operator: (app f arg ...)"
+                       form :kotoba.error/pure-app-operator))
+            (let [rewritten (map rewrite-pure-app-form (rest form))]
+              (with-meta rewritten (meta form))))
+        (= 'ref head)
+        (let [arguments (rest form)]
+          (when-not (and (= 1 (count arguments)) (simple-symbol? (first arguments)))
+            (reject! "ref names one definition: (ref name)"
+                     form :kotoba.error/pure-ref-argument))
+          ;; The span of the `(ref name)` form, not of the bare symbol: a
+          ;; later refusal about this name should point at what the author
+          ;; wrote. `vary-meta` rather than `with-meta` so a symbol that
+          ;; already carries reader metadata keeps it.
+          (vary-meta (first arguments) merge (meta form)))
+        (= 'perform head)
+        (let [arguments (rest form)]
+          (when-not (and (seq arguments)
+                         (keyword? (first arguments))
+                         (namespace (first arguments)))
+            (reject! (str "perform names one registered capability keyword: "
+                          "(perform :kind/op value ...)")
+                     form :kotoba.error/pure-perform-capability))
+          (let [rewritten (list* 'cap-call (first arguments)
+                                 (map rewrite-pure-app-form (rest arguments)))]
+            ;; The head the AUTHOR wrote, kept on the rewritten form. Without
+            ;; it a `:pure-product` module containing `perform` was refused
+            ;; `form outside pure-product profile: cap-call` -- naming a head
+            ;; that is nowhere in the source, because by the time that check
+            ;; reads the tree the rewrite has already happened. The refusal
+            ;; itself was right; only the word was wrong.
+            (with-meta rewritten
+              (assoc (meta form) :kotoba/pure-source-head 'perform))))
         :else
         (let [rewritten (mapv rewrite-pure-app-form form)]
           (if (nothing-rewritten? form rewritten)
@@ -1637,15 +1701,17 @@
     ;; i64-keyed map literal of nine entries or more into
     ;; `Cannot create property 'closure_uid_...' on bigint '0'` -- an internal
     ;; failure -- under nbb, while the JVM rebuilt the same literal and went on
-    ;; to admit or refuse it correctly. Nine is the array-map -> hash-map
-    ;; transition, which is why eight entries were fine and nine were not.
+    ;; to admit or refuse it correctly. Measured 2026-09-06: the portable suite
+    ;; has 0 failures at 9a23bbc~1 and 2 at 9a23bbc, both of them
+    ;; `a-typed-literal-is-bounded-by-the-typed-map-entry-limit`. Nine is the
+    ;; array-map -> hash-map transition, which is why eight entries were fine.
     ;;
     ;; So: walk the entries as a seq (that hashes nothing), and return the
-    ;; ORIGINAL map when no child changed. A module with no pure head in it now
-    ;; leaves this pass as the identical object it entered as, which is what a
-    ;; no-op should mean. When a child DID change, the map is rebuilt with
-    ;; `array-map`, which keeps the reader's own flat representation and its
-    ;; insertion order instead of promoting to a hashed one.
+    ;; ORIGINAL map when no child changed. A module with no pure head in it
+    ;; now leaves this pass as the identical object it entered as, which is
+    ;; what a no-op should mean. When a child DID change, the map is rebuilt
+    ;; with `array-map`, which keeps the reader's own flat representation and
+    ;; its insertion order instead of promoting to a hashed one.
     (let [entries (seq form)
           rewritten (mapv (fn [entry]
                             [(rewrite-pure-app-form (key entry))
@@ -1890,6 +1956,13 @@
   (when (and (seq? form) (symbol? (first form)))
     (first form)))
 
+(defn- pure-product-reported-head
+  "The head to NAME in a pure-product refusal: the pure spelling the author
+  wrote when there was one (`perform`), otherwise the head now in the tree.
+  The set membership is still decided by the real head -- one list, not two."
+  [form head]
+  (or (:kotoba/pure-source-head (meta form)) head))
+
 (defn- check-pure-product-source-forms!
   "T2.1: writeable pure-product source must not declare capabilities or use
   disallowed sugar / cap-call. Empty effects are checked after analyze."
@@ -1915,7 +1988,8 @@
       (when-let [head (pure-product-form-head node)]
         (when (or (contains? forbidden-heads head)
                   (contains? pure-product-disallowed-heads head))
-          (reject! (str "form outside pure-product profile: " head)
+          (reject! (str "form outside pure-product profile: "
+                        (pure-product-reported-head node head))
                    node
                    :kotoba.error/pure-product-forbidden))))))
 
@@ -4542,6 +4616,33 @@
       (cond
         (lexical-call-form? form)
         (desugar-lexical-call (or contextual-result-type :i64) form)
+
+        ;; A call whose operator is itself a call form -- `((lam [x] ...) n)`,
+        ;; the beta-redex, and the `(app (lam [x] ...) n)` the pure core
+        ;; spells it with. It is bound to a let and called by name, which is
+        ;; the shape `desugar-lexical-call` already lowers; the two spellings
+        ;; therefore produce the same HIR and nothing new reaches a backend.
+        ;;
+        ;; This branch has to come BEFORE the `contains?` lookups below.
+        ;; Those take `op` as a MAP KEY, and hashing a call form hashes its
+        ;; literals -- so under ClojureScript, where a `.kotoba` integer
+        ;; literal is a JS bigint, `((fn [x] (+ x 1)) n)` raised
+        ;; `Cannot create property 'closure_uid_...' on bigint '1'` and was
+        ;; reported as `:kotoba.error/internal-operation-failure`. The same
+        ;; program on the JVM hashed the form without complaint, fell through
+        ;; to validate-expr and was refused `computed or namespaced calls are
+        ;; forbidden`. One program, an internal failure on one backend and a
+        ;; refusal on the other, and neither answer was the right one.
+        ;; Measured 2026-09-06 against kotoba-sema 9a23bbc.
+        ;;
+        ;; Only `seq?` operators are taken. A keyword operator of any other
+        ;; arity than the 2 handled above, a map, a vector -- each keeps the
+        ;; refusal it already had, because binding them would admit spellings
+        ;; nothing has decided the meaning of.
+        (seq? op)
+        (let [callee (synthetic "app_callee")]
+          (binding [*contextual-closure-result-type* contextual-result-type]
+            (desugar-expr (list 'let [callee op] (apply list callee args)))))
 
         (contains? contextual-string-argument-indexes op)
         (let [string-indexes (get contextual-string-argument-indexes op)]

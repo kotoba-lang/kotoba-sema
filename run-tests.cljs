@@ -76,7 +76,12 @@
             ;; then silently dropped
             [kotoba.compiler.dropped-declaration-form-test]
             ;; string-upper: the mirror of string-fold-case at the type rule
-            [kotoba.compiler.string-upper-test]))
+            [kotoba.compiler.string-upper-test]
+            ;; ADR-544 step 1: the pure S-expression heads. It was `.cljc` and
+            ;; unregistered for one commit, and the bug it now pins -- a call
+            ;; form used as a map key, hashing its own bigint literal -- is
+            ;; only reachable from this side.
+            [kotoba.compiler.pure-head-slice-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -109,4 +114,5 @@
              'kotoba.compiler.malformed-type-argument-test
              'kotoba.compiler.malformed-definition-form-test
              'kotoba.compiler.dropped-declaration-form-test
-             'kotoba.compiler.string-upper-test)
+             'kotoba.compiler.string-upper-test
+             'kotoba.compiler.pure-head-slice-test)
