@@ -223,15 +223,76 @@
 ;; ---------------------------------------------------------------------------
 ;; The heads that are NOT admitted, refused for the reason they are not.
 
-(deftest rel-query-and-handle-have-no-lowering
-  (doseq [head '[rel query handle]]
-    (let [r (refusal (str "(defn run [n :i64] :i64 (" head " n))"))]
-      (is (= :kotoba.error/subset-reject (:code r))
-          (str head ": " (pr-str r)))
-      (is (= "operation has no admitted lowering" (:message r))
-          (str head " must be refused for HAVING NO LOWERING -- a refusal for "
-               "any other reason would keep this test green after " head
-               " landed. Got: " (pr-str r))))))
+(deftest rel-and-query-are-the-kgraph-pair
+  (testing "a datom asserted by rel reads back through query"
+    (is (= 42 (answer "(defn run [n :i64] :i64 (do (rel 1 2 42) (query 1 2)))" [0]))))
+  (testing "each is refused by name at the wrong arity, not by whatever trips later"
+    (is (= :kotoba.error/pure-rel-arity
+           (:code (refusal "(defn run [n :i64] :i64 (rel 1 2))"))))
+    (is (= :kotoba.error/pure-query-arity
+           (:code (refusal "(defn run [n :i64] :i64 (query 1))"))))))
+
+(deftest rel-and-query-add-no-authority
+  ;; The heads are a second spelling of operations the profile already
+  ;; permits. If that stops being true -- if the kgraph primitives are ever
+  ;; removed from `:pure-product` without the pure heads following -- this
+  ;; goes red, and it should: the spelling would then be a way in.
+  (doseq [[pure primitive]
+          [["(defn run [n :i64] :i64 (rel 1 2 42))"
+            "(defn run [n :i64] :i64 (kgraph-assert! 1 2 42))"]
+           ["(defn run [n :i64] :i64 (query 1 2))"
+            "(defn run [n :i64] :i64 (kgraph-get 1 2))"]]]
+    (let [p (analyzed (str pure "\n(defn main [] :i64 0)") {:language-profile :pure-product})
+          q (analyzed (str primitive "\n(defn main [] :i64 0)") {:language-profile :pure-product})]
+      (is (= (some? (:ok p)) (some? (:ok q)))
+          (str "the pure head and the primitive it spells must be admitted or "
+               "refused together under :pure-product. pure=" (pr-str p)
+               " primitive=" (pr-str q))))))
+
+;; ---------------------------------------------------------------------------
+;; `handle` is the elimination form for the ONE ability a guest can handle.
+;;
+;; Kotoba has two: capability effects, whose answer comes from the HOST, and
+;; `:abort` (lang/abort-ability.edn), which `try` eliminates. `handle` is
+;; `try`, and it therefore CANNOT reach the capability half.
+;;
+;; That is enforced rather than conventional, and the enforcement is what the
+;; tests below pin: a `cap-call` contributes no `:abort` to the effect row, so
+;; a `handle` wrapped around one is refused for having nothing to catch.
+
+(deftest handle-eliminates-the-abort-ability
+  (is (some? (:ok (analyzed
+                   "(defn main [] :i64 (handle (if (> 1 0) (throw \"boom\") 5) (catch e 7)))"
+                   nil)))))
+
+(deftest handle-cannot-intercept-a-capability-call
+  (doseq [[what source]
+          [["cap-call" (str "(ns m (:capabilities #{:clock/now}) (:export [main]))\n"
+                            "(defn main [] :i64 (handle (cap-call :clock/now 0) (catch e 7)))")]
+           ["perform"  (str "(ns m (:capabilities #{:clock/now}) (:export [main]))\n"
+                            "(defn main [] :i64 (handle (perform :clock/now 0) (catch e 7)))")]]]
+    (let [r (analyzed source nil)]
+      (is (nil? (:ok r)) (str what " must be refused"))
+      (is (= "try body cannot abort; there is nothing to catch" (:message r))
+          (str what ": the refusal must be that a capability call contributes "
+               "no :abort to the row -- that is WHY a guest cannot intercept "
+               "an effect the host answers. A refusal for any other reason "
+               "would leave this green while the protection was gone. Got: "
+               (pr-str r)))))
+  ;; The control. Without it the two assertions above pass for a `handle` that
+  ;; is refused everywhere, which is what it looked like before it landed.
+  (is (some? (:ok (analyzed
+                   "(defn main [] :i64 (handle (if (> 1 0) (throw \"boom\") 5) (catch e 7)))"
+                   nil)))
+      "handle must WORK for an abort, or the interception assertions prove nothing"))
+
+(deftest handle-is-outside-the-pure-product-profile-and-says-so-by-its-own-name
+  (let [r (analyzed "(defn main [] :i64 (handle (if (> 1 0) (throw \"boom\") 5) (catch e 7)))"
+                    {:language-profile :pure-product})]
+    (is (= :kotoba.error/pure-product-forbidden (:code r)))
+    (is (= "form outside pure-product profile: handle" (:message r))
+        "the refusal must name `handle`, which is what the author wrote, not
+         `try`, which is what the rewrite produced")))
 
 (deftest app-with-no-operator-is-refused-where-the-operator-is-missing
   (is (= :kotoba.error/pure-app-operator
