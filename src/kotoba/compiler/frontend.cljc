@@ -1598,6 +1598,15 @@
 ;; already-lowered fn/application forms. Per the language's structural
 ;; semantics, `quote` is skipped (it is structural-only; a quoted lam is not a
 ;; call).
+(defn- nothing-rewritten?
+  "True when every rewritten child is the very object it started as.
+  `identical?` and not `=`, because the point is to return the ORIGINAL
+  collection rather than an equal copy: an equal copy of a map literal is a
+  rebuilt map, and rebuilding is what hashes."
+  [originals rewritten]
+  (and (= (count originals) (count rewritten))
+       (every? true? (map identical? originals rewritten))))
+
 (defn- rewrite-pure-app-form [form]
   (cond
     (seq? form)
@@ -1612,11 +1621,42 @@
         (let [rewritten (map rewrite-pure-app-form (rest form))]
           (with-meta rewritten (meta form)))
         :else
-        (with-meta (map rewrite-pure-app-form form) (meta form))))
+        (let [rewritten (mapv rewrite-pure-app-form form)]
+          (if (nothing-rewritten? form rewritten)
+            form
+            (with-meta (apply list rewritten) (meta form))))))
     (vector? form)
-    (mapv rewrite-pure-app-form form)
+    (let [rewritten (mapv rewrite-pure-app-form form)]
+      (if (nothing-rewritten? form rewritten) form rewritten))
     (map? form)
-    (into {} (map (fn [[k v]] [(rewrite-pure-app-form k) (rewrite-pure-app-form v)])) form)
+    ;; REBUILDING a map literal is not free, and it is not free in a way only
+    ;; one runtime shows. `(into {} ...)` over nine or more entries produces a
+    ;; PersistentHashMap, which HASHES its keys -- and a `.kotoba` integer
+    ;; literal is a JS bigint under ClojureScript, which `cljs.core/hash`
+    ;; cannot tag. So rebuilding every literal unconditionally turned every
+    ;; i64-keyed map literal of nine entries or more into
+    ;; `Cannot create property 'closure_uid_...' on bigint '0'` -- an internal
+    ;; failure -- under nbb, while the JVM rebuilt the same literal and went on
+    ;; to admit or refuse it correctly. Nine is the array-map -> hash-map
+    ;; transition, which is why eight entries were fine and nine were not.
+    ;;
+    ;; So: walk the entries as a seq (that hashes nothing), and return the
+    ;; ORIGINAL map when no child changed. A module with no pure head in it now
+    ;; leaves this pass as the identical object it entered as, which is what a
+    ;; no-op should mean. When a child DID change, the map is rebuilt with
+    ;; `array-map`, which keeps the reader's own flat representation and its
+    ;; insertion order instead of promoting to a hashed one.
+    (let [entries (seq form)
+          rewritten (mapv (fn [entry]
+                            [(rewrite-pure-app-form (key entry))
+                             (rewrite-pure-app-form (val entry))])
+                          entries)]
+      (if (every? true? (map (fn [entry [k v]]
+                               (and (identical? (key entry) k)
+                                    (identical? (val entry) v)))
+                             entries rewritten))
+        form
+        (with-meta (apply array-map (mapcat identity rewritten)) (meta form))))
     :else
     form))
 
