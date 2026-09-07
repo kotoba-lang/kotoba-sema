@@ -1,8 +1,9 @@
-frontend: resync vendored guest-grammar.edn to authority (fs-browse-dir head)
+catalog: register fs/browse-dir capability (wire id 261) in vendored copy
 
-Resyncs this repo's vendored copy of lang/guest-grammar.edn to the
-kotoba-lang authority's fs-browse-dir head addition (capability id 261,
-kotoba-lang/find recursive tree-walk), and advances the
-guest_grammar_vendor_test digest pin to the new grammar sha256
-(ee7ea37c). The paired kotoba-lang, grammar and kotoba pins follow in
-their own PRs per the shared digest-carry rule.
+Adds :fs/browse-dir (source-op fs/browse-dir, effect :host/fs-browse-dir,
+compiler-wire-id 261) to this repo's vendored copy of
+lang/capability-catalog.edn after :fs/browse (34) — the family the
+kotoba-lang/find recursive tree-walk lowers. Pairs with kotoba-lang
+85fcca93 (authority) and kotoba-core-contracts 2ff3f736 (capability id 261).
+This catalogue is what an amu-consuming compiler reads across its pin, so
+the amu kotoba-sema pin must advance to this merge afterwards.
