@@ -6153,6 +6153,25 @@
           (do (when-not (= 2 (count args))
                 (reject! "filterv requires pred and one vector-i64 collection" form))
               (desugar-expr (with-meta (cons 'filter args) (meta form)))))
+        ;; `into` (2-arity, vector destination) is a SURFACE ALIAS of the
+        ;; already-qualified T4.5 reduce + vector-conj lowering (measured
+        ;; 2026-09-07: the hand twin `(reduce (fn [acc x] (vector-conj acc x))
+        ;; (vector-alloc 0) src)` check+compile PASSes with zero new backend
+        ;; work), so `into` is pure surface sugar - same lowering, same KIR
+        ;; CIDs. The alias is deliberately narrow: exactly 2 args, and only
+        ;; when this module does not define `into` itself (the mapv lesson -
+        ;; an undeclared alias must not steal a module's own name). Other
+        ;; shapes (transducer 3-arity, non-vector destinations) fail closed
+        ;; here with the alias's own name in the diagnostic.
+        into
+        (if (contains? *function-arities* 'into)
+          (apply list 'into (map desugar-expr args))
+          (do (when-not (= 2 (count args))
+                (reject! "into requires a destination and one source in this subset" form))
+              (desugar-expr
+               (with-meta
+                (list* 'reduce (list 'fn '[acc x] (list 'vector-conj 'acc 'x)) args)
+                (meta form)))))
         map
         (do
           (when-not (<= 2 (count args) 6)
