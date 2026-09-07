@@ -65,18 +65,19 @@
   ;; call with the wrong argument count that fell through to the function-call
   ;; arm would ALSO be rejected, with "operation has no admitted lowering",
   ;; and would look identical from outside.
-  (doseq [[label source]
-          [["cr4 read with an argument" "(defn f [] :i64 (kernel-read-cr4 0))"]
-           ["cr4 write with none" "(defn f [] :i64 (kernel-write-cr4))"]
-           ["cr4 write with two" "(defn f [] :i64 (kernel-write-cr4 0 0))"]
-           ["xsetbv with none" "(defn f [] :i64 (kernel-xsetbv))"]
+  (doseq [[label source head arity got]
+          [["cr4 read with an argument" "(defn f [] :i64 (kernel-read-cr4 0))" "kernel-read-cr4" 0 1]
+           ["cr4 write with none" "(defn f [] :i64 (kernel-write-cr4))" "kernel-write-cr4" 1 0]
+           ["cr4 write with two" "(defn f [] :i64 (kernel-write-cr4 0 0))" "kernel-write-cr4" 1 2]
+           ["xsetbv with none" "(defn f [] :i64 (kernel-xsetbv))" "kernel-xsetbv" 2 0]
            ;; The one that would matter most on a machine: a one-argument
            ;; `xsetbv` would take the VALUE as the index and write EDX:EAX
            ;; from whatever the register happened to hold.
-           ["xsetbv with one" "(defn f [] :i64 (kernel-xsetbv 6))"]
-           ["xsetbv with three" "(defn f [] :i64 (kernel-xsetbv 0 6 0))"]]]
+           ["xsetbv with one" "(defn f [] :i64 (kernel-xsetbv 6))" "kernel-xsetbv" 2 1]
+           ["xsetbv with three" "(defn f [] :i64 (kernel-xsetbv 0 6 0))" "kernel-xsetbv" 2 3]]]
     (testing label
-      (is (= "kernel privileged operation arity mismatch"
+      (is (= (str "kernel privileged operation arity mismatch: " head " takes " arity
+                  (if (= 1 arity) " argument" " arguments") "; got " got)
              (rejection-of source))))))
 
 (deftest the-arity-map-is-the-single-statement-of-it

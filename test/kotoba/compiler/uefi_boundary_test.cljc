@@ -43,7 +43,8 @@
     (testing (str head " at its declared arity")
       (is (analyzes? (wrapper head arity)) head))
     (testing (str head " refuses one argument too many")
-      (is (= "kernel privileged operation arity mismatch"
+      (is (= (str "kernel privileged operation arity mismatch: " head " takes "
+                  arity (if (= 1 arity) " argument" " arguments") "; got " (inc arity))
              (rejection-of (str "(defn f ["
                                 (str/join " " (map #(str "a" %)
                                                               (range (inc arity))))

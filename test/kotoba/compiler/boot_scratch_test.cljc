@@ -124,7 +124,7 @@
     (is (= "kernel-function-address requires a function name"
            (rejection-of "(defn f [] :i64 (kernel-function-address 0))"))))
   (testing "and the arity is one"
-    (is (= "image symbol operation arity mismatch"
+    (is (= "image symbol operation arity mismatch: kernel-function-address takes 1 argument; got 0"
            (rejection-of "(defn f [] :i64 (kernel-function-address))")))))
 
 (deftest an-address-is-an-i64-and-jump-to-takes-it

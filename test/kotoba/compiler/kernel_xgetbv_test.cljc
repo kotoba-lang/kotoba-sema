@@ -56,12 +56,12 @@
   ;; call with the wrong argument count that fell through to the function-call
   ;; arm would ALSO be rejected, with "operation has no admitted lowering",
   ;; and would look identical from outside.
-  (doseq [[label source] [["no arguments" "(defn f [] :i64 (kernel-xgetbv))"]
-                          ["two arguments" "(defn f [] :i64 (kernel-xgetbv 0 0))"]
-                          ["three arguments"
-                           "(defn f [] :i64 (kernel-xgetbv 0 0 0))"]]]
+  (doseq [[label source got] [["no arguments" "(defn f [] :i64 (kernel-xgetbv))" 0]
+                              ["two arguments" "(defn f [] :i64 (kernel-xgetbv 0 0))" 2]
+                              ["three arguments"
+                               "(defn f [] :i64 (kernel-xgetbv 0 0 0))" 3]]]
     (testing label
-      (is (= "kernel privileged operation arity mismatch"
+      (is (= (str "kernel privileged operation arity mismatch: kernel-xgetbv takes 1 argument; got " got)
              (rejection-of source))))))
 
 (deftest the-arity-map-is-the-single-statement-of-it

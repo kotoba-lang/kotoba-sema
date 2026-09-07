@@ -54,7 +54,7 @@
              (rejection-of (str "(defn f [] :i64 (" head " 42))")))
           head))
     (testing (str head " refuses a second argument")
-      (is (= "rodata literal arity mismatch"
+      (is (= (str "rodata literal arity mismatch: " head " takes 1 argument; got 2")
              (rejection-of (str "(defn f [] :i64 (" head " \"" text "\" \"" text "\"))")))
           head))))
 
@@ -126,10 +126,12 @@
                               ")"))
             wrapper (fn [n] (str "(defn f [a b] :i64 " (call n) ")"))]
         (is (analyzes? (wrapper arity)) head)
-        (is (= "kernel privileged operation arity mismatch"
+        (is (= (str "kernel privileged operation arity mismatch: " head " takes "
+                    arity (if (= 1 arity) " argument" " arguments") "; got " (inc arity))
                (rejection-of (wrapper (inc arity))))
             head)
-        (is (= "kernel privileged operation arity mismatch"
+        (is (= (str "kernel privileged operation arity mismatch: " head " takes "
+                    arity (if (= 1 arity) " argument" " arguments") "; got " (dec arity))
                (rejection-of (wrapper (dec arity))))
             head)))))
 

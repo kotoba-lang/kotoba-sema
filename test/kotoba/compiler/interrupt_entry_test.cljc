@@ -66,11 +66,11 @@
   ;; call with the wrong argument count that fell through to the function-call
   ;; arm would ALSO be rejected, with "operation has no admitted lowering",
   ;; and would look identical from outside.
-  (doseq [[label source]
-          [["no arguments" "(defn f [] :i64 (kernel-isr-entry-address))"]
-           ["two arguments" "(defn f [] :i64 (kernel-isr-entry-address 3 3))"]]]
+  (doseq [[label source got]
+          [["no arguments" "(defn f [] :i64 (kernel-isr-entry-address))" 0]
+           ["two arguments" "(defn f [] :i64 (kernel-isr-entry-address 3 3))" 2]]]
     (testing label
-      (is (= "kernel privileged operation arity mismatch"
+      (is (= (str "kernel privileged operation arity mismatch: kernel-isr-entry-address takes 1 argument; got " got)
              (rejection-of source))))))
 
 (deftest the-arity-map-is-the-single-statement-of-it

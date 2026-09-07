@@ -37,6 +37,38 @@
        (catch Exception _ #{}))
      :cljs #{}))
 
+(defn- load-grammar-declared-heads
+  "Every head the language grammar names, when `guest-grammar.edn` is on the
+  classpath: `:admitted-builtins`, the `:sugar` keys, `:arithmetic`,
+  `:comparisons`, `:predicates` and the float `:arithmetic`. A set of symbols.
+
+  Read for one diagnostic only -- telling a head the grammar declares and this
+  analyser has not lowered (`(min 1 2)`) apart from a misspelling
+  (`(frobnicate 1)`). Nothing is admitted from it. Same runtime shape as
+  `load-catalog-forbidden`: ClojureScript cannot read a classpath resource
+  synchronously, so it answers the empty set there and such a head is reported
+  as unknown, which is what that runtime can honestly say."
+  []
+  #?(:clj
+     (try
+       (let [c (or (clojure.java.io/resource "kotoba/lang/guest-grammar.edn")
+                   (clojure.java.io/resource "lang/guest-grammar.edn"))]
+         (if c
+           (with-open [r (clojure.java.io/reader c)]
+             (let [edn (clojure.edn/read (java.io.PushbackReader. r))]
+               (into #{}
+                     (comp cat (map #(symbol (name %))))
+                     [(:admitted-builtins edn) (keys (:sugar edn))
+                      (:arithmetic edn) (:comparisons edn) (:predicates edn)
+                      (get-in edn [:floating-point :arithmetic])])))
+           #{}))
+       (catch Exception _ #{}))
+     :cljs #{}))
+
+(def grammar-declared-heads
+  "See `load-grammar-declared-heads`. Empty on ClojureScript."
+  (load-grammar-declared-heads))
+
 (def forbidden-heads
   ;; `atom` left this set on 2026-09-02: local-state slice 1 (kotoba-lang
   ;; `lang/local-state.edn`) admits a non-escaping, function-local atom by
@@ -2110,6 +2142,23 @@
   content of the report when the surplus argument was previously answered."
   [op expected supplied form]
   (reject! (str "function call arity mismatch: " op " takes " expected
+                (if (= 1 expected) " argument" " arguments")
+                "; got " supplied)
+           form :kotoba.error/call-arity
+           {:function op :expected expected :supplied supplied}))
+
+(defn- reject-operation-arity!
+  "The builtin-family form of `reject-call-arity!`: FAMILY is the table's
+  label (`\"string operation\"`), OP the head, EXPECTED the table's arity and
+  SUPPLIED what the call wrote.
+
+  Every family used to say only `<family> arity mismatch` -- neither the head
+  nor the count it wanted, so a two-argument `string-substring` read the same
+  as any other slip in a family of a dozen heads. The sentence, the code and
+  the ex-data now match the user-function form: one class of defect, one
+  shape of report, whichever table caught it."
+  [family op expected supplied form]
+  (reject! (str family " arity mismatch: " op " takes " expected
                 (if (= 1 expected) " argument" " arguments")
                 "; got " supplied)
            form :kotoba.error/call-arity
@@ -4885,7 +4934,7 @@
         (contains? typed-vector-operations op)
         (do
           (when-not (= (get typed-vector-operations op) (count args))
-            (reject! "typed vector operation arity mismatch" form))
+            (reject-operation-arity! "typed vector operation" op (get typed-vector-operations op) (count args) form))
           (apply list op
                  (map-indexed (fn [index arg]
                                 ((if (zero? index)
@@ -6775,6 +6824,66 @@
         (recur (next pairs) (conj env name)))
       env)))
 
+(defn- table-heads [table] (if (map? table) (keys table) (seq table)))
+
+(defn- unknown-operation!
+  "Refuse the call FORM whose head OP no pass admitted, naming WHICH of the
+  two facts that can mean. `operation has no admitted lowering` (here) and
+  `operation has no admitted type signature` (inference) were one catch-all
+  over a misspelling, a head the grammar declares and this analyser has not
+  lowered, and -- one family over -- a known head at the wrong arity, which
+  each table already refused but without the head or the count (that half is
+  `reject-operation-arity!`). Measured while porting aiueos
+  `native/tcp_stream.kotoba`.
+
+  A head in `grammar-declared-heads` is named as declared-but-unlowered;
+  anything else is unknown, with the nearest heads among the module's
+  FUNCTIONS and this frontend's builtin tables beside it, the way
+  `unbound-symbol!` does for a value. Candidates are what the checker has in
+  hand; none is invented."
+  [op form functions]
+  (if (contains? grammar-declared-heads op)
+    (reject! (str op " is named by the language grammar (lang/guest-grammar.edn) "
+                  "but this analyser has no lowering for it -- not implemented on "
+                  "this compile path")
+             form :kotoba.error/unimplemented-grammar-head
+             {:kotoba.error/operation op})
+    (let [kind-of (-> {}
+                      (into (map (fn [n] [(str n) "builtin"]))
+                            (mapcat table-heads
+                                    [arithmetic
+                                     comparisons
+                                     float-division-heads
+                                     i64-operations
+                                     i32-operations
+                                     heap-operations
+                                     kgraph-operations
+                                     string-operations
+                                     xml-operations
+                                     decimal-operations
+                                     f64-operations
+                                     f32-operations
+                                     typed-map-operations
+                                     typed-safe-value-operations
+                                     parametric-result-operations
+                                     typed-vector-operations
+                                     typed-f64-vector-operations
+                                     compact-graph-operations
+                                     document-fixed-operations
+                                     kernel-memory-operations
+                                     kernel-privileged-operations
+                                     rodata-literal-operations
+                                     image-symbol-operations]))
+                      (into (map (fn [n] [(str n) "function"])) (keys functions)))
+          nearest (nearest-names op (keys kind-of))]
+      (reject! (str "unknown operation: " op " is not a builtin, a sugar head, or a "
+                    "function of this module"
+                    (when (seq nearest)
+                      (str "; nearest defined: "
+                           (str/join ", " (map #(str % " (" (kind-of %) ")") nearest)))))
+               form :kotoba.error/unknown-operation
+               {:kotoba.error/operation op :kotoba.error/nearest nearest}))))
+
 (declare validate-expr-impl)
 
 ;; The three per-expression passes -- lowering, admission and inference --
@@ -6860,7 +6969,7 @@
 
         (contains? i64-operations op)
         (do (when-not (= (get i64-operations op) (count args))
-              (reject! "i64 operation arity mismatch" form))
+              (reject-operation-arity! "i64 operation" op (get i64-operations op) (count args) form))
             (when (contains? '#{i64-shift-left i64-shift-right u64-shift-right} op)
               (when-not (and (kotoba-integer? (second args)) (<= 0 (second args) 63))
                 (reject! "i64 shift count must be an integer literal in [0,63]" form)))
@@ -6868,7 +6977,7 @@
 
         (contains? i32-operations op)
         (do (when-not (= (get i32-operations op) (count args))
-              (reject! "i32 operation arity mismatch" form))
+              (reject-operation-arity! "i32 operation" op (get i32-operations op) (count args) form))
             (when (contains? '#{i32-shift-left i32-shift-right u32-shift-right} op)
               (when-not (and (kotoba-integer? (second args)) (<= 0 (second args) 31))
                 (reject! "i32 shift count must be an integer literal in [0,31]" form)))
@@ -6880,37 +6989,37 @@
 
         (contains? heap-operations op)
         (do (when-not (= (get heap-operations op) (count args))
-              (reject! "heap operation arity mismatch" form))
+              (reject-operation-arity! "heap operation" op (get heap-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? kgraph-operations op)
         (do (when-not (= (get kgraph-operations op) (count args))
-              (reject! "kgraph operation arity mismatch" form))
+              (reject-operation-arity! "kgraph operation" op (get kgraph-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? string-operations op)
         (do (when-not (= (get string-operations op) (count args))
-              (reject! "string operation arity mismatch" form))
+              (reject-operation-arity! "string operation" op (get string-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? xml-operations op)
         (do (when-not (= (get xml-operations op) (count args))
-              (reject! "XML operation arity mismatch" form))
+              (reject-operation-arity! "XML operation" op (get xml-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? decimal-operations op)
         (do (when-not (= (get decimal-operations op) (count args))
-              (reject! "decimal operation arity mismatch" form))
+              (reject-operation-arity! "decimal operation" op (get decimal-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? f64-operations op)
         (do (when-not (= (get f64-operations op) (count args))
-              (reject! "f64 operation arity mismatch" form))
+              (reject-operation-arity! "f64 operation" op (get f64-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? f32-operations op)
         (do (when-not (= (get f32-operations op) (count args))
-              (reject! "f32 operation arity mismatch" form))
+              (reject-operation-arity! "f32 operation" op (get f32-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? typed-map-operations op)
@@ -6925,7 +7034,7 @@
 
         (contains? typed-safe-value-operations op)
         (do (when-not (= (get typed-safe-value-operations op) (count args))
-              (reject! "typed safe-value operation arity mismatch" form))
+              (reject-operation-arity! "typed safe-value operation" op (get typed-safe-value-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (= op 'typed-list-new)
@@ -7239,7 +7348,7 @@
 
         (contains? parametric-result-operations op)
         (do (when-not (= (get parametric-result-operations op) (count args))
-              (reject! "parametric result operation arity mismatch" form))
+              (reject-operation-arity! "parametric result operation" op (get parametric-result-operations op) (count args) form))
             (when-not (parametric-result-type? (first args))
               (reject! "parametric result operation requires [:result ok-type err-type]" form))
             (validate-value-type! (first args))
@@ -7258,22 +7367,22 @@
 
         (contains? typed-vector-operations op)
         (do (when-not (= (get typed-vector-operations op) (count args))
-              (reject! "typed vector operation arity mismatch" form))
+              (reject-operation-arity! "typed vector operation" op (get typed-vector-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? typed-f64-vector-operations op)
         (do (when-not (= (get typed-f64-vector-operations op) (count args))
-              (reject! "typed f64 vector operation arity mismatch" form))
+              (reject-operation-arity! "typed f64 vector operation" op (get typed-f64-vector-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? compact-graph-operations op)
         (do (when-not (= (get compact-graph-operations op) (count args))
-              (reject! "compact graph operation arity mismatch" form))
+              (reject-operation-arity! "compact graph operation" op (get compact-graph-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? document-fixed-operations op)
         (do (when-not (= (get document-fixed-operations op) (count args))
-              (reject! "document operation arity mismatch" form))
+              (reject-operation-arity! "document operation" op (get document-fixed-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? '#{document-vector document-list document-set} op)
@@ -7290,7 +7399,7 @@
 
         (contains? kernel-memory-operations op)
         (do (when-not (= (get kernel-memory-operations op) (count args))
-              (reject! "kernel memory operation arity mismatch" form))
+              (reject-operation-arity! "kernel memory operation" op (get kernel-memory-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         ;; fwstore: the allocation that answers with an address is the one
@@ -7303,7 +7412,7 @@
         ;; an expression.
         (= op 'kernel-uefi-alloc-region)
         (do (when-not (= (get kernel-privileged-operations op) (count args))
-              (reject! "kernel privileged operation arity mismatch" form))
+              (reject-operation-arity! "kernel privileged operation" op (get kernel-privileged-operations op) (count args) form))
             (let [pages (nth args 4 ::missing)]
               (when-not (integer-literal? pages)
                 (reject! "kernel-uefi-alloc-region page count must be a literal"
@@ -7316,7 +7425,7 @@
 
         (contains? kernel-privileged-operations op)
         (do (when-not (= (get kernel-privileged-operations op) (count args))
-              (reject! "kernel privileged operation arity mismatch" form))
+              (reject-operation-arity! "kernel privileged operation" op (get kernel-privileged-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         ;; boot-lit: the argument is a piece of the SOURCE, not an expression,
@@ -7327,7 +7436,7 @@
         ;; something the backend has to refuse with a shape error.
         (contains? rodata-literal-operations op)
         (do (when-not (= (get rodata-literal-operations op) (count args))
-              (reject! "rodata literal arity mismatch" form))
+              (reject-operation-arity! "rodata literal" op (get rodata-literal-operations op) (count args) form))
             (when-not (string? (first args))
               (reject! "rodata literal requires a string literal" form))
             (when-not (rodata-literal-content? op (first args))
@@ -7340,7 +7449,7 @@
         ;; about an unbound local.
         (contains? image-symbol-operations op)
         (do (when-not (= (get image-symbol-operations op) (count args))
-              (reject! "image symbol operation arity mismatch" form))
+              (reject-operation-arity! "image symbol operation" op (get image-symbol-operations op) (count args) form))
             (when-not (symbol? (first args))
               (reject! "kernel-function-address requires a function name" form))
             (when (contains? locals (first args))
@@ -7356,7 +7465,7 @@
             (reject-call-arity! op expected (count args) form))
           (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
-        :else (reject! "operation has no admitted lowering" form))
+        :else (unknown-operation! op form functions))
       form)
     :else (reject! "value type is outside the safe profile" form)))
 
@@ -8151,7 +8260,7 @@
             (require-expression-type! actual wanted arg)))
         result)
 
-      :else (reject! "operation has no admitted type signature" op))))
+      :else (unknown-operation! op op signatures))))
 
 (declare infer-expression-type-impl)
 
