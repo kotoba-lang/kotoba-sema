@@ -93,7 +93,15 @@
             ;; grammar and lives in grammar_declared_head_test.clj)
             [kotoba.compiler.operation-refusal-cause-test]
             ;; an unannotated parameter whose uses disagree names both uses
-            [kotoba.compiler.parameter-use-conflict-test]))
+            [kotoba.compiler.parameter-use-conflict-test]
+            ;; a self-recursive let binding needed only under a later branch
+            [kotoba.compiler.eager-recursive-let-binding-test]
+            ;; an export that is a def / a defn- / undefined names which; the
+            ;; rewrite prints the literal, which is a BigInt here
+            [kotoba.compiler.export-names-constant-test]
+            ;; `sema/lint`: (* 0 <call>) sequencing reported, not refused;
+            ;; the zero is a BigInt here and `zero?` does not see it
+            [kotoba.compiler.zero-multiply-lint-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -131,4 +139,7 @@
              'kotoba.compiler.mapv-alias-shadowing-test
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
-             'kotoba.compiler.parameter-use-conflict-test)
+             'kotoba.compiler.parameter-use-conflict-test
+             'kotoba.compiler.eager-recursive-let-binding-test
+             'kotoba.compiler.export-names-constant-test
+             'kotoba.compiler.zero-multiply-lint-test)

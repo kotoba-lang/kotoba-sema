@@ -10339,6 +10339,175 @@
                       :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
                (:span first-use) (assoc :span (:span first-use))))))
 
+;; --- an eager self-recursive let binding (lang-h1) --------------------------
+;;
+;; `let` is strict: every binding is evaluated before the body runs, whatever
+;; the body then decides. When the binding's value calls the function being
+;; defined and the body uses the binding only under one branch of an `if`, the
+;; recursion runs on every path -- including the path that branch exists to
+;; guard against, typically the base case. Measured while porting aiueos
+;; `os/aiueos/native/tcp_stream.kotoba`: `next-run` bound to the next poll
+;; step above the `if` that decided whether to poll again recursed past its
+;; own base case; the fix was to call a helper inside the branch. Nothing here
+;; is invented: the binding, the call and the branch are read off the
+;; desugared body, and the refusal names all three and the form that fixes it.
+
+(defn- need-join
+  "Combine how two evaluated-in-sequence forms need a binding: a path that
+  always evaluates one of them always needs it."
+  [a b]
+  (cond (or (= :always a) (= :always b)) :always
+        (or (= :sometimes a) (= :sometimes b)) :sometimes
+        :else :never))
+
+(defn- binding-need
+  "How FORM needs the let binding NAME: `:always` when every path through FORM
+  evaluates a reference to it, `:sometimes` when some path does not, `:never`
+  when nothing references it. An `if` needs it always only when its test does
+  or both branches do; a `let` that rebinds NAME shadows it for the rest of
+  its bindings and its body; a `fn` literal's body runs later, so a reference
+  there is at most sometimes."
+  [binder form]
+  (cond
+    (= binder form) :always
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          need-test (binding-need binder test)
+          need-then (binding-need binder then)
+          need-else (binding-need binder else)]
+      (cond (= :always need-test) :always
+            (and (= :always need-then) (= :always need-else)) :always
+            (every? #{:never} [need-test need-then need-else]) :never
+            :else :sometimes))
+    (and (seq? form) (= 'let (first form))
+         (vector? (second form)) (even? (count (second form))))
+    (loop [pairs (partition 2 (second form)) need :never]
+      (if-let [[bound value] (first pairs)]
+        (let [need (need-join need (binding-need binder value))]
+          (if (= bound binder)
+            need
+            (recur (next pairs) need)))
+        (reduce need-join need (map #(binding-need binder %) (drop 2 form)))))
+    (and (seq? form) (= 'fn (first form)))
+    (if (some #(= binder %) (tree-seq coll? seq form)) :sometimes :never)
+    (coll? form) (reduce need-join :never (map #(binding-need binder %) (seq form)))
+    :else :never))
+
+(defn- deciding-branch
+  "The first `if` in FORM (pre-order) whose test does not reference NAME and
+  whose branches disagree about it -- one references it, the other does not
+  -- as `[if-form :then|:else]`, or nil when no single `if` decides it."
+  [binder form]
+  (cond
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          then-refers? (not= :never (binding-need binder then))
+          else-refers? (not= :never (binding-need binder else))]
+      (if (and (= :never (binding-need binder test))
+               (not= then-refers? else-refers?))
+        [form (if then-refers? :then :else)]
+        (some #(deciding-branch binder %) [test then else])))
+    (coll? form) (some #(deciding-branch binder %) (seq form))
+    :else nil))
+
+(defn- self-call-in
+  "The first call to one of SELF-NAMES inside FORM, or nil."
+  [self-names form]
+  (some #(when (and (seq? %) (contains? self-names (first %))) %)
+        (tree-seq coll? seq form)))
+
+(defn- eager-recursive-let-binding!
+  "Refuse the let binding NAME of FUNCTION whose VALUE calls the function
+  itself (CALL) while BODY needs the binding only on some paths. The branch
+  that decides it is named when one `if` does; the fix named is to bind
+  inside that branch or call a helper from it."
+  [function binder value call body]
+  (let [[deciding side] (deciding-branch binder body)
+        test-text (when deciding (str "(if " (use-site-text (second deciding)) " ...)"))
+        side-text (when side (name side))]
+    (reject! (str "eager self-recursive let binding: " binder " in " function
+                  " binds " (use-site-text call) " before "
+                  (if deciding test-text "the body")
+                  " decides whether it is needed -- let is strict, so "
+                  (first call) " recurses on every path"
+                  (if deciding
+                    (str ", including the one the " side-text
+                         " branch guards against; bind it inside that branch, (if "
+                         (use-site-text (second deciding))
+                         (if (= side :then)
+                           (str " (let [" binder " " (use-site-text value) "] ...) ...)")
+                           (str " ... (let [" binder " " (use-site-text value) "] ...))"))
+                         ", or call a helper there")
+                    (str ", though " binder " is used only on some of them; bind it "
+                         "where it is needed, or call a helper there")))
+             value :kotoba.error/eager-recursive-let-binding
+             (cond-> {:kotoba.error/function function
+                      :kotoba.error/binding binder
+                      :kotoba.error/call call}
+               side (assoc :kotoba.error/branch side)))))
+
+(defn- check-eager-recursive-let-bindings!
+  "Walk FUNCTION's BODY (desugared: `cond`/`when` are already `if`) and
+  refuse the first `let` binding whose value calls one of SELF-NAMES and
+  whose body needs the binding only on some paths. A binding the body never
+  references is left alone: that is sequencing, not a guarded recursion, and
+  it is not this shape."
+  [function self-names body]
+  (letfn [(walk [form]
+            (when (coll? form)
+              (when (and (seq? form) (= 'let (first form))
+                         (vector? (second form)) (even? (count (second form))))
+                (doseq [[binder value] (partition 2 (second form))]
+                  (when-let [call (self-call-in self-names value)]
+                    (when (= :sometimes (binding-need binder (cons 'do (drop 2 form))))
+                      (eager-recursive-let-binding! function binder value call
+                                                    (cons 'do (drop 2 form)))))))
+              (doseq [child (seq form)] (walk child))))]
+    (walk body)))
+
+;; --- an export that is not a public function names why (lang-h8) ----------
+;;
+;; `namespace exports must name declared public functions` was the whole
+;; message for three different mistakes: exporting a `def` constant (exports
+;; are functions; a constant has no entry to call), exporting a `defn-`, and
+;; exporting a name the module never defines. Measured while porting aiueos:
+;; a poll bound exported as a `def` cost a round to learn the rule and another
+;; to learn the fix. The head is kept; what follows it names the export, which
+;; of the three it is, and -- for the constant -- the one-line rewrite.
+
+(defn- constant-source-text
+  "VALUE as written, through `use-site-text` (integers as digits on both
+  runtimes), bounded so a large literal does not become the message."
+  [value]
+  (let [text (use-site-text value)]
+    (if (> (count text) 40) (str (subs text 0 37) "...") text)))
+
+(defn- export-not-a-public-function!
+  "Refuse EXPORTS, naming the first that is not in SOURCE-PUBLIC and why: a
+  constant of RAW-CONSTANTS (name -> value as written), a private function
+  of PRIVATE-NAMES, or undefined."
+  [exports source-public private-names raw-constants]
+  (let [offender (first (remove (set source-public) exports))
+        head (str "namespace exports must name declared public functions: " offender)]
+    (cond
+      (contains? raw-constants offender)
+      (let [value-text (constant-source-text (get raw-constants offender))
+            fix (str "(defn " offender " [] " value-text ")")]
+        (reject! (str head " is a def constant, not a function; export a function "
+                      "that returns it: write " fix " in place of (def " offender
+                      " " value-text ")")
+                 exports :kotoba.error/export-names-constant
+                 {:kotoba.error/export offender :kotoba.error/fix fix}))
+      (contains? private-names offender)
+      (reject! (str head " is declared with defn-, which is private; declare it "
+                    "with defn to export it")
+               exports :kotoba.error/export-names-private-function
+               {:kotoba.error/export offender})
+      :else
+      (reject! (str head " is not defined in this module")
+               exports :kotoba.error/export-names-undefined
+               {:kotoba.error/export offender}))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -14371,7 +14540,9 @@
     (when-not (= (count parsed) (count signatures)) (reject! "duplicate function name" defs))
     (when (and (some? (:exports namespace-info))
                (not-every? (set source-public) (:exports namespace-info)))
-      (reject! "namespace exports must name declared public functions" (:exports namespace-info)))
+      (export-not-a-public-function! (:exports namespace-info) source-public
+                                     (->> def-parts (remove :public?) (map :source-name) set)
+                                     raw-constants))
     (when (and (nil? entry) (nil? (:exports namespace-info)))
       (reject! "entryless library requires an explicit non-empty namespace export list" defs))
     (when (and (nil? entry) (empty? exports))
@@ -14428,8 +14599,15 @@
         (reject! "inline nominal descriptor differs from closed namespace schema"
                  (first mismatched))))
     (let [budget (volatile! 0)]
-      (doseq [{:keys [params body]} parsed]
-        (validate-expr body (set params) signatures 0 budget)))
+      (doseq [{:keys [name source-name params body]} parsed]
+        (validate-expr body (set params) signatures 0 budget)
+        ;; After validation, so every `let` and `if` here is well-formed.
+        ;; Synthesized helpers (`__kotoba_loop_N`) are skipped: their
+        ;; recursion is a `recur` the source wrote in tail position.
+        (when-not (str/includes? (str name) "__")
+          (check-eager-recursive-let-bindings! (or source-name name)
+                                               (set (remove nil? [name source-name]))
+                                               body))))
     (check-value-types! parsed)
     (check-linear-resource-ownership! parsed)
     (check-kernel-region-provenance! parsed)
@@ -14581,3 +14759,88 @@
                           :source-reader-depth-limit max-reader-depth
                           :note "the source is inside the admission limit; the tree the desugar builds is not"}))
          (throw e))))))
+
+;; --- non-fatal findings: `(* 0 <call>)` sequencing (lang-h4) ----------------
+;;
+;; This frontend refuses or admits; it has had no channel for a finding that
+;; is neither. amu's `kotoba.compiler.diagnostic` envelope carries `:severity`,
+;; and every refusal here arrives there as `:error`. `lint` is the non-fatal
+;; peer: it analyzes SOURCE exactly as `analyze` does (a refusal propagates
+;; unchanged) and then reports findings as maps in that same vocabulary --
+;; `:code`, `:severity :warning`, `:message`, `:span` when the form kept one
+;; -- for a caller to print or gate on. Nothing is refused.
+;;
+;; The one finding so far. `(+ v (* 0 (poll fd)))` is how a `.kotoba` program
+;; sequences a call whose value it does not want: multiplying by zero keeps
+;; the call and drops the result. aiueos writes it deliberately, so it is
+;; not refused -- but a reader who did not write it sees an arithmetic
+;; expression, not a side effect, and the sunk call is easy to miss. The
+;; finding names the call and the function it is in.
+
+(defn- zero-literal?
+  "True for the integer literal 0 on either runtime (a ClojureScript BigInt
+  is not `zero?`; its digits are)."
+  [form]
+  (and (kotoba-integer? form) (= "0" (str form))))
+
+(defn- sunk-call-form?
+  "A call form whose value can be sunk: a simple-symbol head that is not one
+  of the core special forms."
+  [form]
+  (and (seq? form) (simple-symbol? (first form))
+       (not (contains? '#{if let do fn quote} (first form)))))
+
+(defn- zero-multiply?
+  "`(* 0 call)` or `(* call 0)`."
+  [form]
+  (and (seq? form) (= '* (first form)) (= 3 (count form))
+       (let [[_ a b] form]
+         (or (and (zero-literal? a) (sunk-call-form? b))
+             (and (zero-literal? b) (sunk-call-form? a))))))
+
+(defn- zero-multiply-findings
+  "Every `(* 0 <call>)` in FUNCTION's BODY as a finding. When the product is an
+  operand of `+`, the `+` form is the site shown -- that is the shape as
+  written, `(+ v (* 0 call))` -- otherwise the product itself."
+  [function body]
+  (let [found (volatile! [])
+        note! (fn [site product]
+                (let [[_ a b] product
+                      call (if (sunk-call-form? a) a b)]
+                  (vswap! found conj
+                          (cond-> {:code :kotoba.lint/zero-multiply-sequencing
+                                   :severity :warning
+                                   :function function
+                                   :sunk-call (first call)
+                                   :message (str (use-site-text site) " in " function
+                                                 " sequences " (use-site-text call)
+                                                 " by multiplying it by zero: " (first call)
+                                                 " runs for its effect and its value is discarded")}
+                            (form-span site) (assoc :span (form-span site))))))]
+    (letfn [(walk [form]
+              (when (coll? form)
+                (let [plus? (and (seq? form) (= '+ (first form)))]
+                  (doseq [child (seq form)]
+                    (if (zero-multiply? child)
+                      (do (note! (if plus? form child) child)
+                          (doseq [grandchild (rest child)] (walk grandchild)))
+                      (walk child))))))]
+      (if (zero-multiply? body)
+        (do (note! body body) (doseq [child (rest body)] (walk child)))
+        (walk body)))
+    @found))
+
+(defn lint
+  "Analyze SOURCE as `analyze` does, then return a vector of non-fatal
+  findings about it -- empty when there is nothing to say. A refusal raised
+  by analysis propagates unchanged: a program that does not compile has no
+  findings, it has an error. Synthesized functions (names carrying `__`) are
+  not reported on; the source never wrote them."
+  ([source] (lint source nil))
+  ([source opts]
+   (let [hir (analyze source opts)]
+     (into []
+           (mapcat (fn [{:keys [name body]}]
+                     (when-not (str/includes? (str name) "__")
+                       (zero-multiply-findings name body))))
+           (:functions hir)))))
