@@ -91,7 +91,9 @@
             ;; the catch-all split: unknown head vs. wrong arity (the third
             ;; cause, a grammar-declared head, needs the JVM to read the
             ;; grammar and lives in grammar_declared_head_test.clj)
-            [kotoba.compiler.operation-refusal-cause-test]))
+            [kotoba.compiler.operation-refusal-cause-test]
+            ;; an unannotated parameter whose uses disagree names both uses
+            [kotoba.compiler.parameter-use-conflict-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -128,4 +130,5 @@
              'kotoba.compiler.pure-head-slice-test
              'kotoba.compiler.mapv-alias-shadowing-test
              'kotoba.compiler.unbound-symbol-nearest-test
-             'kotoba.compiler.operation-refusal-cause-test)
+             'kotoba.compiler.operation-refusal-cause-test
+             'kotoba.compiler.parameter-use-conflict-test)

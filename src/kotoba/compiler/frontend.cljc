@@ -6249,6 +6249,22 @@
                  (try (desugar-expr* form contextual-result-type)
                       (catch #?(:clj Throwable :cljs :default) error
                         (internal-failure! error form))))
+        ;; Display-only: when the lowering table renamed the head
+        ;; (`string-length` -> `string-byte-length`), remember the name the
+        ;; source wrote on the NEW head symbol. List meta does not survive the
+        ;; later passes (they rebuild with `cons`/`list`); a head symbol is
+        ;; carried through by value and keeps its meta. Read by
+        ;; `use-site-text` so a diagnostic can show the operation as written;
+        ;; nothing else looks at it, and symbol equality ignores meta.
+        result (if (and (seq? form) (symbol? (first form))
+                        (seq? result) (symbol? (first result))
+                        (not= (first form) (first result))
+                        (not (:kotoba.diag/source-head (meta (first result)))))
+                 (with-meta (apply list (vary-meta (first result) assoc
+                                                   :kotoba.diag/source-head (first form))
+                                   (rest result))
+                   (meta result))
+                 result)
         location (select-keys (meta form)
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (or (coll? result) (symbol? result)))
@@ -7669,7 +7685,28 @@
 
     :else nil))
 
-(defn- infer-call-type [op args locals signatures]
+(declare infer-call-type-impl)
+
+(defn- infer-call-type
+  "`infer-call-type-impl`, with the call named on any refusal it raises about
+  one of its own arguments: a rejection whose `:form` is one of ARGS and that
+  no inner call has already claimed gets `:kotoba.error/use-site (op ...)`.
+  The innermost call wins, so the site is the operation that actually
+  required the type. `infer-absent-parameter-types` reads it to name both
+  disagreeing uses of a parameter; nothing else changes -- same message,
+  same code, same span."
+  [op args locals signatures]
+  (try (infer-call-type-impl op args locals signatures)
+       (catch #?(:clj Throwable :cljs :default) error
+         (let [data (ex-data error)]
+           (if (and (:phase data)
+                    (not (contains? data :kotoba.error/use-site))
+                    (some #(= % (:form data)) args))
+             (throw (ex-info (ex-message error)
+                             (assoc data :kotoba.error/use-site (cons op args))))
+             (throw error))))))
+
+(defn- infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
       (contains? arithmetic op)
@@ -10246,6 +10283,61 @@
        (try (do (validate-value-type! type) true)
             (catch #?(:clj Exception :cljs :default) _ false))))
 
+(defn- use-site-text
+  "FORM as a diagnostic shows it: the head the source wrote when the lowering
+  table renamed it (`:kotoba.diag/source-head`, see `desugar-expr`), integers
+  through `str` so a ClojureScript BigInt prints as its digits, everything
+  else as `pr-str` would."
+  [form]
+  (cond
+    (seq? form)
+    (let [head (first form)
+          shown (or (:kotoba.diag/source-head (meta head)) head)]
+      (str "(" (str/join " " (map use-site-text (cons shown (rest form)))) ")"))
+    (vector? form) (str "[" (str/join " " (map use-site-text form)) "]")
+    (kotoba-integer? form) (str form)
+    (symbol? form) (str form)
+    :else (pr-str form)))
+
+(defn- parameter-use-conflict!
+  "Refuse FUNCTION's unannotated PARAMETER whose uses disagree, naming both.
+
+  FIRST-USE is the refusal the provisional `:i64` met (its `:expected` is what
+  the pass tried to refine to, its `:form`/`:span` the site the ordinary
+  checker would have reported); SECOND-USE is the refusal the refined type
+  met on the same parameter. Each carries the `:use-site` `infer-call-type`
+  attached, or nil when the requirement came from something other than a call
+  (then that use is described, not shown). The message keeps the old head --
+  same site, same expected/actual -- so the report lands where it did before
+  this pass could say why (lang-h5)."
+  [function parameter first-use second-use]
+  (let [type-text #(if (keyword? %) (name %) (pr-str %))
+        use-text (fn [{:keys [expected use-site span]}]
+                   (str (if use-site (use-site-text use-site) "another use")
+                        " requires " (type-text expected)
+                        (when (and (:line span) (:column span))
+                          (str " [" parameter " at " (:line span) ":" (:column span) "]"))))
+        use-data (fn [{:keys [expected use-site span]}]
+                   (cond-> {:expected expected}
+                     use-site (assoc :operation
+                                     (let [head (first use-site)]
+                                       (or (:kotoba.diag/source-head (meta head)) head))
+                                     :site (use-site-text use-site))
+                     span (assoc :span span)))]
+    (reject! (str "expression type mismatch: expected " (type-text (:expected first-use))
+                  ", got " (type-text (:actual first-use))
+                  " -- parameter " parameter " of " function
+                  " is unannotated and its uses disagree: "
+                  (use-text first-use) ", " (use-text second-use)
+                  "; annotate " parameter)
+             (:form first-use) :kotoba.error/parameter-use-conflict
+             (cond-> {:kotoba.error/expected (:expected first-use)
+                      :kotoba.error/actual (:actual first-use)
+                      :kotoba.error/function function
+                      :kotoba.error/parameter parameter
+                      :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
+               (:span first-use) (assoc :span (:span first-use))))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -10269,9 +10361,11 @@
     - a refinement is applied only when the parameter is still provisional
       `:i64` and the checker asked for something else, so a parameter used as
       an i64 stays one;
-    - a parameter whose uses disagree is put back to `:i64` and never refined
-      again, which is exactly its behaviour before this pass existed -- the
-      program still fails, and it fails at the same place.
+    - a parameter whose uses disagree is refused here, at the site the
+      ordinary checker would have reported (same form, same expected/actual
+      head), with both uses named -- `parameter-use-conflict!`. The program
+      fails where it failed before this pass existed; what changed is that
+      the refusal says why (lang-h5).
 
   Iterated to a fixed point because one function's refined parameter changes
   what its callers' arguments must be. The budget bounds it at parameters plus
@@ -10285,7 +10379,6 @@
                 fs))
         total-params (reduce + 0 (map #(count (:params %)) functions))]
     (loop [fs functions
-           conflicted #{}
            budget (+ 1 (count functions) total-params)]
       (if (or (zero? budget) (not-any? :param-types-inferred fs))
         fs
@@ -10297,9 +10390,10 @@
                           (do (infer-expression-type body (zipmap params param-types) table)
                               nil)
                           (catch #?(:clj Exception :cljs :default) error
-                            (let [{:keys [form]
+                            (let [{:keys [form span]
                                    expected :kotoba.error/expected
-                                   actual :kotoba.error/actual} (ex-data error)
+                                   actual :kotoba.error/actual
+                                   use-site :kotoba.error/use-site} (ex-data error)
                                   index (when (simple-symbol? form)
                                           (first (keep-indexed
                                                   (fn [index parameter]
@@ -10307,15 +10401,17 @@
                                                   params)))]
                               (when (and index
                                          (contains? param-types-inferred index)
-                                         (not (contains? conflicted [name index]))
                                          (= :i64 (nth param-types index))
                                          (= :i64 actual)
                                          (refinable-value-type? expected))
-                                {:function name :index index :type expected}))))))
+                                {:function name :index index :type expected
+                                 :first-use {:expected expected :actual actual
+                                             :form form :span span
+                                             :use-site use-site}}))))))
                     fs)]
           (if-not refinement
             fs
-            (let [{:keys [function index type]} refinement
+            (let [{:keys [function index type first-use]} refinement
                   applied (mapv (fn [f]
                                   (if (= function (:name f))
                                     (assoc f :param-types
@@ -10323,24 +10419,30 @@
                                     f))
                                 fs)
                   ;; Did refining it move the disagreement onto the same
-                  ;; parameter? Then its uses do not agree, and the answer is
-                  ;; the one it had before: provisional i64, reported by the
-                  ;; ordinary checker at the site the source already named.
-                  regressed?
-                  (let [refined (first (filter #(= function (:name %)) applied))
-                        t (signature-table applied)]
+                  ;; parameter? Then its uses do not agree, and no single type
+                  ;; satisfies both: refuse now, at the site the ordinary
+                  ;; checker would have reported, naming both uses.
+                  refined (first (filter #(= function (:name %)) applied))
+                  second-use
+                  (let [t (signature-table applied)]
                     (try (do (infer-expression-type (:body refined)
                                                     (zipmap (:params refined) (:param-types refined))
                                                     t)
-                             false)
+                             nil)
                          (catch #?(:clj Exception :cljs :default) error
-                           (let [{:keys [form] actual :kotoba.error/actual} (ex-data error)]
-                             (and (simple-symbol? form)
-                                  (= form (nth (:params refined) index))
-                                  (= type actual))))))]
-              (if regressed?
-                (recur fs (conj conflicted [function index]) (dec budget))
-                (recur applied conflicted (dec budget))))))))))
+                           (let [{:keys [form]
+                                  actual :kotoba.error/actual
+                                  expected :kotoba.error/expected
+                                  use-site :kotoba.error/use-site} (ex-data error)]
+                             (when (and (simple-symbol? form)
+                                        (= form (nth (:params refined) index))
+                                        (= type actual))
+                               {:expected expected :use-site use-site
+                                :span (:span (ex-data error))})))))]
+              (if second-use
+                (parameter-use-conflict! function (nth (:params refined) index)
+                                         first-use second-use)
+                (recur applied (dec budget))))))))))
 
 (defn- infer-absent-results
   "Give every unannotated `defn` the result type its body actually has.

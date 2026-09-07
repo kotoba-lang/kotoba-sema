@@ -13,8 +13,8 @@
   The tests that matter are the conservative ones. This pass must not change
   the meaning of any program that was admitted before it, so: a written
   annotation is never refined, a parameter used as an i64 stays one, and a
-  parameter whose uses disagree falls back to `:i64` and fails at the same
-  place with the same message it failed with before."
+  parameter whose uses disagree fails at the same place it failed before,
+  with the old message as its head and both uses named after it."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
@@ -71,12 +71,15 @@
     (is (= "expression type mismatch: expected string, got i64"
            (rejection-of "(defn f [x :i64] :i64 (string-length x))")))))
 
-(deftest disagreeing-uses-fall-back-and-fail-where-they-failed-before
+(deftest disagreeing-uses-fail-where-they-failed-before-and-name-both-uses
   (testing "a parameter wanted as both an i64 and a string"
-    ;; The message is the one this program produced before the pass existed.
-    ;; Falling back rather than picking a side is what makes this conservative:
-    ;; the program still fails, at the same site, saying the same thing.
-    (is (= "expression type mismatch: expected string, got i64"
+    ;; The head of the message is the one this program produced before the
+    ;; pass existed, at the same site; since lang-h5 the tail names the two
+    ;; operations that disagree (`parameter_use_conflict_test`). Not picking a
+    ;; side is what makes this conservative: the program still fails.
+    (is (= (str "expression type mismatch: expected string, got i64 -- "
+                "parameter x of f is unannotated and its uses disagree: "
+                "(string-length x) requires string [x at 1:45], (> x 0) requires i64 [x at 1:25]; annotate x")
            (rejection-of "(defn f [x] :i64 (if (> x 0) (string-length x) 0))"))))
   (testing "and the other order"
     (is (some? (rejection-of "(defn f [x] :i64 (if (string=? x \"a\") x 0))")))))
