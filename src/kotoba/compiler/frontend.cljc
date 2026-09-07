@@ -115,6 +115,10 @@
     ;; kotoba-core-contracts — distinct id space; the kbb host maps
     ;; wire id -> runtime op).
     :env/read 33 :fs/browse 34
+    ;; fs/browse-dir (runtime id 261, kotoba-core-contracts): directory
+    ;; listing WITH is-dir per entry. Compiler wire 36 — distinct from
+    ;; the runtime id; same effect family as fs/browse.
+    :fs/browse-dir 36
     ;; fs/app-data (runtime id 202): sandboxed read/write on the
     ;; granted path scope — wire id 35 for the native loader provider
     ;; table (ADR-2609051100 slice 4).
