@@ -10338,6 +10338,132 @@
                       :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
                (:span first-use) (assoc :span (:span first-use))))))
 
+;; --- an eager self-recursive let binding (lang-h1) --------------------------
+;;
+;; `let` is strict: every binding is evaluated before the body runs, whatever
+;; the body then decides. When the binding's value calls the function being
+;; defined and the body uses the binding only under one branch of an `if`, the
+;; recursion runs on every path -- including the path that branch exists to
+;; guard against, typically the base case. Measured while porting aiueos
+;; `os/aiueos/native/tcp_stream.kotoba`: `next-run` bound to the next poll
+;; step above the `if` that decided whether to poll again recursed past its
+;; own base case; the fix was to call a helper inside the branch. Nothing here
+;; is invented: the binding, the call and the branch are read off the
+;; desugared body, and the refusal names all three and the form that fixes it.
+
+(defn- need-join
+  "Combine how two evaluated-in-sequence forms need a binding: a path that
+  always evaluates one of them always needs it."
+  [a b]
+  (cond (or (= :always a) (= :always b)) :always
+        (or (= :sometimes a) (= :sometimes b)) :sometimes
+        :else :never))
+
+(defn- binding-need
+  "How FORM needs the let binding NAME: `:always` when every path through FORM
+  evaluates a reference to it, `:sometimes` when some path does not, `:never`
+  when nothing references it. An `if` needs it always only when its test does
+  or both branches do; a `let` that rebinds NAME shadows it for the rest of
+  its bindings and its body; a `fn` literal's body runs later, so a reference
+  there is at most sometimes."
+  [binder form]
+  (cond
+    (= binder form) :always
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          need-test (binding-need binder test)
+          need-then (binding-need binder then)
+          need-else (binding-need binder else)]
+      (cond (= :always need-test) :always
+            (and (= :always need-then) (= :always need-else)) :always
+            (every? #{:never} [need-test need-then need-else]) :never
+            :else :sometimes))
+    (and (seq? form) (= 'let (first form))
+         (vector? (second form)) (even? (count (second form))))
+    (loop [pairs (partition 2 (second form)) need :never]
+      (if-let [[bound value] (first pairs)]
+        (let [need (need-join need (binding-need binder value))]
+          (if (= bound binder)
+            need
+            (recur (next pairs) need)))
+        (reduce need-join need (map #(binding-need binder %) (drop 2 form)))))
+    (and (seq? form) (= 'fn (first form)))
+    (if (some #(= binder %) (tree-seq coll? seq form)) :sometimes :never)
+    (coll? form) (reduce need-join :never (map #(binding-need binder %) (seq form)))
+    :else :never))
+
+(defn- deciding-branch
+  "The first `if` in FORM (pre-order) whose test does not reference NAME and
+  whose branches disagree about it -- one references it, the other does not
+  -- as `[if-form :then|:else]`, or nil when no single `if` decides it."
+  [binder form]
+  (cond
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          then-refers? (not= :never (binding-need binder then))
+          else-refers? (not= :never (binding-need binder else))]
+      (if (and (= :never (binding-need binder test))
+               (not= then-refers? else-refers?))
+        [form (if then-refers? :then :else)]
+        (some #(deciding-branch binder %) [test then else])))
+    (coll? form) (some #(deciding-branch binder %) (seq form))
+    :else nil))
+
+(defn- self-call-in
+  "The first call to one of SELF-NAMES inside FORM, or nil."
+  [self-names form]
+  (some #(when (and (seq? %) (contains? self-names (first %))) %)
+        (tree-seq coll? seq form)))
+
+(defn- eager-recursive-let-binding!
+  "Refuse the let binding NAME of FUNCTION whose VALUE calls the function
+  itself (CALL) while BODY needs the binding only on some paths. The branch
+  that decides it is named when one `if` does; the fix named is to bind
+  inside that branch or call a helper from it."
+  [function binder value call body]
+  (let [[deciding side] (deciding-branch binder body)
+        test-text (when deciding (str "(if " (use-site-text (second deciding)) " ...)"))
+        side-text (when side (name side))]
+    (reject! (str "eager self-recursive let binding: " binder " in " function
+                  " binds " (use-site-text call) " before "
+                  (if deciding test-text "the body")
+                  " decides whether it is needed -- let is strict, so "
+                  (first call) " recurses on every path"
+                  (if deciding
+                    (str ", including the one the " side-text
+                         " branch guards against; bind it inside that branch, (if "
+                         (use-site-text (second deciding))
+                         (if (= side :then)
+                           (str " (let [" binder " " (use-site-text value) "] ...) ...)")
+                           (str " ... (let [" binder " " (use-site-text value) "] ...))"))
+                         ", or call a helper there")
+                    (str ", though " binder " is used only on some of them; bind it "
+                         "where it is needed, or call a helper there")))
+             value :kotoba.error/eager-recursive-let-binding
+             (cond-> {:kotoba.error/function function
+                      :kotoba.error/binding binder
+                      :kotoba.error/call call}
+               side (assoc :kotoba.error/branch side)))))
+
+(defn- check-eager-recursive-let-bindings!
+  "Walk FUNCTION's BODY (desugared: `cond`/`when` are already `if`) and
+  refuse the first `let` binding whose value calls one of SELF-NAMES and
+  whose body needs the binding only on some paths. A binding the body never
+  references is left alone: that is sequencing, not a guarded recursion, and
+  it is not this shape."
+  [function self-names body]
+  (letfn [(walk [form]
+            (when (coll? form)
+              (when (and (seq? form) (= 'let (first form))
+                         (vector? (second form)) (even? (count (second form))))
+                (doseq [[binder value] (partition 2 (second form))]
+                  (when-let [call (self-call-in self-names value)]
+                    (when (= :sometimes (binding-need binder (cons 'do (drop 2 form))))
+                      (eager-recursive-let-binding! function binder value call
+                                                    (cons 'do (drop 2 form)))))))
+              (doseq [child (seq form)] (walk child))))]
+    (walk body)))
+
 ;; --- an export that is not a public function names why (lang-h8) ----------
 ;;
 ;; `namespace exports must name declared public functions` was the whole
@@ -14472,8 +14598,15 @@
         (reject! "inline nominal descriptor differs from closed namespace schema"
                  (first mismatched))))
     (let [budget (volatile! 0)]
-      (doseq [{:keys [params body]} parsed]
-        (validate-expr body (set params) signatures 0 budget)))
+      (doseq [{:keys [name source-name params body]} parsed]
+        (validate-expr body (set params) signatures 0 budget)
+        ;; After validation, so every `let` and `if` here is well-formed.
+        ;; Synthesized helpers (`__kotoba_loop_N`) are skipped: their
+        ;; recursion is a `recur` the source wrote in tail position.
+        (when-not (str/includes? (str name) "__")
+          (check-eager-recursive-let-bindings! (or source-name name)
+                                               (set (remove nil? [name source-name]))
+                                               body))))
     (check-value-types! parsed)
     (check-linear-resource-ownership! parsed)
     (check-kernel-region-provenance! parsed)

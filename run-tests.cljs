@@ -94,6 +94,8 @@
             [kotoba.compiler.operation-refusal-cause-test]
             ;; an unannotated parameter whose uses disagree names both uses
             [kotoba.compiler.parameter-use-conflict-test]
+            ;; a self-recursive let binding needed only under a later branch
+            [kotoba.compiler.eager-recursive-let-binding-test]
             ;; an export that is a def / a defn- / undefined names which; the
             ;; rewrite prints the literal, which is a BigInt here
             [kotoba.compiler.export-names-constant-test]))
@@ -135,4 +137,5 @@
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
              'kotoba.compiler.parameter-use-conflict-test
+             'kotoba.compiler.eager-recursive-let-binding-test
              'kotoba.compiler.export-names-constant-test)
