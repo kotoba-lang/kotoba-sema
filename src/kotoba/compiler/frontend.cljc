@@ -1860,6 +1860,83 @@
   [error]
   (some? (:phase (ex-data error))))
 
+;; --- naming the nearest defined symbol ---------------------------------------
+;;
+;; An unbound symbol used to be refused with a sentence and no name: the
+;; symbol travelled only as `:form`. Measured while porting aiueos
+;; `native/tcp_stream.kotoba`: a local `buffer-index` that survived its rename
+;; to `buffer-idx` cost a debugging round to a typo the checker had already
+;; located -- the parameter one edit away was in the very `locals` set the
+;; refusal was raised from. The two helpers below name the symbol and, when
+;; something in scope is near it, the nearest names. They invent nothing: a
+;; candidate is a name the checker already has in hand at the site.
+
+(defn- edit-distance
+  "Levenshtein distance between strings A and B, bounded: any distance above
+  LIMIT is answered as LIMIT + 1, so a long name is never fully walked."
+  [a b limit]
+  (let [la (count a) lb (count b)]
+    (if (> (Math/abs (- la lb)) limit)
+      (inc limit)
+      (loop [i 1 previous (vec (range (inc lb)))]
+        (if (> i la)
+          (min (inc limit) (nth previous lb))
+          (let [ca (nth a (dec i))
+                row (loop [j 1 row [i]]
+                      (if (> j lb)
+                        row
+                        (recur (inc j)
+                               (conj row (min (inc (nth previous j))
+                                              (inc (nth row (dec j)))
+                                              (+ (nth previous (dec j))
+                                                 (if (= ca (nth b (dec j))) 0 1)))))))]
+            (recur (inc i) row)))))))
+
+(defn- nearest-names
+  "Up to three of CANDIDATES (symbols) nearest to NAME, as strings, ordered by
+  edit distance and then by name so the answer is the same on both runtimes.
+
+  Near means within two edits (three for a name of eight characters or more),
+  or sharing the first five characters -- `buffer-length` is five edits from
+  `buffer-index` and is what a reader recognises. Synthesized names (those
+  carrying `__`) are never offered; the source never wrote them."
+  [name candidates]
+  (let [text (str name)
+        limit (if (>= (count text) 8) 3 2)
+        prefix (when (>= (count text) 5) (subs text 0 5))]
+    (->> candidates
+         (map str)
+         (remove #(or (= % text) (str/includes? % "__")))
+         (keep (fn [candidate]
+                 (let [distance (edit-distance text candidate limit)]
+                   (when (or (<= distance limit)
+                             (and prefix (>= (count candidate) 5)
+                                  (= prefix (subs candidate 0 5))))
+                     [distance candidate]))))
+         sort
+         (map second)
+         (take 3)
+         vec)))
+
+(defn- unbound-symbol!
+  "Refuse the unbound SYMBOL with PREFIX as the sentence, naming the symbol and
+  the nearest names among LOCALS (a set or a map keyed by name) and FUNCTIONS
+  (a map keyed by name). The kind of each candidate is said beside it, since a
+  local and a function are corrected differently."
+  [prefix symbol locals functions]
+  (let [local-names (if (map? locals) (keys locals) locals)
+        kind-of (-> {}
+                    (into (map (fn [n] [(str n) "function"])) (keys functions))
+                    (into (map (fn [n] [(str n) "local"])) local-names))
+        nearest (nearest-names symbol (keys kind-of))]
+    (reject! (str prefix ": " symbol " is not a parameter, a let binding, or a "
+                  "function of this module"
+                  (when (seq nearest)
+                    (str "; nearest defined: "
+                         (str/join ", " (map #(str % " (" (kind-of %) ")") nearest)))))
+             symbol :kotoba.error/unbound-symbol
+             {:kotoba.error/symbol symbol :kotoba.error/nearest nearest})))
+
 (def definition-heads
   "The closed set of heads `analyze*` dispatches a TOP-LEVEL form on.
 
@@ -6733,7 +6810,8 @@
         (reject! (ex-message error) form)))
     (boolean? form) form
     (symbol? form) (if (contains? locals form) form
-                       (reject! "unbound or dynamic symbol is forbidden" form))
+                       (unbound-symbol! "unbound or dynamic symbol is forbidden"
+                                        form locals functions))
     (seq? form)
     (let [[op & args] form]
       (when-not (simple-symbol? op) (reject! "computed or namespaced calls are forbidden" form))
@@ -8089,7 +8167,8 @@
     (keyword? form) :keyword
     (boolean? form) :bool
     (symbol? form) (or (get locals form)
-                       (reject! "unbound symbol has no value type" form))
+                       (unbound-symbol! "unbound symbol has no value type"
+                                        form locals signatures))
     (seq? form)
     (let [[op & args] form]
       (case op
