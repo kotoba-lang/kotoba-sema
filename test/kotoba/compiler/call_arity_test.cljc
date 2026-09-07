@@ -161,13 +161,13 @@
 
 (deftest a-builtin-refuses-a-wrong-argument-count
   ;; Built-ins were already refused in both directions before this change.
-  ;; Their messages name the FAMILY rather than the operation, which is a
-  ;; separate and smaller defect: a refusal that names the wrong noun is still
-  ;; a refusal. Pinned here so a later widening of an operation table cannot
-  ;; quietly reopen the direction this namespace exists to close.
-  (is (= "string operation arity mismatch"
+  ;; Their messages named only the FAMILY until lang-h6 made them name the
+  ;; head and both counts, the shape `function call arity mismatch` has.
+  ;; Pinned here so a later widening of an operation table cannot quietly
+  ;; reopen the direction this namespace exists to close.
+  (is (= "string operation arity mismatch: string-concat takes 2 arguments; got 1"
          (:message (refusal "(defn main [] :string (string-concat \"a\"))"))))
-  (is (= "string operation arity mismatch"
+  (is (= "string operation arity mismatch: string-concat takes 2 arguments; got 3"
          (:message (refusal "(defn main [] :string (string-concat \"a\" \"b\" \"c\"))"))))
   (is (= "invalid arithmetic arity"
          (:message (refusal "(defn main [] :i64 (quot 1 2 3))"))))

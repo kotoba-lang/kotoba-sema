@@ -37,6 +37,38 @@
        (catch Exception _ #{}))
      :cljs #{}))
 
+(defn- load-grammar-declared-heads
+  "Every head the language grammar names, when `guest-grammar.edn` is on the
+  classpath: `:admitted-builtins`, the `:sugar` keys, `:arithmetic`,
+  `:comparisons`, `:predicates` and the float `:arithmetic`. A set of symbols.
+
+  Read for one diagnostic only -- telling a head the grammar declares and this
+  analyser has not lowered (`(min 1 2)`) apart from a misspelling
+  (`(frobnicate 1)`). Nothing is admitted from it. Same runtime shape as
+  `load-catalog-forbidden`: ClojureScript cannot read a classpath resource
+  synchronously, so it answers the empty set there and such a head is reported
+  as unknown, which is what that runtime can honestly say."
+  []
+  #?(:clj
+     (try
+       (let [c (or (clojure.java.io/resource "kotoba/lang/guest-grammar.edn")
+                   (clojure.java.io/resource "lang/guest-grammar.edn"))]
+         (if c
+           (with-open [r (clojure.java.io/reader c)]
+             (let [edn (clojure.edn/read (java.io.PushbackReader. r))]
+               (into #{}
+                     (comp cat (map #(symbol (name %))))
+                     [(:admitted-builtins edn) (keys (:sugar edn))
+                      (:arithmetic edn) (:comparisons edn) (:predicates edn)
+                      (get-in edn [:floating-point :arithmetic])])))
+           #{}))
+       (catch Exception _ #{}))
+     :cljs #{}))
+
+(def grammar-declared-heads
+  "See `load-grammar-declared-heads`. Empty on ClojureScript."
+  (load-grammar-declared-heads))
+
 (def forbidden-heads
   ;; `atom` left this set on 2026-09-02: local-state slice 1 (kotoba-lang
   ;; `lang/local-state.edn`) admits a non-escaping, function-local atom by
@@ -1860,6 +1892,83 @@
   [error]
   (some? (:phase (ex-data error))))
 
+;; --- naming the nearest defined symbol ---------------------------------------
+;;
+;; An unbound symbol used to be refused with a sentence and no name: the
+;; symbol travelled only as `:form`. Measured while porting aiueos
+;; `native/tcp_stream.kotoba`: a local `buffer-index` that survived its rename
+;; to `buffer-idx` cost a debugging round to a typo the checker had already
+;; located -- the parameter one edit away was in the very `locals` set the
+;; refusal was raised from. The two helpers below name the symbol and, when
+;; something in scope is near it, the nearest names. They invent nothing: a
+;; candidate is a name the checker already has in hand at the site.
+
+(defn- edit-distance
+  "Levenshtein distance between strings A and B, bounded: any distance above
+  LIMIT is answered as LIMIT + 1, so a long name is never fully walked."
+  [a b limit]
+  (let [la (count a) lb (count b)]
+    (if (> (Math/abs (- la lb)) limit)
+      (inc limit)
+      (loop [i 1 previous (vec (range (inc lb)))]
+        (if (> i la)
+          (min (inc limit) (nth previous lb))
+          (let [ca (nth a (dec i))
+                row (loop [j 1 row [i]]
+                      (if (> j lb)
+                        row
+                        (recur (inc j)
+                               (conj row (min (inc (nth previous j))
+                                              (inc (nth row (dec j)))
+                                              (+ (nth previous (dec j))
+                                                 (if (= ca (nth b (dec j))) 0 1)))))))]
+            (recur (inc i) row)))))))
+
+(defn- nearest-names
+  "Up to three of CANDIDATES (symbols) nearest to NAME, as strings, ordered by
+  edit distance and then by name so the answer is the same on both runtimes.
+
+  Near means within two edits (three for a name of eight characters or more),
+  or sharing the first five characters -- `buffer-length` is five edits from
+  `buffer-index` and is what a reader recognises. Synthesized names (those
+  carrying `__`) are never offered; the source never wrote them."
+  [name candidates]
+  (let [text (str name)
+        limit (if (>= (count text) 8) 3 2)
+        prefix (when (>= (count text) 5) (subs text 0 5))]
+    (->> candidates
+         (map str)
+         (remove #(or (= % text) (str/includes? % "__")))
+         (keep (fn [candidate]
+                 (let [distance (edit-distance text candidate limit)]
+                   (when (or (<= distance limit)
+                             (and prefix (>= (count candidate) 5)
+                                  (= prefix (subs candidate 0 5))))
+                     [distance candidate]))))
+         sort
+         (map second)
+         (take 3)
+         vec)))
+
+(defn- unbound-symbol!
+  "Refuse the unbound SYMBOL with PREFIX as the sentence, naming the symbol and
+  the nearest names among LOCALS (a set or a map keyed by name) and FUNCTIONS
+  (a map keyed by name). The kind of each candidate is said beside it, since a
+  local and a function are corrected differently."
+  [prefix symbol locals functions]
+  (let [local-names (if (map? locals) (keys locals) locals)
+        kind-of (-> {}
+                    (into (map (fn [n] [(str n) "function"])) (keys functions))
+                    (into (map (fn [n] [(str n) "local"])) local-names))
+        nearest (nearest-names symbol (keys kind-of))]
+    (reject! (str prefix ": " symbol " is not a parameter, a let binding, or a "
+                  "function of this module"
+                  (when (seq nearest)
+                    (str "; nearest defined: "
+                         (str/join ", " (map #(str % " (" (kind-of %) ")") nearest)))))
+             symbol :kotoba.error/unbound-symbol
+             {:kotoba.error/symbol symbol :kotoba.error/nearest nearest})))
+
 (def definition-heads
   "The closed set of heads `analyze*` dispatches a TOP-LEVEL form on.
 
@@ -2033,6 +2142,23 @@
   content of the report when the surplus argument was previously answered."
   [op expected supplied form]
   (reject! (str "function call arity mismatch: " op " takes " expected
+                (if (= 1 expected) " argument" " arguments")
+                "; got " supplied)
+           form :kotoba.error/call-arity
+           {:function op :expected expected :supplied supplied}))
+
+(defn- reject-operation-arity!
+  "The builtin-family form of `reject-call-arity!`: FAMILY is the table's
+  label (`\"string operation\"`), OP the head, EXPECTED the table's arity and
+  SUPPLIED what the call wrote.
+
+  Every family used to say only `<family> arity mismatch` -- neither the head
+  nor the count it wanted, so a two-argument `string-substring` read the same
+  as any other slip in a family of a dozen heads. The sentence, the code and
+  the ex-data now match the user-function form: one class of defect, one
+  shape of report, whichever table caught it."
+  [family op expected supplied form]
+  (reject! (str family " arity mismatch: " op " takes " expected
                 (if (= 1 expected) " argument" " arguments")
                 "; got " supplied)
            form :kotoba.error/call-arity
@@ -4808,7 +4934,7 @@
         (contains? typed-vector-operations op)
         (do
           (when-not (= (get typed-vector-operations op) (count args))
-            (reject! "typed vector operation arity mismatch" form))
+            (reject-operation-arity! "typed vector operation" op (get typed-vector-operations op) (count args) form))
           (apply list op
                  (map-indexed (fn [index arg]
                                 ((if (zero? index)
@@ -6123,6 +6249,22 @@
                  (try (desugar-expr* form contextual-result-type)
                       (catch #?(:clj Throwable :cljs :default) error
                         (internal-failure! error form))))
+        ;; Display-only: when the lowering table renamed the head
+        ;; (`string-length` -> `string-byte-length`), remember the name the
+        ;; source wrote on the NEW head symbol. List meta does not survive the
+        ;; later passes (they rebuild with `cons`/`list`); a head symbol is
+        ;; carried through by value and keeps its meta. Read by
+        ;; `use-site-text` so a diagnostic can show the operation as written;
+        ;; nothing else looks at it, and symbol equality ignores meta.
+        result (if (and (seq? form) (symbol? (first form))
+                        (seq? result) (symbol? (first result))
+                        (not= (first form) (first result))
+                        (not (:kotoba.diag/source-head (meta (first result)))))
+                 (with-meta (apply list (vary-meta (first result) assoc
+                                                   :kotoba.diag/source-head (first form))
+                                   (rest result))
+                   (meta result))
+                 result)
         location (select-keys (meta form)
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (or (coll? result) (symbol? result)))
@@ -6698,6 +6840,66 @@
         (recur (next pairs) (conj env name)))
       env)))
 
+(defn- table-heads [table] (if (map? table) (keys table) (seq table)))
+
+(defn- unknown-operation!
+  "Refuse the call FORM whose head OP no pass admitted, naming WHICH of the
+  two facts that can mean. `operation has no admitted lowering` (here) and
+  `operation has no admitted type signature` (inference) were one catch-all
+  over a misspelling, a head the grammar declares and this analyser has not
+  lowered, and -- one family over -- a known head at the wrong arity, which
+  each table already refused but without the head or the count (that half is
+  `reject-operation-arity!`). Measured while porting aiueos
+  `native/tcp_stream.kotoba`.
+
+  A head in `grammar-declared-heads` is named as declared-but-unlowered;
+  anything else is unknown, with the nearest heads among the module's
+  FUNCTIONS and this frontend's builtin tables beside it, the way
+  `unbound-symbol!` does for a value. Candidates are what the checker has in
+  hand; none is invented."
+  [op form functions]
+  (if (contains? grammar-declared-heads op)
+    (reject! (str op " is named by the language grammar (lang/guest-grammar.edn) "
+                  "but this analyser has no lowering for it -- not implemented on "
+                  "this compile path")
+             form :kotoba.error/unimplemented-grammar-head
+             {:kotoba.error/operation op})
+    (let [kind-of (-> {}
+                      (into (map (fn [n] [(str n) "builtin"]))
+                            (mapcat table-heads
+                                    [arithmetic
+                                     comparisons
+                                     float-division-heads
+                                     i64-operations
+                                     i32-operations
+                                     heap-operations
+                                     kgraph-operations
+                                     string-operations
+                                     xml-operations
+                                     decimal-operations
+                                     f64-operations
+                                     f32-operations
+                                     typed-map-operations
+                                     typed-safe-value-operations
+                                     parametric-result-operations
+                                     typed-vector-operations
+                                     typed-f64-vector-operations
+                                     compact-graph-operations
+                                     document-fixed-operations
+                                     kernel-memory-operations
+                                     kernel-privileged-operations
+                                     rodata-literal-operations
+                                     image-symbol-operations]))
+                      (into (map (fn [n] [(str n) "function"])) (keys functions)))
+          nearest (nearest-names op (keys kind-of))]
+      (reject! (str "unknown operation: " op " is not a builtin, a sugar head, or a "
+                    "function of this module"
+                    (when (seq nearest)
+                      (str "; nearest defined: "
+                           (str/join ", " (map #(str % " (" (kind-of %) ")") nearest)))))
+               form :kotoba.error/unknown-operation
+               {:kotoba.error/operation op :kotoba.error/nearest nearest}))))
+
 (declare validate-expr-impl)
 
 ;; The three per-expression passes -- lowering, admission and inference --
@@ -6733,7 +6935,8 @@
         (reject! (ex-message error) form)))
     (boolean? form) form
     (symbol? form) (if (contains? locals form) form
-                       (reject! "unbound or dynamic symbol is forbidden" form))
+                       (unbound-symbol! "unbound or dynamic symbol is forbidden"
+                                        form locals functions))
     (seq? form)
     (let [[op & args] form]
       (when-not (simple-symbol? op) (reject! "computed or namespaced calls are forbidden" form))
@@ -6782,7 +6985,7 @@
 
         (contains? i64-operations op)
         (do (when-not (= (get i64-operations op) (count args))
-              (reject! "i64 operation arity mismatch" form))
+              (reject-operation-arity! "i64 operation" op (get i64-operations op) (count args) form))
             (when (contains? '#{i64-shift-left i64-shift-right u64-shift-right} op)
               (when-not (and (kotoba-integer? (second args)) (<= 0 (second args) 63))
                 (reject! "i64 shift count must be an integer literal in [0,63]" form)))
@@ -6790,7 +6993,7 @@
 
         (contains? i32-operations op)
         (do (when-not (= (get i32-operations op) (count args))
-              (reject! "i32 operation arity mismatch" form))
+              (reject-operation-arity! "i32 operation" op (get i32-operations op) (count args) form))
             (when (contains? '#{i32-shift-left i32-shift-right u32-shift-right} op)
               (when-not (and (kotoba-integer? (second args)) (<= 0 (second args) 31))
                 (reject! "i32 shift count must be an integer literal in [0,31]" form)))
@@ -6802,37 +7005,37 @@
 
         (contains? heap-operations op)
         (do (when-not (= (get heap-operations op) (count args))
-              (reject! "heap operation arity mismatch" form))
+              (reject-operation-arity! "heap operation" op (get heap-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? kgraph-operations op)
         (do (when-not (= (get kgraph-operations op) (count args))
-              (reject! "kgraph operation arity mismatch" form))
+              (reject-operation-arity! "kgraph operation" op (get kgraph-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? string-operations op)
         (do (when-not (= (get string-operations op) (count args))
-              (reject! "string operation arity mismatch" form))
+              (reject-operation-arity! "string operation" op (get string-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? xml-operations op)
         (do (when-not (= (get xml-operations op) (count args))
-              (reject! "XML operation arity mismatch" form))
+              (reject-operation-arity! "XML operation" op (get xml-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? decimal-operations op)
         (do (when-not (= (get decimal-operations op) (count args))
-              (reject! "decimal operation arity mismatch" form))
+              (reject-operation-arity! "decimal operation" op (get decimal-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? f64-operations op)
         (do (when-not (= (get f64-operations op) (count args))
-              (reject! "f64 operation arity mismatch" form))
+              (reject-operation-arity! "f64 operation" op (get f64-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? f32-operations op)
         (do (when-not (= (get f32-operations op) (count args))
-              (reject! "f32 operation arity mismatch" form))
+              (reject-operation-arity! "f32 operation" op (get f32-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? typed-map-operations op)
@@ -6847,7 +7050,7 @@
 
         (contains? typed-safe-value-operations op)
         (do (when-not (= (get typed-safe-value-operations op) (count args))
-              (reject! "typed safe-value operation arity mismatch" form))
+              (reject-operation-arity! "typed safe-value operation" op (get typed-safe-value-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (= op 'typed-list-new)
@@ -7161,7 +7364,7 @@
 
         (contains? parametric-result-operations op)
         (do (when-not (= (get parametric-result-operations op) (count args))
-              (reject! "parametric result operation arity mismatch" form))
+              (reject-operation-arity! "parametric result operation" op (get parametric-result-operations op) (count args) form))
             (when-not (parametric-result-type? (first args))
               (reject! "parametric result operation requires [:result ok-type err-type]" form))
             (validate-value-type! (first args))
@@ -7180,22 +7383,22 @@
 
         (contains? typed-vector-operations op)
         (do (when-not (= (get typed-vector-operations op) (count args))
-              (reject! "typed vector operation arity mismatch" form))
+              (reject-operation-arity! "typed vector operation" op (get typed-vector-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? typed-f64-vector-operations op)
         (do (when-not (= (get typed-f64-vector-operations op) (count args))
-              (reject! "typed f64 vector operation arity mismatch" form))
+              (reject-operation-arity! "typed f64 vector operation" op (get typed-f64-vector-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? compact-graph-operations op)
         (do (when-not (= (get compact-graph-operations op) (count args))
-              (reject! "compact graph operation arity mismatch" form))
+              (reject-operation-arity! "compact graph operation" op (get compact-graph-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? document-fixed-operations op)
         (do (when-not (= (get document-fixed-operations op) (count args))
-              (reject! "document operation arity mismatch" form))
+              (reject-operation-arity! "document operation" op (get document-fixed-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? '#{document-vector document-list document-set} op)
@@ -7212,7 +7415,7 @@
 
         (contains? kernel-memory-operations op)
         (do (when-not (= (get kernel-memory-operations op) (count args))
-              (reject! "kernel memory operation arity mismatch" form))
+              (reject-operation-arity! "kernel memory operation" op (get kernel-memory-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         ;; fwstore: the allocation that answers with an address is the one
@@ -7225,7 +7428,7 @@
         ;; an expression.
         (= op 'kernel-uefi-alloc-region)
         (do (when-not (= (get kernel-privileged-operations op) (count args))
-              (reject! "kernel privileged operation arity mismatch" form))
+              (reject-operation-arity! "kernel privileged operation" op (get kernel-privileged-operations op) (count args) form))
             (let [pages (nth args 4 ::missing)]
               (when-not (integer-literal? pages)
                 (reject! "kernel-uefi-alloc-region page count must be a literal"
@@ -7238,7 +7441,7 @@
 
         (contains? kernel-privileged-operations op)
         (do (when-not (= (get kernel-privileged-operations op) (count args))
-              (reject! "kernel privileged operation arity mismatch" form))
+              (reject-operation-arity! "kernel privileged operation" op (get kernel-privileged-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         ;; boot-lit: the argument is a piece of the SOURCE, not an expression,
@@ -7249,7 +7452,7 @@
         ;; something the backend has to refuse with a shape error.
         (contains? rodata-literal-operations op)
         (do (when-not (= (get rodata-literal-operations op) (count args))
-              (reject! "rodata literal arity mismatch" form))
+              (reject-operation-arity! "rodata literal" op (get rodata-literal-operations op) (count args) form))
             (when-not (string? (first args))
               (reject! "rodata literal requires a string literal" form))
             (when-not (rodata-literal-content? op (first args))
@@ -7262,7 +7465,7 @@
         ;; about an unbound local.
         (contains? image-symbol-operations op)
         (do (when-not (= (get image-symbol-operations op) (count args))
-              (reject! "image symbol operation arity mismatch" form))
+              (reject-operation-arity! "image symbol operation" op (get image-symbol-operations op) (count args) form))
             (when-not (symbol? (first args))
               (reject! "kernel-function-address requires a function name" form))
             (when (contains? locals (first args))
@@ -7278,7 +7481,7 @@
             (reject-call-arity! op expected (count args) form))
           (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
-        :else (reject! "operation has no admitted lowering" form))
+        :else (unknown-operation! op form functions))
       form)
     :else (reject! "value type is outside the safe profile" form)))
 
@@ -7482,7 +7685,28 @@
 
     :else nil))
 
-(defn- infer-call-type [op args locals signatures]
+(declare infer-call-type-impl)
+
+(defn- infer-call-type
+  "`infer-call-type-impl`, with the call named on any refusal it raises about
+  one of its own arguments: a rejection whose `:form` is one of ARGS and that
+  no inner call has already claimed gets `:kotoba.error/use-site (op ...)`.
+  The innermost call wins, so the site is the operation that actually
+  required the type. `infer-absent-parameter-types` reads it to name both
+  disagreeing uses of a parameter; nothing else changes -- same message,
+  same code, same span."
+  [op args locals signatures]
+  (try (infer-call-type-impl op args locals signatures)
+       (catch #?(:clj Throwable :cljs :default) error
+         (let [data (ex-data error)]
+           (if (and (:phase data)
+                    (not (contains? data :kotoba.error/use-site))
+                    (some #(= % (:form data)) args))
+             (throw (ex-info (ex-message error)
+                             (assoc data :kotoba.error/use-site (cons op args))))
+             (throw error))))))
+
+(defn- infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
       (contains? arithmetic op)
@@ -8073,7 +8297,7 @@
             (require-expression-type! actual wanted arg)))
         result)
 
-      :else (reject! "operation has no admitted type signature" op))))
+      :else (unknown-operation! op op signatures))))
 
 (declare infer-expression-type-impl)
 
@@ -8089,7 +8313,8 @@
     (keyword? form) :keyword
     (boolean? form) :bool
     (symbol? form) (or (get locals form)
-                       (reject! "unbound symbol has no value type" form))
+                       (unbound-symbol! "unbound symbol has no value type"
+                                        form locals signatures))
     (seq? form)
     (let [[op & args] form]
       (case op
@@ -10058,6 +10283,61 @@
        (try (do (validate-value-type! type) true)
             (catch #?(:clj Exception :cljs :default) _ false))))
 
+(defn- use-site-text
+  "FORM as a diagnostic shows it: the head the source wrote when the lowering
+  table renamed it (`:kotoba.diag/source-head`, see `desugar-expr`), integers
+  through `str` so a ClojureScript BigInt prints as its digits, everything
+  else as `pr-str` would."
+  [form]
+  (cond
+    (seq? form)
+    (let [head (first form)
+          shown (or (:kotoba.diag/source-head (meta head)) head)]
+      (str "(" (str/join " " (map use-site-text (cons shown (rest form)))) ")"))
+    (vector? form) (str "[" (str/join " " (map use-site-text form)) "]")
+    (kotoba-integer? form) (str form)
+    (symbol? form) (str form)
+    :else (pr-str form)))
+
+(defn- parameter-use-conflict!
+  "Refuse FUNCTION's unannotated PARAMETER whose uses disagree, naming both.
+
+  FIRST-USE is the refusal the provisional `:i64` met (its `:expected` is what
+  the pass tried to refine to, its `:form`/`:span` the site the ordinary
+  checker would have reported); SECOND-USE is the refusal the refined type
+  met on the same parameter. Each carries the `:use-site` `infer-call-type`
+  attached, or nil when the requirement came from something other than a call
+  (then that use is described, not shown). The message keeps the old head --
+  same site, same expected/actual -- so the report lands where it did before
+  this pass could say why (lang-h5)."
+  [function parameter first-use second-use]
+  (let [type-text #(if (keyword? %) (name %) (pr-str %))
+        use-text (fn [{:keys [expected use-site span]}]
+                   (str (if use-site (use-site-text use-site) "another use")
+                        " requires " (type-text expected)
+                        (when (and (:line span) (:column span))
+                          (str " [" parameter " at " (:line span) ":" (:column span) "]"))))
+        use-data (fn [{:keys [expected use-site span]}]
+                   (cond-> {:expected expected}
+                     use-site (assoc :operation
+                                     (let [head (first use-site)]
+                                       (or (:kotoba.diag/source-head (meta head)) head))
+                                     :site (use-site-text use-site))
+                     span (assoc :span span)))]
+    (reject! (str "expression type mismatch: expected " (type-text (:expected first-use))
+                  ", got " (type-text (:actual first-use))
+                  " -- parameter " parameter " of " function
+                  " is unannotated and its uses disagree: "
+                  (use-text first-use) ", " (use-text second-use)
+                  "; annotate " parameter)
+             (:form first-use) :kotoba.error/parameter-use-conflict
+             (cond-> {:kotoba.error/expected (:expected first-use)
+                      :kotoba.error/actual (:actual first-use)
+                      :kotoba.error/function function
+                      :kotoba.error/parameter parameter
+                      :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
+               (:span first-use) (assoc :span (:span first-use))))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -10081,9 +10361,11 @@
     - a refinement is applied only when the parameter is still provisional
       `:i64` and the checker asked for something else, so a parameter used as
       an i64 stays one;
-    - a parameter whose uses disagree is put back to `:i64` and never refined
-      again, which is exactly its behaviour before this pass existed -- the
-      program still fails, and it fails at the same place.
+    - a parameter whose uses disagree is refused here, at the site the
+      ordinary checker would have reported (same form, same expected/actual
+      head), with both uses named -- `parameter-use-conflict!`. The program
+      fails where it failed before this pass existed; what changed is that
+      the refusal says why (lang-h5).
 
   Iterated to a fixed point because one function's refined parameter changes
   what its callers' arguments must be. The budget bounds it at parameters plus
@@ -10097,7 +10379,6 @@
                 fs))
         total-params (reduce + 0 (map #(count (:params %)) functions))]
     (loop [fs functions
-           conflicted #{}
            budget (+ 1 (count functions) total-params)]
       (if (or (zero? budget) (not-any? :param-types-inferred fs))
         fs
@@ -10109,9 +10390,10 @@
                           (do (infer-expression-type body (zipmap params param-types) table)
                               nil)
                           (catch #?(:clj Exception :cljs :default) error
-                            (let [{:keys [form]
+                            (let [{:keys [form span]
                                    expected :kotoba.error/expected
-                                   actual :kotoba.error/actual} (ex-data error)
+                                   actual :kotoba.error/actual
+                                   use-site :kotoba.error/use-site} (ex-data error)
                                   index (when (simple-symbol? form)
                                           (first (keep-indexed
                                                   (fn [index parameter]
@@ -10119,15 +10401,17 @@
                                                   params)))]
                               (when (and index
                                          (contains? param-types-inferred index)
-                                         (not (contains? conflicted [name index]))
                                          (= :i64 (nth param-types index))
                                          (= :i64 actual)
                                          (refinable-value-type? expected))
-                                {:function name :index index :type expected}))))))
+                                {:function name :index index :type expected
+                                 :first-use {:expected expected :actual actual
+                                             :form form :span span
+                                             :use-site use-site}}))))))
                     fs)]
           (if-not refinement
             fs
-            (let [{:keys [function index type]} refinement
+            (let [{:keys [function index type first-use]} refinement
                   applied (mapv (fn [f]
                                   (if (= function (:name f))
                                     (assoc f :param-types
@@ -10135,24 +10419,30 @@
                                     f))
                                 fs)
                   ;; Did refining it move the disagreement onto the same
-                  ;; parameter? Then its uses do not agree, and the answer is
-                  ;; the one it had before: provisional i64, reported by the
-                  ;; ordinary checker at the site the source already named.
-                  regressed?
-                  (let [refined (first (filter #(= function (:name %)) applied))
-                        t (signature-table applied)]
+                  ;; parameter? Then its uses do not agree, and no single type
+                  ;; satisfies both: refuse now, at the site the ordinary
+                  ;; checker would have reported, naming both uses.
+                  refined (first (filter #(= function (:name %)) applied))
+                  second-use
+                  (let [t (signature-table applied)]
                     (try (do (infer-expression-type (:body refined)
                                                     (zipmap (:params refined) (:param-types refined))
                                                     t)
-                             false)
+                             nil)
                          (catch #?(:clj Exception :cljs :default) error
-                           (let [{:keys [form] actual :kotoba.error/actual} (ex-data error)]
-                             (and (simple-symbol? form)
-                                  (= form (nth (:params refined) index))
-                                  (= type actual))))))]
-              (if regressed?
-                (recur fs (conj conflicted [function index]) (dec budget))
-                (recur applied conflicted (dec budget))))))))))
+                           (let [{:keys [form]
+                                  actual :kotoba.error/actual
+                                  expected :kotoba.error/expected
+                                  use-site :kotoba.error/use-site} (ex-data error)]
+                             (when (and (simple-symbol? form)
+                                        (= form (nth (:params refined) index))
+                                        (= type actual))
+                               {:expected expected :use-site use-site
+                                :span (:span (ex-data error))})))))]
+              (if second-use
+                (parameter-use-conflict! function (nth (:params refined) index)
+                                         first-use second-use)
+                (recur applied (dec budget))))))))))
 
 (defn- infer-absent-results
   "Give every unannotated `defn` the result type its body actually has.
