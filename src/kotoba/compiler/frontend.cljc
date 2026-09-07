@@ -214,7 +214,7 @@
 ;; `i64.rotl`/`i64.rotr` as single instructions is a follow-up once these
 ;; primitives are proven, not a prerequisite.
 (def i64-operations
-  '{bit-not 1 i64-shift-left 2 i64-shift-right 2 u64-shift-right 2})
+  '{bit-not 1 i64-shift-left 2 i64-shift-right 2 u64-shift-right 2 min 2 max 2})
 (def comparisons '#{= < > <= >=})
 (def heap-operations '{pair 2 pair-first 1 pair-second 1})
 ;; kgraph-* (ADR-2607198300): all-integer EAVT datom store, the native
