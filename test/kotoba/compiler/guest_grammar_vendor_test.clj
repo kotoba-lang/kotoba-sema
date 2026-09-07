@@ -71,8 +71,12 @@
   red on its own main -- but amu's
   `every-classpath-copy-of-the-grammar-is-the-same-grammar` compares ITS copy
   against the one in the kotoba-sema it pins, so amu's pin advance and its
-  grammar resync have to be the same commit (amu ADR 0330's postscript)."
-  "a1b444230a3ec6b835545b422f79a9c6fc581dc2588d035ae739bc0eb89d08bb")
+  grammar resync have to be the same commit (amu ADR 0330's postscript).
+
+  Advanced 2026-09-07 to `e333abac` for amu-h7: `:admitted-builtins` gains
+  `kernel-undefined-opcode-handler-address`, the fifty-fifth privileged head
+  (kotoba-lang#PR carries the authority; amu and kotoba resync after)."
+  "e333abac09386fc059331fd81fe4cce685e757a6bd4507edfc28cee67b3afc97")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
@@ -147,5 +151,6 @@
     (testing "and the tables are non-empty"
       (is (= 53 (count frontend/kernel-memory-operations)))
       (is (= 8 (count frontend/slice-value-operations)))
-      ;; fwstore: 54 since .
-      (is (= 54 (count frontend/kernel-privileged-operations))))))
+      ;; fwstore: 54 since `kernel-uefi-alloc-region`; amu-h7: 55 since
+      ;; `kernel-undefined-opcode-handler-address`.
+      (is (= 55 (count frontend/kernel-privileged-operations))))))

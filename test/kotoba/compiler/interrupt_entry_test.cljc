@@ -75,12 +75,13 @@
 
 (deftest the-arity-map-is-the-single-statement-of-it
   (is (= 1 (get frontend/kernel-privileged-operations 'kernel-isr-entry-address)))
-  ;; Pinned beside it: the three canned handler-address operations stay
+  ;; Pinned beside it: the four canned handler-address operations stay
   ;; zero-arity. Each names exactly ONE byte sequence; this one names any
   ;; member of a table, which is the whole reason it takes an operand.
   (doseq [op '[kernel-page-fault-handler-address
                kernel-page-fault-recovery-handler-address
-               kernel-double-fault-handler-address]]
+               kernel-double-fault-handler-address
+               kernel-undefined-opcode-handler-address]]
     (is (= 0 (get frontend/kernel-privileged-operations op)) (str op)))
   ;; A privileged operation is a reserved function name, so a guest cannot
   ;; shadow it with a `defn` of its own and get past the arity check that way.

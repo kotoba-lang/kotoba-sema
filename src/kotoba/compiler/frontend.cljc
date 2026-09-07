@@ -490,6 +490,7 @@
     kernel-page-fault-recovery-handler-address 0
     kernel-configure-page-fault-recovery 2 kernel-load-idt 2
     kernel-double-fault-handler-address 0
+    kernel-undefined-opcode-handler-address 0
     kernel-configure-double-fault-ist 2 kernel-load-gdt-tss 2
     kernel-probe-guard-write 0 kernel-probe-text-write 0 kernel-probe-nx-execute 0
     kernel-probe-recoverable-guard-write 0 kernel-probe-double-fault 0
