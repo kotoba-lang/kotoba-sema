@@ -26,7 +26,8 @@
 
 (deftest a-grammar-declared-head-is-distinguished-from-a-misspelling
   (testing ":admitted-builtins"
-    (is (= (declared-but-unlowered "min") (refusal "(defn main [] :i64 (min 1 2))")))
+    ;; `min`/`max` now have a lowering (i64-operations + KIR min/max, the
+    ;; spotwork comparator work); `alloc` is still unlowered.
     (is (= (declared-but-unlowered "alloc") (refusal "(defn main [] :i64 (alloc 8))"))))
   (testing ":predicates"
     (is (= (declared-but-unlowered "string?") (refusal "(defn main [] :bool (string? 1))")))))
