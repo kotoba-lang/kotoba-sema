@@ -76,7 +76,7 @@
   Advanced 2026-09-07 to `e333abac` for amu-h7: `:admitted-builtins` gains
   `kernel-undefined-opcode-handler-address`, the fifty-fifth privileged head
   (kotoba-lang#PR carries the authority; amu and kotoba resync after)."
-  "e333abac09386fc059331fd81fe4cce685e757a6bd4507edfc28cee67b3afc97")
+  "ee7ea37c7ea88c52ee8869af4d485e91a0b11bb153682ad717c86c055270b6b5")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
