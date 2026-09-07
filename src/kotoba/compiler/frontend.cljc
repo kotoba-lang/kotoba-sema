@@ -14758,3 +14758,88 @@
                           :source-reader-depth-limit max-reader-depth
                           :note "the source is inside the admission limit; the tree the desugar builds is not"}))
          (throw e))))))
+
+;; --- non-fatal findings: `(* 0 <call>)` sequencing (lang-h4) ----------------
+;;
+;; This frontend refuses or admits; it has had no channel for a finding that
+;; is neither. amu's `kotoba.compiler.diagnostic` envelope carries `:severity`,
+;; and every refusal here arrives there as `:error`. `lint` is the non-fatal
+;; peer: it analyzes SOURCE exactly as `analyze` does (a refusal propagates
+;; unchanged) and then reports findings as maps in that same vocabulary --
+;; `:code`, `:severity :warning`, `:message`, `:span` when the form kept one
+;; -- for a caller to print or gate on. Nothing is refused.
+;;
+;; The one finding so far. `(+ v (* 0 (poll fd)))` is how a `.kotoba` program
+;; sequences a call whose value it does not want: multiplying by zero keeps
+;; the call and drops the result. aiueos writes it deliberately, so it is
+;; not refused -- but a reader who did not write it sees an arithmetic
+;; expression, not a side effect, and the sunk call is easy to miss. The
+;; finding names the call and the function it is in.
+
+(defn- zero-literal?
+  "True for the integer literal 0 on either runtime (a ClojureScript BigInt
+  is not `zero?`; its digits are)."
+  [form]
+  (and (kotoba-integer? form) (= "0" (str form))))
+
+(defn- sunk-call-form?
+  "A call form whose value can be sunk: a simple-symbol head that is not one
+  of the core special forms."
+  [form]
+  (and (seq? form) (simple-symbol? (first form))
+       (not (contains? '#{if let do fn quote} (first form)))))
+
+(defn- zero-multiply?
+  "`(* 0 call)` or `(* call 0)`."
+  [form]
+  (and (seq? form) (= '* (first form)) (= 3 (count form))
+       (let [[_ a b] form]
+         (or (and (zero-literal? a) (sunk-call-form? b))
+             (and (zero-literal? b) (sunk-call-form? a))))))
+
+(defn- zero-multiply-findings
+  "Every `(* 0 <call>)` in FUNCTION's BODY as a finding. When the product is an
+  operand of `+`, the `+` form is the site shown -- that is the shape as
+  written, `(+ v (* 0 call))` -- otherwise the product itself."
+  [function body]
+  (let [found (volatile! [])
+        note! (fn [site product]
+                (let [[_ a b] product
+                      call (if (sunk-call-form? a) a b)]
+                  (vswap! found conj
+                          (cond-> {:code :kotoba.lint/zero-multiply-sequencing
+                                   :severity :warning
+                                   :function function
+                                   :sunk-call (first call)
+                                   :message (str (use-site-text site) " in " function
+                                                 " sequences " (use-site-text call)
+                                                 " by multiplying it by zero: " (first call)
+                                                 " runs for its effect and its value is discarded")}
+                            (form-span site) (assoc :span (form-span site))))))]
+    (letfn [(walk [form]
+              (when (coll? form)
+                (let [plus? (and (seq? form) (= '+ (first form)))]
+                  (doseq [child (seq form)]
+                    (if (zero-multiply? child)
+                      (do (note! (if plus? form child) child)
+                          (doseq [grandchild (rest child)] (walk grandchild)))
+                      (walk child))))))]
+      (if (zero-multiply? body)
+        (do (note! body body) (doseq [child (rest body)] (walk child)))
+        (walk body)))
+    @found))
+
+(defn lint
+  "Analyze SOURCE as `analyze` does, then return a vector of non-fatal
+  findings about it -- empty when there is nothing to say. A refusal raised
+  by analysis propagates unchanged: a program that does not compile has no
+  findings, it has an error. Synthesized functions (names carrying `__`) are
+  not reported on; the source never wrote them."
+  ([source] (lint source nil))
+  ([source opts]
+   (let [hir (analyze source opts)]
+     (into []
+           (mapcat (fn [{:keys [name body]}]
+                     (when-not (str/includes? (str name) "__")
+                       (zero-multiply-findings name body))))
+           (:functions hir)))))

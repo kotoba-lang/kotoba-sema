@@ -78,6 +78,14 @@
                   frontend/max-function-docstring-chars max-function-docstring-chars]
       (frontend/analyze source opts))))
 
+(def lint
+  "Analyze Kotoba source as `analyze` does, then return a vector of non-fatal
+  findings -- `:code`, `:severity :warning`, `:message`, `:span` when known --
+  empty when there is nothing to say. A refusal propagates unchanged. The
+  first finding is `:kotoba.lint/zero-multiply-sequencing`: a call sequenced
+  as `(* 0 (call))`, kept for its effect with its value dropped."
+  frontend/lint)
+
 (defn analyze
   "Analyze Kotoba source and return a validated HIR envelope. Public admission
   controls are authoritative when explicitly overridden."
