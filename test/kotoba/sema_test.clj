@@ -415,6 +415,20 @@
        (sema/analyze
         "(defn main [] (kernel-rt-timer-handler-address 1))"))))
 
+(deftest undefined-opcode-handler-is-a-sealed-zero-arity-kernel-operation
+  ;; amu-h7: mirrors `kernel-double-fault-handler-address` -- zero-arity and
+  ;; an address. Inert in an image until kotoba-gmir, kotoba-kir, the grammar
+  ;; authority and kotoba-native admit it too; this table is one of the five.
+  (let [result (sema/analyze
+                "(defn main [] (kernel-undefined-opcode-handler-address))")]
+    (is (= :i64 (:result result)))
+    (is (hir/valid? result)))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"kernel privileged operation arity mismatch"
+       (sema/analyze
+        "(defn main [] (kernel-undefined-opcode-handler-address 6))"))))
+
 (deftest double-fault-ist-operations-have-sealed-arities
   (let [result (sema/analyze
                 "(defn main []
