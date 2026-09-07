@@ -10338,6 +10338,49 @@
                       :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
                (:span first-use) (assoc :span (:span first-use))))))
 
+;; --- an export that is not a public function names why (lang-h8) ----------
+;;
+;; `namespace exports must name declared public functions` was the whole
+;; message for three different mistakes: exporting a `def` constant (exports
+;; are functions; a constant has no entry to call), exporting a `defn-`, and
+;; exporting a name the module never defines. Measured while porting aiueos:
+;; a poll bound exported as a `def` cost a round to learn the rule and another
+;; to learn the fix. The head is kept; what follows it names the export, which
+;; of the three it is, and -- for the constant -- the one-line rewrite.
+
+(defn- constant-source-text
+  "VALUE as written, through `use-site-text` (integers as digits on both
+  runtimes), bounded so a large literal does not become the message."
+  [value]
+  (let [text (use-site-text value)]
+    (if (> (count text) 40) (str (subs text 0 37) "...") text)))
+
+(defn- export-not-a-public-function!
+  "Refuse EXPORTS, naming the first that is not in SOURCE-PUBLIC and why: a
+  constant of RAW-CONSTANTS (name -> value as written), a private function
+  of PRIVATE-NAMES, or undefined."
+  [exports source-public private-names raw-constants]
+  (let [offender (first (remove (set source-public) exports))
+        head (str "namespace exports must name declared public functions: " offender)]
+    (cond
+      (contains? raw-constants offender)
+      (let [value-text (constant-source-text (get raw-constants offender))
+            fix (str "(defn " offender " [] " value-text ")")]
+        (reject! (str head " is a def constant, not a function; export a function "
+                      "that returns it: write " fix " in place of (def " offender
+                      " " value-text ")")
+                 exports :kotoba.error/export-names-constant
+                 {:kotoba.error/export offender :kotoba.error/fix fix}))
+      (contains? private-names offender)
+      (reject! (str head " is declared with defn-, which is private; declare it "
+                    "with defn to export it")
+               exports :kotoba.error/export-names-private-function
+               {:kotoba.error/export offender})
+      :else
+      (reject! (str head " is not defined in this module")
+               exports :kotoba.error/export-names-undefined
+               {:kotoba.error/export offender}))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -14370,7 +14413,9 @@
     (when-not (= (count parsed) (count signatures)) (reject! "duplicate function name" defs))
     (when (and (some? (:exports namespace-info))
                (not-every? (set source-public) (:exports namespace-info)))
-      (reject! "namespace exports must name declared public functions" (:exports namespace-info)))
+      (export-not-a-public-function! (:exports namespace-info) source-public
+                                     (->> def-parts (remove :public?) (map :source-name) set)
+                                     raw-constants))
     (when (and (nil? entry) (nil? (:exports namespace-info)))
       (reject! "entryless library requires an explicit non-empty namespace export list" defs))
     (when (and (nil? entry) (empty? exports))

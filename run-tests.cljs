@@ -93,7 +93,10 @@
             ;; grammar and lives in grammar_declared_head_test.clj)
             [kotoba.compiler.operation-refusal-cause-test]
             ;; an unannotated parameter whose uses disagree names both uses
-            [kotoba.compiler.parameter-use-conflict-test]))
+            [kotoba.compiler.parameter-use-conflict-test]
+            ;; an export that is a def / a defn- / undefined names which; the
+            ;; rewrite prints the literal, which is a BigInt here
+            [kotoba.compiler.export-names-constant-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -131,4 +134,5 @@
              'kotoba.compiler.mapv-alias-shadowing-test
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
-             'kotoba.compiler.parameter-use-conflict-test)
+             'kotoba.compiler.parameter-use-conflict-test
+             'kotoba.compiler.export-names-constant-test)
