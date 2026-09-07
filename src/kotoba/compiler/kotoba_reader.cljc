@@ -53,7 +53,7 @@
 ;; after the fact -- confirmed live: an earlier version of this file only
 ;; checked token length post-parse against `keyword?`/`symbol?` names,
 ;; silently letting an oversized NUMERIC literal through uncaught)."
-(defrecord ReaderState [source length position depth max-depth max-token-chars])
+(defrecord ReaderState [source length position depth max-depth max-token-chars line-starts])
 
 (defn- peek-ch [st]
   (let [{:keys [source length position]} st]
@@ -65,12 +65,35 @@
 
 (defn- advance [st] (update st :position inc))
 
+(defn- line-start-offsets
+  "Offset of the first character of every line in SOURCE, ascending.
+
+  Read once per source so a position can become a line/column by binary
+  search. The version this replaces re-derived the answer from scratch at
+  every located node -- `subs` the whole prefix, then split it on newlines --
+  which is O(position) per node and therefore quadratic in source size."
+  [source]
+  (loop [from 0 acc [0]]
+    (if-let [i (str/index-of source "\n" from)]
+      (recur (inc i) (conj acc (inc i)))
+      acc)))
+
+(defn- line-index
+  "Index of the greatest line start that is <= POSITION."
+  [starts position]
+  (loop [lo 0 hi (dec (count starts))]
+    (if (>= lo hi)
+      lo
+      (let [mid (quot (+ lo hi 1) 2)]
+        (if (<= (nth starts mid) position) (recur mid hi) (recur lo (dec mid)))))))
+
 (defn- source-location [st]
-  (let [prefix (subs (:source st) 0 (:position st))
-        lines (str/split prefix #"\n" -1)]
-    {:line (count lines)
-     :column (inc (count (last lines)))
-     :offset (:position st)}))
+  (let [position (:position st)
+        starts (:line-starts st)
+        i (line-index starts position)]
+    {:line (inc i)
+     :column (inc (- position (nth starts i)))
+     :offset position}))
 
 (defn- located [value start end]
   (if (or (coll? value) (symbol? value))
@@ -372,7 +395,8 @@
   ([source] (read-forms source {}))
   ([source opts]
    (loop [st (->ReaderState source (count source) 0 0
-                            (:max-depth opts) (:max-token-chars opts))
+                            (:max-depth opts) (:max-token-chars opts)
+                            (line-start-offsets source))
           acc []]
      (let [st (skip-ws+comments st)]
        (if (nil? (peek-ch st))
