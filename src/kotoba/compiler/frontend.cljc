@@ -214,7 +214,7 @@
 ;; `i64.rotl`/`i64.rotr` as single instructions is a follow-up once these
 ;; primitives are proven, not a prerequisite.
 (def i64-operations
-  '{bit-not 1 i64-shift-left 2 i64-shift-right 2 u64-shift-right 2})
+  '{bit-not 1 i64-shift-left 2 i64-shift-right 2 u64-shift-right 2 min 2 max 2})
 (def comparisons '#{= < > <= >=})
 (def heap-operations '{pair 2 pair-first 1 pair-second 1})
 ;; kgraph-* (ADR-2607198300): all-integer EAVT datom store, the native
@@ -1054,6 +1054,7 @@
     document-vector-conj #{0 1}
     document-vector-drop #{0}
     document-vector-remove #{0}
+    document-vector-sort #{0}
     document-equal? #{0 1}
     document-set-contains? #{0 1}
     document-contains #{0}
@@ -1112,7 +1113,7 @@
     document-string 1 document-keyword 1 document-symbol 1 document-count 1 document-kind 1 document-sha256 1 document-print 1 document-read 1
     document-edn-print 1 document-edn-read 1
     document-vector-at 2 document-list-at 2 document-map-entry-at 2 document-vector-assoc 3 document-vector-conj 2
-    document-vector-drop 2 document-vector-remove 2
+    document-vector-drop 2 document-vector-remove 2 document-vector-sort 1
     document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2
     document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1
     document-i64-value 1 document-f64-value 1})
@@ -8037,6 +8038,8 @@
       (= op 'document-vector-remove)
       (do (require-expression-type! (nth types 0) :document (nth args 0))
           (require-expression-type! (nth types 1) :i64 (nth args 1)) :document)
+      (= op 'document-vector-sort)
+      (do (require-expression-type! (nth types 0) :document (nth args 0)) :document)
       (= op 'document-contains)
       (do (require-expression-type! (nth types 0) :document (nth args 0))
           (when-not (contains? #{:keyword :document} (nth types 1))
