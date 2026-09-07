@@ -28,3 +28,10 @@
   ;; a string operand is not i64 -- the i64-operations branch requires :i64
   (is (some? (refusal "(ns p (:export [a])) (defn a [] :i64 (min \"s\" 7))")))
   (is (some? (refusal "(ns p (:export [a])) (defn a [] :i64 (max 3 \"s\"))"))))
+
+;; --- document-vector-sort: deterministic order for cohort ranking ---------
+(deftest document-vector-sort-is-admitted-as-a-document-head
+  (is (nil? (refusal
+             "(ns p (:export [a])) (defn a [] :document (document-vector-sort (document-vector (document-i64 3))))")))
+  (is (some? (refusal
+              "(ns p (:export [a])) (defn a [] :i64 (document-vector-sort 3))"))))
