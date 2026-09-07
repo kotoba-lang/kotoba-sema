@@ -2333,6 +2333,16 @@
 ;; with, so the two cannot drift apart silently.
 (def ^:dynamic *loop-result-type* nil)
 
+;; Known types for a synthesized loop-helper's bindings and captured outer
+;; variables. T4.5 map/filter/reduce know the source is `:vector-i64` (or a
+;; packed heterogeneous vector of those) before the helper's call site can
+;; say so: the collection is often an unannotated parameter, still
+;; provisionally `:i64` when `resolve-loop-helper-param-types` records
+;; argument types. Without this overlay the helper is typed `:i64` for
+;; `__kotoba_map_source_*` and `vector-count` / `vector-at` refuse the
+;; binding the author never wrote -- the stdlib-core-oracle cascade.
+(def ^:dynamic *loop-known-types* nil)
+
 ;; A synthesized loop-helper carries no param-type annotations (its captured
 ;; outer variables have types only knowable at its call site). During the
 ;; param-type resolution pass (resolve-loop-helper-param-types) these two are
@@ -2623,6 +2633,38 @@
                result-type))
     (binding [*contextual-closure-result-type* result-type]
       (desugar-expr form))))
+
+(defn- desugar-vector-i64-source
+  "Desugar a T4.5 map/filter/reduce collection in the vector-i64 profile.
+
+  `rest` and a written `pair-second` are Clojure's tail of a vector, not the
+  legacy pair-chain walk: leaving them as `pair-second` types the source as
+  `:i64` and the loop helper then refuses `__kotoba_map_source_*` with
+  `expected vector-i64, got i64` -- or the reverse, `pair-second` requiring
+  `:i64` of a source that is already a vector. `vector-drop` is the same
+  tail and keeps `:vector-i64` through the binding and the captured loop
+  parameter. Nested tails compose. Every other form keeps the ordinary
+  vector-i64 result context."
+  [form]
+  (if (and (seq? form)
+           (contains? '#{rest pair-second} (first form))
+           (= 1 (count (rest form))))
+    (list 'vector-drop (desugar-vector-i64-source (second form)) 1)
+    (desugar-result-expr :vector-i64 form)))
+
+(defn- bounded-vector-source-binding?
+  "True for the synthetic collection binding T4.5 map/filter/reduce emit.
+
+  Inference must require the INIT to be `:vector-i64` (form = the author's
+  collection) rather than inferring the binding from a provisional `:i64`
+  and then refusing the binding name inside the loop helper. Packed
+  `map_sources` is a heterogeneous vector and is deliberately excluded."
+  [name]
+  (let [s (str name)]
+    (or (and (str/starts-with? s "__kotoba_map_source_")
+             (not (str/starts-with? s "__kotoba_map_sources_")))
+        (str/starts-with? s "__kotoba_filter_v_")
+        (str/starts-with? s "__kotoba_reduce_v_"))))
 
 (defn- desugar-bool-expr [form]
   (desugar-result-expr :bool form))
@@ -5326,8 +5368,10 @@
                       :body (replace-recur desugared-body helper-name loop-names captured)}))
             (when *loop-helper-shapes*
               (vswap! *loop-helper-shapes* assoc helper-name
-                      {:bindings (count loop-names)
-                       :declared-result *loop-result-type*}))
+                      (cond-> {:bindings (count loop-names)
+                               :declared-result *loop-result-type*}
+                        (seq *loop-known-types*)
+                        (assoc :known-types *loop-known-types*))))
             (list* helper-name (concat loop-inits captured))))
         cons (do (when-not (= 2 (count args)) (reject! "cons requires two operands" form))
                  (list 'pair (desugar-expr (first args)) (desugar-expr (second args))))
@@ -6032,10 +6076,10 @@
                            ;; innermost map to the outermost map.
                            :callbacks (vec (reverse callbacks))}))))
                   init* (desugar-expr init-form)
-                  coll* (desugar-result-expr :vector-i64
-                                             (if map-chain
-                                               (:collection map-chain)
-                                               coll-form))
+                  coll* (desugar-vector-i64-source
+                         (if map-chain
+                           (:collection map-chain)
+                           coll-form))
                   v (synthetic "reduce_v")
                   i (synthetic "reduce_i")
                   acc (synthetic "reduce_acc")
@@ -6078,12 +6122,14 @@
                     :else
                     (list (invoke-dispatcher-name 2) callback acc item))]
               ;; Re-enter desugar so loop → __kotoba_loop_N under *pending-loop-helpers*.
-              (desugar-expr
-               (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
-                     (list 'loop [i 0 acc init*]
-                           (list 'if (list '< i (list 'vector-count v))
-                                 (list 'recur (list '+ i 1) step)
-                                 acc)))))))
+              (binding [*loop-known-types* (cond-> {i :i64 v :vector-i64}
+                                             callback (assoc callback :i64))]
+                (desugar-expr
+                 (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
+                       (list 'loop [i 0 acc init*]
+                             (list 'if (list '< i (list 'vector-count v))
+                                   (list 'recur (list '+ i 1) step)
+                                   acc))))))))
         ;; Bounded eager map over one to five vector-i64 sources.  One/two
         ;; sources stay direct for stable KIR; three-to-five source handles
         ;; share one typed heterogeneous-vector state value, so synthesized
@@ -6094,13 +6140,19 @@
         ;; Arity is validated here first so the alias fails closed with its own
         ;; name in the diagnostic rather than delegating a wrong shape.
         mapv
-        (do (when-not (<= 2 (count args) 6)
-              (reject! "mapv requires a callback and one to five vector-i64 collections" form))
-            (desugar-expr (with-meta (cons 'map args) (meta form))))
+        ;; A module may define `mapv` (stdlib.core walks pair chains under
+        ;; that name). Steal the call only when this module did not.
+        (if (contains? *function-arities* 'mapv)
+          (apply list 'mapv (map desugar-expr args))
+          (do (when-not (<= 2 (count args) 6)
+                (reject! "mapv requires a callback and one to five vector-i64 collections" form))
+              (desugar-expr (with-meta (cons 'map args) (meta form)))))
         filterv
-        (do (when-not (= 2 (count args))
-              (reject! "filterv requires pred and one vector-i64 collection" form))
-            (desugar-expr (with-meta (cons 'filter args) (meta form))))
+        (if (contains? *function-arities* 'filterv)
+          (apply list 'filterv (map desugar-expr args))
+          (do (when-not (= 2 (count args))
+                (reject! "filterv requires pred and one vector-i64 collection" form))
+              (desugar-expr (with-meta (cons 'filter args) (meta form)))))
         map
         (do
           (when-not (<= 2 (count args) 6)
@@ -6133,7 +6185,7 @@
                     (reject! "stored map callbacks support at most four sources" f-form))
                 packed? (> n-colls 2)
                 source-type [:vector (vec (repeat n-colls :vector-i64))]
-                source-values (mapv #(desugar-result-expr :vector-i64 %) coll-forms)
+                source-values (mapv desugar-vector-i64-source coll-forms)
                 sources (when packed? (synthetic "map_sources"))
                 direct-sources (when-not packed?
                                  (mapv #(synthetic (str "map_source_" %))
@@ -6172,7 +6224,13 @@
                 (if packed?
                   [sources (apply list 'hetero-vector source-type source-values)]
                   (vec (mapcat vector direct-sources source-values)))]
-            (binding [*loop-result-type* :vector-i64]
+            (binding [*loop-result-type* :vector-i64
+                      *loop-known-types*
+                      (cond-> {i :i64 acc :vector-i64}
+                        packed? (assoc sources source-type)
+                        (not packed?) (into (map vector direct-sources
+                                                 (repeat :vector-i64)))
+                        callback (assoc callback :i64))]
               (desugar-expr
                (list 'let
                      (vec (concat (when stored? [callback f-form])
@@ -6189,7 +6247,7 @@
           (when-not (= 2 (count args))
             (reject! "filter requires pred and one vector-i64 collection" form))
           (let [[p-form coll-form] args
-                coll* (desugar-result-expr :vector-i64 coll-form)
+                coll* (desugar-vector-i64-source coll-form)
                 v (synthetic "filter_v")
                 i (synthetic "filter_i")
                 acc (synthetic "filter_acc")
@@ -6219,7 +6277,9 @@
 
                   :else
                   (list (invoke-dispatcher-name :bool 1) callback x))]
-            (binding [*loop-result-type* :vector-i64]
+            (binding [*loop-result-type* :vector-i64
+                      *loop-known-types* (cond-> {i :i64 acc :vector-i64 v :vector-i64}
+                                           callback (assoc callback :i64))]
               (desugar-expr
                (list 'let (vec (concat (when stored? [callback p-form]) [v coll*]))
                      (list 'loop [i 0 acc (list 'vector-i64)]
@@ -8322,7 +8382,11 @@
         let (let [bindings (first args) body (let-body args form)]
               (loop [pairs (partition 2 bindings) current locals]
                 (if-let [[name value] (first pairs)]
-                  (let [type (infer-expression-type value current signatures)]
+                  (let [type (infer-expression-type value current signatures)
+                        type (if (bounded-vector-source-binding? name)
+                               (do (require-expression-type! type :vector-i64 value)
+                                   :vector-i64)
+                               type)]
                     (recur (next pairs)
                            ;; local-state slice 1: a cell binding carries the
                            ;; cell's identity in its name, so every rebinding
@@ -9122,12 +9186,22 @@
   loops converge. Returns `functions` with every loop-helper's :param-types
   filled in; any helper left unresolved (only possible when the module has an
   independent type error that makes inference throw) keeps an all-:i64
-  placeholder so the genuine error still surfaces in check-value-types!."
-  [functions]
+  placeholder so the genuine error still surfaces in check-value-types!.
+
+  T4.5 map/filter/reduce overlay `:known-types` from `*loop-helper-shapes*`:
+  the source is `:vector-i64` by construction, even when the call-site
+  argument is still a provisional `:i64` parameter. The overlay never
+  widens a recorded type -- it only replaces a known slot."
+  ([functions] (resolve-loop-helper-param-types functions {}))
+  ([functions shapes]
   (let [helper-names (into #{} (comp (filter :loop-helper?) (map :name)) functions)]
     (if (empty? helper-names)
       functions
       (letfn [(placeholder [{:keys [params]}] (vec (repeat (count params) :i64)))
+              (overlay [helper-name params recorded]
+                (if-let [known (get-in shapes [helper-name :known-types])]
+                  (mapv (fn [p t] (or (get known p) t)) params recorded)
+                  recorded))
               (round [resolved]
                 (let [recorder (volatile! {})
                       sigs (into {}
@@ -9157,12 +9231,14 @@
           (let [next-resolved (round resolved)]
             (if (or (= (count next-resolved) (count helper-names))
                     (= (count next-resolved) (count resolved)))
-              (mapv (fn [{:keys [name] :as f}]
+              (mapv (fn [{:keys [name params] :as f}]
                       (if (contains? helper-names name)
-                        (assoc f :param-types (get next-resolved name (placeholder f)))
+                        (assoc f :param-types
+                               (overlay name params
+                                        (get next-resolved name (placeholder f))))
                         f))
                     functions)
-              (recur next-resolved))))))))
+              (recur next-resolved)))))))))
 
 ;; ── loop/recur accumulator types (ADR 0027) ─────────────────────────────────
 ;;
@@ -14472,7 +14548,7 @@
         ;; the `:param-types` defaulting above because it reads them.
         slice-parameter-functions (volatile! #{})
         parsed (erase-slice-values parsed slice-parameter-functions)
-        parsed (resolve-loop-helper-param-types parsed)
+        parsed (resolve-loop-helper-param-types parsed @loop-helper-shapes)
         ;; ADR 0027: and then the loop-helper's RESULT, from the exits of the
         ;; loop it was made from. Immediately after its parameter types and
         ;; before anything reads its signature, so no later pass ever sees the
