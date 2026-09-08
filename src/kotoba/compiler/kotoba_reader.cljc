@@ -216,14 +216,35 @@
   (not (or (whitespace-char? ch) (delimiter-char? ch))))
 
 (defn- parse-int-token
-  "Returns a JS bigint (via `#?(:cljs js/BigInt :clj bigint)`) for a token
-  matching an optional sign followed by one or more digits, or nil if TOKEN
-  is not an integer literal (so the caller falls back to symbol/keyword
-  handling -- this mirrors `clojure.tools.reader`'s own dispatch: a bare `-`
-  or `+`, or a token like `-foo`, is a symbol, not a number)."
+  "Returns a JS bigint on `:cljs`, and on `:clj` a `Long` when the token fits
+  in one, else a `BigInt`. Nil if TOKEN is not an integer literal, so the
+  caller falls back to symbol/keyword handling -- this mirrors
+  `clojure.tools.reader`'s own dispatch: a bare `-` or `+`, or a token like
+  `-foo`, is a symbol, not a number.
+
+  ## The `:clj` branch promotes; it did not, and that was the bug
+
+  This used to call `(bigint token)` unconditionally, so on the JVM EVERY
+  integer -- `5` included -- came back `clojure.lang.BigInt` where
+  `clojure.tools.reader` returns `java.lang.Long`. Measured against the real
+  library 2026-09-08: `5` and `9223372036854775807` are `Long`,
+  `9223372036854775808` is `BigInt`. This now does the same.
+
+  It went unnoticed because `(= 5 (bigint 5))` is true in Clojure, so no
+  program ever computed a wrong VALUE from it. What it broke was every
+  assertion that compares a printed AST or a sha256 of one: `5` and `5N` are
+  different text. Across the corpus that was 18 assertions, and every one of
+  them was a golden-hash or `pr-str` mismatch rather than a wrong answer --
+  which is why nothing caught it until both hosts were put through this
+  reader.
+
+  The `:cljs` branch is unchanged and deliberately still unconditional:
+  ClojureScript has no `Long`, and a JS `Number` loses precision above 2^53,
+  so bigint is the only representation that reaches the i64 boundary intact."
   [token]
   (when (re-matches #"[+-]?[0-9]+" token)
-    #?(:clj (bigint token)
+    #?(:clj (try (Long/parseLong token)
+                 (catch NumberFormatException _ (bigint token)))
        :cljs (js/BigInt token))))
 
 (defn- f64-form [number]
@@ -391,6 +412,29 @@
                   [st (located (reader-map forms) start st) false])
 
       (= ch \") (let [[st s] (read-string-literal st)] [st s false])
+
+      ;; `@a` is `(deref a)`. This dispatch had no case for `@` at all, and
+      ;; `@` is not a delimiter, so `@a` fell through to
+      ;; `read-symbol-or-number` and was read as the single SYMBOL `@a`.
+      ;; `unbound-symbol!` then rejected it -- correctly, given what it was
+      ;; handed; the input was already wrong by then. The refusal read
+      ;; `@a is not a parameter, a let binding, or a function of this module`,
+      ;; which sends the author looking for a missing binding that is not the
+      ;; problem.
+      ;;
+      ;; `@` is load-bearing: `frontend.cljc`'s `deref-form?` recognizes both
+      ;; `(deref x)` and `(clojure.core/deref x)`, and the local-state slice
+      ;; spells the feature `@a` in its own design notes. It was invisible
+      ;; while the JVM read source with `clojure.tools.reader`, which expands
+      ;; `@` for free. It became visible the moment both hosts were put
+      ;; through this reader -- 17 assertions in `local_state_test`.
+      ;;
+      ;; The other Clojure reader macros -- quote, syntax-quote, unquote,
+      ;; var-quote, `^meta` -- are equally absent here. Nothing in the
+      ;; `.kotoba` corpus exercises them, so their absence is UNMEASURED, not
+      ;; known-good. Do not read this clause as evidence the rest are covered.
+      (= ch \@) (let [[st inner _] (read-form (advance st))]
+                  [st (located (list 'deref inner) start st) false])
 
       (= ch \:) (read-keyword st)
 
