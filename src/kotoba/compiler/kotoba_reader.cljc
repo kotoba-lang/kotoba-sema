@@ -242,10 +242,65 @@
   ClojureScript has no `Long`, and a JS `Number` loses precision above 2^53,
   so bigint is the only representation that reaches the i64 boundary intact."
   [token]
-  (when (re-matches #"[+-]?[0-9]+" token)
+  (cond
+    ;; A leading zero on a multi-digit token, refused before the decimal
+    ;; branch can swallow it. `clojure.tools.reader` reads `0377` as OCTAL 255;
+    ;; this reader read it as decimal 377. Same source, two hosts, two
+    ;; different numbers, no error on either -- the worst of the three possible
+    ;; outcomes, and the one that was live until 2026-09-08.
+    ;;
+    ;; Refusing rather than implementing octal is deliberate: every
+    ;; leading-zero match in the checked-in `.kotoba` corpus is an ADR number
+    ;; inside a comment, so no program pays for this, and picking one host's
+    ;; interpretation silently is how the divergence got here.
+    (re-matches #"[+-]?0[0-9]+" token)
+    (reject! (str "a leading zero is not an octal prefix in Kotoba: " token
+                  " -- write it in decimal, or 0x hex")
+             {:token token})
+
+    (re-matches #"[+-]?[0-9]+" token)
     #?(:clj (try (Long/parseLong token)
                  (catch NumberFormatException _ (bigint token)))
-       :cljs (js/BigInt token))))
+       :cljs (js/BigInt token))
+
+    ;; Hex. 79 `.kotoba` files in this workspace use `0x...` literals, and
+    ;; NONE of them could be read here until 2026-09-08: `0xF000` matched no
+    ;; number pattern, fell through to `symbol`, and was refused downstream as
+    ;; `unbound or dynamic symbol is forbidden: 0xF000` -- a refusal that sends
+    ;; the author looking for a missing binding instead of a missing literal.
+    ;;
+    ;; It was invisible while the JVM read source with `clojure.tools.reader`,
+    ;; which handles hex for free. Making this the reader for both hosts is
+    ;; what surfaced it: kotoba-lang/amu's `bit-or-and-not-match-jvm-semantics`
+    ;; and `i64-shifts-cover-the-full-width` went red on `(bit-or 0xF000
+    ;; 0x00F0)`.
+    (re-matches #"[+-]?0[xX][0-9a-fA-F]+" token)
+    (let [neg? (str/starts-with? token "-")
+          digits (subs token (if (or neg? (str/starts-with? token "+")) 3 2))]
+      #?(:clj (let [v (try (Long/parseLong digits 16)
+                           (catch NumberFormatException _ (bigint (java.math.BigInteger. digits 16))))]
+                (if neg? (- v) v))
+         :cljs (let [v (js/BigInt (str "0x" digits))]
+                 (if neg? (- v) v))))
+
+    :else nil))
+
+(defn- numeric-looking?
+  "A token that begins like a number but matched no number pattern.
+
+  These must be REFUSED, not handed to `symbol`. `0377` used to read as the
+  BigInt 377 here while `clojure.tools.reader` read it as octal 255 -- a
+  silently DIFFERENT VALUE across hosts, which is worse than either host
+  refusing. `2r1010` and `1e5` became symbols and were reported as unbound
+  variables.
+
+  Nothing in the checked-in `.kotoba` corpus uses a leading-zero or radix
+  literal (every match is an ADR number inside a comment), so refusing them
+  costs no existing program and closes the class rather than the one instance
+  of it. If Kotoba ever wants octal, it gets an explicit prefix and a branch
+  above, not a leading zero."
+  [token]
+  (boolean (re-matches #"[+-]?[0-9][0-9a-zA-Z_.]*" token)))
 
 (defn- f64-form [number]
   (with-meta
@@ -273,7 +328,18 @@
           "nil" nil
           "true" true
           "false" false
-          (or (parse-int-token token) (parse-f64-token token) (symbol token)))]))
+          (or (parse-int-token token)
+              (parse-f64-token token)
+              ;; A token that starts like a number and parsed as neither is a
+              ;; malformed literal, not a variable name. Saying so here is the
+              ;; difference between `unsupported numeric literal: 0377` and
+              ;; `unbound or dynamic symbol is forbidden: 0377`.
+              (when (numeric-looking? token)
+                (reject! (str "unsupported numeric literal: " token
+                              " -- decimal, 0x hex and decimal f64 are the "
+                              "forms this reader accepts")
+                         {:token token}))
+              (symbol token)))]))
 
 (defn- read-keyword [st]
   (let [st (advance st) ; consume leading `:`

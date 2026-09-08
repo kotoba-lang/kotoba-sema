@@ -179,3 +179,44 @@
   ;; updated deliberately rather than deleted.
   (is (symbol? (first (r/read-forms "'a")))
       "quote is read as a symbol today, not as (quote a)"))
+
+(deftest hex-literals-read
+  ;; 79 `.kotoba` files in this workspace use `0x...`, and none of them could
+  ;; be read here until 2026-09-08: the token matched no number pattern, fell
+  ;; through to `symbol`, and was refused downstream as `unbound or dynamic
+  ;; symbol is forbidden: 0xF000` -- which sends the author looking for a
+  ;; missing binding rather than a missing literal.
+  ;;
+  ;; Invisible while the JVM used `clojure.tools.reader`, which handles hex for
+  ;; free. Making this the reader for both hosts is what surfaced it, via
+  ;; amu's `(bit-or 0xF000 0x00F0)`.
+  (is (= "61440" (str (first (r/read-forms "0xF000")))))
+  (is (= "255"   (str (first (r/read-forms "0xFF")))))
+  (is (= "255"   (str (first (r/read-forms "0xff"))))  "case-insensitive")
+  (is (= "-255"  (str (first (r/read-forms "-0xFF")))) "signed")
+  (is (= "1"     (str (first (r/read-forms "0x1"))))))
+
+(deftest a-leading-zero-is-refused-rather-than-guessed
+  ;; `clojure.tools.reader` reads `0377` as OCTAL 255; this reader read it as
+  ;; decimal 377. Same source, two hosts, two different numbers, an error on
+  ;; neither. Refusing is the fix, not implementing octal: every leading-zero
+  ;; match in the checked-in corpus is an ADR number in a comment, so nothing
+  ;; pays for the refusal, and silently picking one host's answer is how the
+  ;; divergence survived.
+  (let [e (try (r/read-forms "0377") nil (catch #?(:clj Exception :cljs :default) e e))]
+    (is (some? e) "0377 is refused")
+    (is (str/includes? (ex-message e) "leading zero")
+        (str "the refusal names its reason, got: " (some-> e ex-message))))
+  (is (= "0" (str (first (r/read-forms "0")))) "a bare zero is still a zero"))
+
+(deftest a-numeric-looking-token-is-not-a-variable-name
+  ;; The durable half. Anything starting like a number that parses as no
+  ;; number is a malformed LITERAL, and saying so is the difference between
+  ;; `unsupported numeric literal: 2r1010` and a hunt for an unbound variable.
+  (doseq [token ["2r1010" "16rFF" "1e5x"]]
+    (let [e (try (r/read-forms token) nil (catch #?(:clj Exception :cljs :default) e e))]
+      (is (some? e) (str token " is refused rather than read as a symbol"))))
+  ;; and the other direction: an ordinary name that merely contains digits
+  ;; must still be a symbol
+  (is (symbol? (first (r/read-forms "vec3"))))
+  (is (symbol? (first (r/read-forms "x1")))))
