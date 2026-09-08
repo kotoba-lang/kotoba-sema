@@ -95,12 +95,27 @@
   (is (= 8 (count (first (r/read-forms "#{1 2 3 4 5 6 7 8}"))))))
 
 (deftest nine-exact-integers-in-a-set-are-refused-by-name
+  ;; ONE host, and the asymmetry is the point rather than an oversight. A
+  ;; Clojure set hashes a BigInt without complaint, so on the JVM nine exact
+  ;; integers read like any other nine values; the failure mode this refusal
+  ;; names exists only where `cljs.core/set` does.
+  ;;
+  ;; Written as one assertion per host rather than skipped on the JVM, because
+  ;; a skipped half says nothing and this half says something: it is the
+  ;; control that keeps the refusal honest. If the reader ever started
+  ;; refusing on the JVM too, the guard would have stopped being about the
+  ;; host that has the problem.
   (let [e (try (r/read-forms "#{1 2 3 4 5 6 7 8 9}") nil
                (catch #?(:clj Throwable :cljs :default) error error))]
-    (is (some? e) "nine exact integers in a set is refused")
-    (is (str/includes? (ex-message e) "exact-integer")
-        (str "the refusal names its reason, got: " (ex-message e)))
-    (is (= 9 (:count (ex-data e))))))
+    #?(:clj
+       (is (nil? e)
+           "the JVM has no BigInt hashing problem, so nothing is refused there")
+       :cljs
+       (do
+         (is (some? e) "nine exact integers in a set is refused")
+         (is (str/includes? (ex-message e) "exact-integer")
+             (str "the refusal names its reason, got: " (ex-message e)))
+         (is (= 9 (:count (ex-data e))))))))
 
 (deftest nine-keywords-in-a-set-still-read
   ;; The barrier is the BigInt, not the count -- keywords hash fine.

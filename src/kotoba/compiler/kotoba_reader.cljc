@@ -345,13 +345,29 @@
 
   `max-typed-set-items` is 32. For a set of exact integers on this host the
   real ceiling is 8, and until the frontend stops hashing those elements the
-  declared bound overstates what can be written."
+  declared bound overstates what can be written.
+
+  ## Why the guard is `:cljs` only
+
+  `(catch :default ...)` is not a JVM catch clause -- Clojure reads `:default`
+  as a class name and refuses to compile the file. This is a `.cljc`, so the
+  first version of this function broke `clojure -M:test` for the whole
+  repository, and it went in green because the run that reported green never
+  compiled this namespace on the JVM.
+
+  Writing it as `#?(:clj Exception :cljs :default)` would compile, and would
+  be worse: the hazard does not exist on the JVM at all -- a Clojure set
+  hashes a BigInt without complaint -- so a JVM catch here could only swallow
+  a real error. The host that has the failure mode is the host that gets the
+  guard."
   [forms]
-  (try
-    (set forms)
-    (catch :default _
-      (reject! "set literal of more than eight exact-integer elements cannot be read on this host"
-               {:count (count forms)}))))
+  #?(:clj (set forms)
+     :cljs (try
+             (set forms)
+             (catch :default _
+               (reject! (str "set literal of more than eight exact-integer "
+                             "elements cannot be read on this host")
+                        {:count (count forms)})))))
 
 (defn- read-form
   "Returns `[state form skip?]`. `skip?` is true for a `#?()` clause with no
