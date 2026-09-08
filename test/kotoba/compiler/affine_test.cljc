@@ -289,3 +289,86 @@
                                 b (vector-assoc! a 1 2)]
                             (vector-at b 0)))
                      'a))))
+
+;; ── the accumulator a helper builds and hands back ──────────────────────────
+;;
+;; `linear?` refuses a returned handle, correctly: the caller can hold it. That
+;; single refusal is what makes every accumulator loop copy, and the cost is
+;; not marginal -- measured 2026-09-08 on aarch64, the same 3000-iteration
+;; loop takes 3001 vector handles and 48,016 arena items copying and 1 handle
+;; and 16 items in place.
+;;
+;; `module-linear-returning` admits it, and only ever as a PAIR of
+;; obligations: the callee lets the handle escape nowhere but its return, and
+;; every caller gives it up at the call. Each half alone is unsound, so each
+;; half is asserted alone below.
+
+(def ^:private accumulator-module
+  "The shape `x25519.field/mul` has: an inner loop, an outer loop, and an
+  owner that allocates the accumulator and reads a value out of it."
+  [{:name 'inner :params '[x y i j t]
+    :body ['(if (>= j 16)
+              t
+              (inner x y i (+ j 1)
+                     (vector-assoc! t (+ i j) (+ (vector-at t (+ i j)) 1))))]}
+   {:name 'outer :params '[x y i t]
+    :body ['(if (>= i 16) t (outer x y (+ i 1) (inner x y i 0 t)))]}
+   {:name 'mul :params '[x y]
+    :body ['(let [t (vector-alloc 31)
+                  u (outer x y 0 t)]
+              (vector-at u 0))]}])
+
+(deftest an-accumulator-threaded-through-helpers-is-linear-returning
+  (let [proved (aff/module-linear-returning accumulator-module)]
+    (is (contains? proved '[inner 4]))
+    (is (contains? proved '[outer 3])
+        "the obligation is handed on: outer returns the handle too, and its
+         own caller gives it up")
+    (testing "and nothing else is claimed -- the read-only inputs are not
+              linear, because they are read many times"
+      (is (not (contains? proved '[inner 0])))
+      (is (not (contains? proved '[mul 0]))))))
+
+(deftest the-caller-must-give-the-handle-up
+  ;; The callee half alone. `inner` is impeccable in isolation -- one use, in
+  ;; vector-operation position, returned -- and admitting it on that basis
+  ;; would let `caller` read a value the callee had already overwritten. The
+  ;; bang gate cannot catch this: `caller` writes no bang.
+  (is (empty?
+       (aff/module-linear-returning
+        [{:name 'inner :params '[t]
+          :body ['(vector-assoc! t 0 (+ (vector-at t 0) 1))]}
+         {:name 'caller :params []
+          :body ['(let [t (vector-alloc 4)
+                        u (inner t)]
+                    (+ (vector-at u 0) (vector-at t 0)))]}]))))
+
+(deftest a-callee-that-keeps-the-handle-is-not-linear-returning
+  ;; The caller half alone. `caller` is impeccable -- it hands the handle over
+  ;; and never looks at it again -- and the callee stores it where this
+  ;; analysis cannot follow.
+  (is (empty?
+       (aff/module-linear-returning
+        [{:name 'stash :params '[t]
+          :body ['(record-new [:record :box [[:v :vector-i64]]] t)]}
+         {:name 'caller :params []
+          :body ['(let [t (vector-alloc 4)] (stash t))]}]))))
+
+(deftest returning-is-not-a-licence-to-use-it-twice
+  (is (empty?
+       (aff/module-linear-returning
+        [{:name 'twice :params '[t]
+          :body ['(if (< (vector-at t 0) 0)
+                    (vector-assoc! t 0 1)
+                    t)]}
+         {:name 'caller :params []
+          :body ['(let [t (vector-alloc 4)] (twice t))]}]))
+      "the read in the test and the return are two uses on one path"))
+
+(deftest linear-returning-is-off-unless-a-module-proves-it
+  ;; `linear?` is what the frontend has always called, and a call to a user
+  ;; function is an escape to it. This is the assertion that a program which
+  ;; compiled yesterday still compiles: the extension is opt-in through
+  ;; `*linear-returning*`, and empty is the default.
+  (is (not (aff/linear? '(do (if (>= j 16) t (inner x y i 0 t))) 't)))
+  (is (aff/linear-returning? '(do (if (>= j 16) t (vector-assoc! t 0 1))) 't)))

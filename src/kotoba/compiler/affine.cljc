@@ -178,11 +178,39 @@
     (set? form) (reduce + 0 (map #(sym-uses % target) form))
     :else 0))
 
+(def ^:dynamic *linear-returning*
+  "The `[name parameter-index]` pairs this module has proved LINEAR-RETURNING:
+  functions that take a vector, use it at most once per path, let it escape
+  nowhere but their own return value, and hand it back.
+
+  A call to one is a `consuming` operation on its argument, exactly as
+  `vector-assoc` is -- the callee may have written the handle in place, so the
+  caller's copy is dead afterwards. That is the whole extension, and it is why
+  this is a set rather than a predicate: deciding it needs every function in
+  the module, and `linear?` is asked about one body at a time.
+
+  Empty by default, which is the behaviour every caller had before
+  `module-linear-returning` existed: a call to a user function is an escape."
+  #{})
+
+(defn- linear-returning-call?
+  "True when `form` calls a proved linear-returning function with `target` in
+  the parameter position that was proved."
+  [form target]
+  (and (seq? form)
+       (symbol? (first form))
+       (boolean
+        (some (fn [[name index]]
+                (and (= name (first form))
+                     (= target (nth form (inc index) ::none))))
+              *linear-returning*))))
+
 (defn- consuming-call?
   [form target]
   (and (seq? form)
-       (contains? consuming (first form))
-       (= target (second form))))
+       (or (and (contains? consuming (first form))
+                (= target (second form)))
+           (linear-returning-call? form target))))
 
 (defn- reading-call?
   [form target]
@@ -252,9 +280,14 @@
   Anywhere else — an argument to something that is not a vector operation, a
   return value, an element being stored — is an escape: the handle reaches
   code this analysis cannot see, and code it cannot see may hold it."
-  [form target]
+  ([form target] (position-ok? form target false))
+  ([form target tail?]
   (cond
-    (= form target) false
+    ;; A bare `target` is an escape UNLESS it is the value this body hands
+    ;; back and the caller has been made to treat the call as consuming --
+    ;; see `*linear-returning*`. `tail?` is false for every caller that does
+    ;; not opt in, which is the behaviour this predicate always had.
+    (= form target) tail?
     ;; A fused read-modify-write is one vector-operation-position use, not an
     ;; escape into its own update expression -- see `fused-rmw?`, which has
     ;; already checked that the update mentions `target` nowhere else.
@@ -263,20 +296,35 @@
     ;; standing in the binding vector would otherwise read as an escape, so
     ;; this refused let-bound handles for a second, independent reason.
     (let-form? form)
-    (and (every? #(position-ok? (second %) target)
+    ;; Initialisers are never tail; the body's LAST form is, when the let is.
+    (and (every? #(position-ok? (second %) target false)
                  (partition 2 (second form)))
-         (every? #(position-ok? % target) (drop 2 form)))
+         (let [body (vec (drop 2 form))]
+           (and (every? #(position-ok? % target false) (butlast body))
+                (or (empty? body) (position-ok? (peek body) target tail?)))))
+    ;; The arms of a branch inherit the position the branch is in; the test
+    ;; does not. `do` is the same shape with no test.
+    (and (seq? form) (contains? branching (first form)) (< 2 (count form)))
+    (and (position-ok? (second form) target false)
+         (every? #(position-ok? % target tail?) (drop 2 form)))
+    (and (seq? form) (= 'do (first form)) (seq (rest form)))
+    (let [body (vec (rest form))]
+      (and (every? #(position-ok? % target false) (butlast body))
+           (position-ok? (peek body) target tail?)))
     (seq? form)
     (if (or (consuming-call? form target) (reading-call? form target))
       ;; The first argument is the vector; every other argument must not
       ;; mention it. `(vector-assoc v 0 v)` stores the handle into itself.
-      (every? #(zero? (sym-uses % target)) (drop 2 form))
-      (every? #(position-ok? % target) form))
-    (vector? form) (every? #(position-ok? % target) form)
-    (map? form) (every? #(and (position-ok? (key %) target)
-                              (position-ok? (val %) target)) form)
-    (set? form) (every? #(position-ok? % target) form)
-    :else true))
+      ;; For a linear-returning call the vector is at its own index, so ask
+      ;; the count question of every argument that is not the one matched.
+      (every? #(zero? (sym-uses % target))
+              (remove #(= % target) (drop 1 form)))
+      (every? #(position-ok? % target false) form))
+    (vector? form) (every? #(position-ok? % target false) form)
+    (map? form) (every? #(and (position-ok? (key %) target false)
+                              (position-ok? (val %) target false)) form)
+    (set? form) (every? #(position-ok? % target false) form)
+    :else true)))
 
 (defn- owned-binding?
   "True unless `target` is bound from something that may still hold it.
@@ -298,6 +346,28 @@
        (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
      form)
     (every? #(and (seq? %) (contains? producing (first %))) @initialisers)))
+
+(defn linear-returning?
+  "True when `target` is linear in `form` EXCEPT that `form` hands it back.
+
+  The one shape `linear?` cannot admit and every accumulator needs: a helper
+  that takes a vector, updates it, and returns it. `position-ok?` calls a
+  bare `target` an escape, correctly -- the caller can hold it -- so a
+  function that returns its handle can never write in place, and its writes
+  copy. Measured 2026-09-08 on `x25519.field/mul`: the same 3000-iteration
+  loop costs 3001 handles and 48,016 arena items when it copies and 1 handle
+  and 16 items when it does not.
+
+  What makes returning safe is not a property of this body alone. The CALLER
+  has to give the handle up at the call, which is what
+  `module-linear-returning` checks at every call site before putting a pair
+  in `*linear-returning*`. Neither half is sound without the other: a callee
+  that returns its handle is fine if no caller keeps one, and a caller that
+  drops its handle is fine if the callee does not stash it."
+  [form target]
+  (and (<= (sym-uses form target) 1)
+       (position-ok? form target true)
+       (owned-binding? form target)))
 
 (defn linear?
   "True when `target` may be updated in place inside `form`.
@@ -376,3 +446,117 @@
               ;; The last name is the live one and may be read, linearly.
               (let [live (last names)]
                 (every? #(linear? % live) body))))))
+
+;; --- the module half ---------------------------------------------------------
+
+(defn- calls-to
+  "Every call to `name` anywhere in `form`, as the call forms themselves."
+  [form name]
+  (cond
+    (seq? form) (into (if (= name (first form)) [form] [])
+                      (mapcat #(calls-to % name) form))
+    (coll? form) (into [] (mapcat #(calls-to % name) form))
+    :else []))
+
+(defn in-place-candidates
+  "Names a `let` in `form` binds from a `producing` head.
+
+  The caller-side check needs to know whether an argument is a handle this
+  body owns or a name from somewhere it cannot see. A parameter is the other
+  legitimate source and is checked beside this."
+  [form]
+  (let [found (atom #{})]
+    ((fn walk [f]
+       (when (let-form? f)
+         (doseq [[n init] (partition 2 (second f))]
+           (when (and (seq? init) (contains? producing (first init)))
+             (swap! found conj n))))
+       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
+     form)
+    @found))
+
+(defn- caller-gives-it-up?
+  "True when every call to `[name index]` hands over an argument the caller
+  has no further claim on.
+
+  Two admissible shapes, and nothing else:
+
+  - the argument is not a name at all -- `(vector-alloc 31)`, or a nested
+    consuming call. Nothing else can be holding it, so there is nothing to
+    corrupt.
+  - the argument IS a name, and that name is linear in the calling body. The
+    call counts as consuming (see `consuming-call?`), so `linear?` is exactly
+    the question of whether the caller uses it again.
+
+  This is the half that a callee-only rule would miss, and missing it is not
+  a small unsoundness: the callee may write in place, so a caller that reads
+  its own handle after the call reads something else. The bang gate cannot
+  catch that -- the caller wrote no bang."
+  [functions name index assumed]
+  (every?
+   (fn [{caller :name :keys [params body]}]
+     (every?
+      (fn [call]
+        (let [argument (nth call (inc index) ::none)
+              whole (cons 'do body)]
+          (cond
+            (= argument ::none) false
+            ;; Not a name: `(vector-alloc 31)`, or a nested consuming call.
+            ;; Nothing else can be holding it.
+            (not (symbol? argument)) true
+            ;; A name the caller owns -- its own parameter, or a `let` binding
+            ;; from a producing head. Anything else came from somewhere this
+            ;; analysis cannot see and is refused.
+            (not (or (contains? (set params) argument)
+                     (contains? (in-place-candidates body) argument))) false
+            ;; One use, in vector-operation position. If the caller RETURNS
+            ;; the handle it is not observing a stale value, it is handing the
+            ;; same obligation on -- admissible exactly when the caller is
+            ;; itself a proved pair for that parameter, which this fixpoint
+            ;; decides in the same pass.
+            :else
+            (or (linear? whole argument)
+                (and (linear-returning? whole argument)
+                     (some (fn [index]
+                             (contains? assumed [caller index]))
+                           (keep-indexed #(when (= %2 argument) %1) params)))))))
+      (calls-to (cons 'do body) name)))
+   functions))
+
+(defn module-linear-returning
+  "The `[name parameter-index]` pairs a module may treat as linear-returning.
+
+  A GREATEST fixpoint: assume every parameter of every function qualifies,
+  then repeatedly drop the ones whose own body or whose call sites refuse
+  them, until nothing more drops. Optimistic-then-shrinking is what lets
+  self- and mutual recursion qualify at all -- a function that passes its
+  handle to itself would never qualify under a least fixpoint, and that is
+  precisely the shape every accumulator loop has.
+
+  Sound by induction on call depth. If a body's only uses of the handle are
+  consuming operations, calls in a proved position, and the return, then an
+  escape would have to happen inside some callee at some finite depth; at
+  depth zero there are no such calls, and the step is the induction
+  hypothesis.
+
+  `functions` is a seq of `{:name :params :body}` with `body` a seq of forms."
+  [functions]
+  (let [initial (set (for [{:keys [name params]} functions
+                           index (range (count params))]
+                       [name index]))]
+    (loop [assumed initial]
+      (let [surviving
+            (binding [*linear-returning* assumed]
+              (set (filter
+                    (fn [[name index]]
+                      (let [{:keys [params body]}
+                            (first (filter #(= name (:name %)) functions))
+                            target (nth params index ::none)]
+                        (and (not= target ::none)
+                             (symbol? target)
+                             (linear-returning? (cons 'do body) target)
+                             (caller-gives-it-up? functions name index assumed))))
+                    assumed)))]
+        (if (= surviving assumed)
+          assumed
+          (recur surviving))))))
