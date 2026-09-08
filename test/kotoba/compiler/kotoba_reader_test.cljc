@@ -5,7 +5,7 @@
   Integer literals read as JS bigint, so expected forms are built with
   `(js/BigInt \"2\")` rather than quoted literals -- a quoted `2` in CLJS
   is a double and `=` fails against the reader's bigint."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :as t :refer [deftest is]]
             [kotoba.compiler.kotoba-reader :as r]))
 

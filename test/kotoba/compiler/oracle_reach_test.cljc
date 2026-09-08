@@ -20,7 +20,7 @@
   interpreter's depth matters, so it cannot stand in for this."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.kir :as ir]
             [kotoba.sema :as sema]))
 

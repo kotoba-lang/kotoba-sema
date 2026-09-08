@@ -9,7 +9,7 @@
             ;; isr: `starts-with?`/`subs` for the interrupt entry name rule.
             ;; The alias does not shadow `clojure.core/str`: only symbols
             ;; carrying a `/` are resolved through it.
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.compiler.affine :as affine]
             [kotoba.artifact.core :as artifact]
             [kotoba.compiler.schema :as schema]

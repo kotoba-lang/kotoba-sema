@@ -24,7 +24,7 @@
     `match` on a map would take its first arm."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.string]
+            [kotoba.lang.text]
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))
 
@@ -218,15 +218,15 @@
 
 (deftest the-admission-limits-discriminate
   (testing "clause count"
-    (let [arms (fn [n] (clojure.string/join " " (map #(str % " " %) (range n))))
+    (let [arms (fn [n] (kotoba.lang.text/join " " (map #(str % " " %) (range n))))
           source (fn [n] (str "(defn f [n :i64] :i64 (match n " (arms n) "))"
                               " (defn main [] :i64 (f 1))"))]
       (is (nil? (rejection-of (source 32))))
       (is (= "match clause count exceeds admission limit"
              (rejection-of (source 33))))))
   (testing "and map pattern key count"
-    (let [literal (str "{" (clojure.string/join " " (map #(str ":k" % " " %) (range 9))) "}")
-          pattern (fn [n] (str "{" (clojure.string/join " " (map #(str ":k" % " v" %) (range n))) "}"))
+    (let [literal (str "{" (kotoba.lang.text/join " " (map #(str ":k" % " " %) (range 9))) "}")
+          pattern (fn [n] (str "{" (kotoba.lang.text/join " " (map #(str ":k" % " v" %) (range n))) "}"))
           source (fn [n] (str "(defn main [] :i64 (match " literal " " (pattern n) " v0 :else -1))"))]
       (is (nil? (rejection-of (source 8))))
       (is (= "match map pattern key count exceeds admission limit"

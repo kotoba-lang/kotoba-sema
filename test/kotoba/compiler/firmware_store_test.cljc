@@ -13,7 +13,7 @@
   holds the region's length and refuses a window wider than it."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.sema :as sema]))
 
