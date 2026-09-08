@@ -220,3 +220,25 @@
   ;; must still be a symbol
   (is (symbol? (first (r/read-forms "vec3"))))
   (is (symbol? (first (r/read-forms "x1")))))
+
+(deftest an-f64-constant-is-admitted-in-both-reader-shapes
+  ;; `(def k 1.5)` compiled on the JVM and was refused on nbb with
+  ;; `constant value must be closed bounded integer/string/...` -- a complaint
+  ;; about closedness for a value that was already closed. `constant-literal?`
+  ;; asked `value/f64-value?`, a HOST double, which an f64 literal only ever is
+  ;; on the JVM; under this reader it arrives as `(f64-from-bits <i64>)`.
+  ;;
+  ;; Third site in `frontend.cljc` with that shape mismatch, after the f32
+  ;; branch and the map-key/document shims. Found by kotoba-lang/amu's
+  ;; `f64-constants-are-closed-and-use-canonical-bit-lowering` once the JVM
+  ;; started reading through here too.
+  ;;
+  ;; This lives in the reader's test file on purpose: the defect is about what
+  ;; the READER produces, and the assertion is what the reader hands the
+  ;; frontend for `1.5`.
+  (let [form (first (r/read-forms "1.5"))]
+    (is (seq? form) "a decimal literal is a form, not a host double")
+    (is (= 'f64-from-bits (first form)))
+    (is (= 2 (count form)))
+    (is (true? (:kotoba.reader/f64-literal (meta form)))
+        "and it carries the marker the frontend's shims match on")))
