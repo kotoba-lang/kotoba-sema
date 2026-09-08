@@ -13210,6 +13210,25 @@
     ;; bits. A top-level constant is only lexically substituted into that same
     ;; path, so admitting a closed Double here adds no evaluation authority.
     (value/f64-value? value) true
+    ;; The same literal as the line above, in the shape the JVM-free reader
+    ;; hands it over: `(f64-from-bits <i64>)`. `value/f64-value?` asks about a
+    ;; HOST double, which an f64 literal only ever is on the JVM, so
+    ;; `(def k 1.5)` compiled there and was refused on nbb with
+    ;; `constant value must be closed bounded integer/string/...` -- a message
+    ;; about closedness for a value that was already closed.
+    ;;
+    ;; This is the THIRD site in this file where a branch was written for the
+    ;; JVM reader's shape and not the reader's: `desugar-expr*`'s f32 branch
+    ;; (fixed 2026-09-08), `f64-literal-key?` and `document-reader-f64-form?`
+    ;; (which already carry the shim), and this one. All three were invisible
+    ;; while the JVM read source with `clojure.tools.reader`; unifying the
+    ;; readers surfaced them one at a time, this one via kotoba-lang/amu's
+    ;; `f64-constants-are-closed-and-use-canonical-bit-lowering`.
+    ;;
+    ;; Admitting it adds no authority: it is the identical IEEE-754 bit form a
+    ;; function-body f64 literal already lowers to, and a constant is only
+    ;; lexically substituted into that same path.
+    (document-reader-f64-form? value) true
     (string? value) (try
                       (value/bounded-string! value value/string-literal-byte-limit)
                       true
