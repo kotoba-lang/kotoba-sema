@@ -78,3 +78,30 @@
       (is (= (expected (:offset (meta form)))
              (select-keys (meta form) [:line :column]))
           (str "form " (pr-str form)))))) 
+
+;; ── set literals of exact integers ────────────────────────────────────────
+;;
+;; An exact Kotoba i64 literal reads as a JavaScript BigInt, `cljs.core/set`
+;; switches to a hashed representation above eight elements, and nbb cannot
+;; hash a BigInt. Nine integers in a set therefore threw a raw TypeError about
+;; `closure_uid_...`, which reached the caller as `source reader rejected
+;; input` with no reason attached to it at all.
+;;
+;; The limit is NOT lifted here -- reading the set without hashing gets past
+;; the reader and hits the same barrier inside elaboration, which turns a
+;; refusal into an internal compiler error. It is named instead.
+
+(deftest eight-exact-integers-in-a-set-read
+  (is (= 8 (count (first (r/read-forms "#{1 2 3 4 5 6 7 8}"))))))
+
+(deftest nine-exact-integers-in-a-set-are-refused-by-name
+  (let [e (try (r/read-forms "#{1 2 3 4 5 6 7 8 9}") nil
+               (catch #?(:clj Throwable :cljs :default) error error))]
+    (is (some? e) "nine exact integers in a set is refused")
+    (is (str/includes? (ex-message e) "exact-integer")
+        (str "the refusal names its reason, got: " (ex-message e)))
+    (is (= 9 (:count (ex-data e))))))
+
+(deftest nine-keywords-in-a-set-still-read
+  ;; The barrier is the BigInt, not the count -- keywords hash fine.
+  (is (= 9 (count (first (r/read-forms "#{:a :b :c :d :e :f :g :h :i}"))))))

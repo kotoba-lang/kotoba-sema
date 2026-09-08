@@ -328,6 +328,31 @@
                            (compare (pr-str left) (pr-str right))))
           (partition 2 forms)))
 
+(defn- reader-set
+  "`cljs.core/set` above eight elements, with a name for what it does.
+
+  An exact Kotoba i64 literal reads as a JavaScript BigInt, `cljs.core/set`
+  switches to a hashed representation above eight elements, and nbb cannot
+  hash a BigInt. `#{1 2 3 4 5 6 7 8}` therefore read and
+  `#{1 2 3 4 5 6 7 8 9}` threw a raw `TypeError` that reached the caller as
+  `source reader rejected input` with no reason attached.
+
+  This does NOT lift the limit. Reading the set is only the first barrier:
+  measured 2026-09-08, building the set without hashing (a `sorted-set-by`
+  over printed forms) gets past the reader and then hits the SAME BigInt hash
+  inside frontend elaboration, turning a refusal into an internal compiler
+  error -- which is worse. So the limit stands and is named instead.
+
+  `max-typed-set-items` is 32. For a set of exact integers on this host the
+  real ceiling is 8, and until the frontend stops hashing those elements the
+  declared bound overstates what can be written."
+  [forms]
+  (try
+    (set forms)
+    (catch :default _
+      (reject! "set literal of more than eight exact-integer elements cannot be read on this host"
+               {:count (count forms)}))))
+
 (defn- read-form
   "Returns `[state form skip?]`. `skip?` is true for a `#?()` clause with no
   matching feature (nothing to splice in) so the caller omits it entirely."
@@ -358,7 +383,7 @@
         (cond
           (= ch2 \() (read-fn-shorthand st)
           (= ch2 \{) (let [[st forms] (read-delimited (advance (advance st)) \})]
-                       [st (located (set forms) start st) false])
+                       [st (located (reader-set forms) start st) false])
           (= ch2 \?) (let [st (advance (advance st))
                            st (skip-ws+comments st)]
                        (when-not (= (peek-ch st) \()
