@@ -18,7 +18,7 @@
   before the fix, which is exactly why nothing noticed."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.sema :as sema]))
 
 (defn- integer-case-source [n]

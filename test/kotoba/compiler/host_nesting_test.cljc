@@ -18,7 +18,7 @@
   the ceiling it analyzes, and at the ceiling the failure is ours."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :refer [max-reader-depth]]
             [kotoba.sema :as sema]))
 

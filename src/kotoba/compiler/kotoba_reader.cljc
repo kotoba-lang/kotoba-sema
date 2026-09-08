@@ -27,7 +27,7 @@
   `kotoba.kir`'s compile-time oracle (constant-folds a pure `main`
   by literally *executing* it) to match the JVM path's `Long` wraparound
   arithmetic bit-for-bit, not just within the JS safe-integer range."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn- whitespace-char? [ch]
   (or (= ch \space) (= ch \tab) (= ch \newline) (= ch \return) (= ch \,)))

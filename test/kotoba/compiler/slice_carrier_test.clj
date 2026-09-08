@@ -14,7 +14,7 @@
   Each of those is a distinct refusal with its own `:kotoba.error/` code, and
   every one is pinned by code AND by message here: a refusal that fires for a
   different reason than the one it names would otherwise count as a pass."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]

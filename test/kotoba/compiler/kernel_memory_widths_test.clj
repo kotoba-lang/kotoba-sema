@@ -9,7 +9,7 @@
   while the provenance walk kept its own list,
   `a-new-width-inherits-the-provenance-rule` would fail while everything else
   stayed green."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
