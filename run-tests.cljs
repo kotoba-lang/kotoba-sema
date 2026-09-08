@@ -15,6 +15,8 @@
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
             [kotoba.compiler.case-uniqueness-test]
+            ;; the first test that reaches infer-closure-refinements
+            [kotoba.compiler.closure-refinement-test]
             ;; boot-scratch: the writable region and a function's address
             [kotoba.compiler.boot-scratch-test]
             ;; fwstore: writing to pages the firmware allocated
@@ -111,6 +113,7 @@
 
 (t/run-tests 'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
+             'kotoba.compiler.closure-refinement-test
              'kotoba.compiler.boot-scratch-test
              'kotoba.compiler.firmware-store-test
              'kotoba.compiler.host-nesting-test

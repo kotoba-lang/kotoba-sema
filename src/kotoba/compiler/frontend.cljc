@@ -11469,10 +11469,17 @@
                 (symbol? form)
                 (if (contains? seen form)
                   :unknown
-                  (if-let [{bound-form :form bound-env :env}
+                  (if-let [{bound-form :form bound-env :env bound-status :status}
                            (binding-value env form)]
-                    (expression-status function-name bound-form bound-env
-                                       param-indexes facts (conj seen form))
+                    ;; The binding loop below already ran this exact query when
+                    ;; it bound the name, so the answer is carried on the entry
+                    ;; rather than re-derived. Re-deriving is what made this
+                    ;; quadratic: a chain of K bindings each referring to the
+                    ;; previous one costs O(i) to resolve at binding i, so the
+                    ;; loop paid sum(i) = O(K^2) walks of the same forms.
+                    (or bound-status
+                        (expression-status function-name bound-form bound-env
+                                           param-indexes facts (conj seen form)))
                     (if (contains? (get-in facts [function-name :params] #{})
                                    (get param-indexes form))
                       :closure
@@ -11490,7 +11497,8 @@
                               :trap
                               (recur (next pairs)
                                      (assoc current name {:form value
-                                                          :env current}))))
+                                                          :env current
+                                                          :status status}))))
                           (expression-status function-name body current param-indexes
                                              facts seen))))
 
