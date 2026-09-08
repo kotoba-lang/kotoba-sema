@@ -97,6 +97,9 @@
             ;; an unannotated parameter whose uses disagree names both uses
             [kotoba.compiler.parameter-use-conflict-test]
             ;; a self-recursive let binding needed only under a later branch
+            ;; f32 decimal literals. `.clj` until 2026-09-08, which is why the
+            ;; feature was broken on THIS runtime and green on the other one.
+            [kotoba.compiler.f32-literal-test]
             [kotoba.compiler.eager-recursive-let-binding-test]
             ;; an export that is a def / a defn- / undefined names which; the
             ;; rewrite prints the literal, which is a BigInt here
@@ -143,6 +146,7 @@
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
              'kotoba.compiler.parameter-use-conflict-test
+             'kotoba.compiler.f32-literal-test
              'kotoba.compiler.eager-recursive-let-binding-test
              'kotoba.compiler.export-names-constant-test
              'kotoba.compiler.zero-multiply-lint-test)

@@ -17,16 +17,50 @@
   that silent, a literal is admitted only when the binary64 round-trips exactly
   through binary32.
 
-  Decided by kotoba-lang docs/adr/ADR-kotoba-floating-point-on-native.md."
-  (:require [clojure.test :refer [deftest is testing]]
+  Decided by kotoba-lang docs/adr/ADR-kotoba-floating-point-on-native.md.
+
+  ## Why this file is `.cljc` (2026-09-08)
+
+  It was `.clj`. So the only host that ever ran it was the JVM -- the one host
+  where the feature worked. On ClojureScript every assertion here failed, and
+  had since the feature landed: `desugar-expr*`'s f32 branch asks
+  `value/f64-value?`, which is a HOST double, and under the JVM-free reader a
+  decimal literal never arrives as one. It arrives as `(f64-from-bits <i64>)`.
+  So the branch never fired, the literal fell through to the f64 lowering, and
+  `(defn main [] :f32 1.5)` was rejected with `expected f32, got f64` on nbb
+  while the JVM compiled it to `(f32-from-bits 0x3FC00000)`.
+
+  That is: an admitted language feature did not exist on the runtime this
+  compiler is migrating TO, and nothing said so, because the test that would
+  have said so could not run there. A `.clj` test of a `.cljc` compiler is not
+  a weaker test -- it is a test of one host that reads like a test of both.
+
+  Bit patterns are compared through `norm`, which renders integers as decimal
+  strings: a JVM `Long` and an nbb `BigInt` of the same value are the same
+  answer, and this file is about the value, not the host's box for it."
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 
+(defn- norm
+  "The form with every non-symbol leaf rendered as a string, so an integer
+  compares by value across hosts (JVM `Long` vs nbb `BigInt`)."
+  [form]
+  (cond (seq? form) (apply list (map norm form))
+        (symbol? form) form
+        :else (str form)))
+
 (defn- body [source]
-  (get-in (sema/analyze source) [:functions 0 :body]))
+  (norm (get-in (sema/analyze source) [:functions 0 :body])))
+
+(defn- same?
+  "The expected form, normalized the same way `body` normalizes the actual one."
+  [expected actual]
+  (= (norm expected) actual))
 
 (defn- rejection [source]
-  (try (sema/analyze source) ::no-rejection
-       (catch clojure.lang.ExceptionInfo e
+  (try (do (sema/analyze source) ::no-rejection)
+       (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
          (select-keys (ex-data e) [:phase :kotoba.error/code]))))
 
 ;; Bit patterns, written as the decimal longs a HIR form actually carries, with
@@ -41,13 +75,13 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest an-exact-decimal-literal-becomes-an-f32-pattern
-  (is (= (list 'f32-to-bits
+  (is (same? (list 'f32-to-bits
                (list 'f32-add
                      (list 'f32-from-bits bits-three-halves)
                      (list 'f32-from-bits bits-five-halves)))
          (body "(defn main [] :i64 (f32-to-bits (f32-add 1.5 2.5)))"))
       "the operand expectation reaches the literal, and it narrows to binary32")
-  (is (= (list 'f32-from-bits bits-three-halves)
+  (is (same? (list 'f32-from-bits bits-three-halves)
          (body "(defn main [] :f32 1.5)"))
       "a declared :f32 result is the same expectation in tail position"))
 
@@ -60,27 +94,34 @@
                          ["16777216.0" bits-16777216]
                          ["3.25" 1078984704]]]   ; 0x40500000
     (testing source
-      (is (= (list 'f32-from-bits bits)
+      (is (same? (list 'f32-from-bits bits)
              (body (str "(defn main [] :f32 " source ")")))))))
 
 (deftest an-f64-literal-outside-an-f32-context-is-untouched
   ;; The new branch is guarded on the expectation, so the pre-existing f64
   ;; lowering must be bit-identical to what it was. 0x3FB999999999999A is the
   ;; double 0.1; 4591870180066957722 is that pattern as a signed long.
-  (is (= (list 'f64-to-bits
+  ;;
+  ;; It is written as a STRING because it is above 2^53 and this file is read
+  ;; on nbb: as a bare literal the EXPECTATION itself rounds, to
+  ;; 4591870180066958000, and the assertion then fails against a compiler that
+  ;; produced the right answer. Measured 2026-09-08 -- the first `.cljc` run of
+  ;; this file failed exactly here, on the test's own arithmetic. `norm`
+  ;; compares by decimal string, so a string expectation is not a weakening.
+  (is (same? (list 'f64-to-bits
                (list 'f64-add
-                     (list 'f64-from-bits 4591870180066957722)
-                     (list 'f64-from-bits 4596373779694328218)))
+                     (list 'f64-from-bits "4591870180066957722")
+                     (list 'f64-from-bits "4596373779694328218")))
          (body "(defn main [] :i64 (f64-to-bits (f64-add 0.1 0.2)))"))
       "0.1 and 0.2 stay binary64 where binary64 is what is expected"))
 
 (deftest the-explicit-narrowing-is-the-way-to-spell-an-inexact-value
   ;; Both spellings the rejection message names must actually work, otherwise
   ;; the message sends the author nowhere.
-  (is (= (list 'f32-to-bits
-               (list 'f64-to-f32-rounded (list 'f64-from-bits 4591870180066957722)))
+  (is (same? (list 'f32-to-bits
+               (list 'f64-to-f32-rounded (list 'f64-from-bits "4591870180066957722")))
          (body "(defn main [] :i64 (f32-to-bits (f64-to-f32-rounded 0.1)))")))
-  (is (= (list 'f32-to-bits (list 'f32-from-bits bits-tenth))
+  (is (same? (list 'f32-to-bits (list 'f32-from-bits bits-tenth))
          (body (str "(defn main [] :i64 (f32-to-bits (f32-from-bits "
                     bits-tenth ")))")))))
 

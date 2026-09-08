@@ -4837,6 +4837,25 @@
     ;; The narrowing is exact-or-refused; see `f32-literal-bits!`.
     (and (= :f32 contextual-result-type) (value/f64-value? form))
     (list 'f32-from-bits (f32-literal-bits! form))
+
+    ;; The same literal, as the JVM-free reader hands it over. A decimal
+    ;; reaches the JVM as a host double, but `kotoba-reader` has already
+    ;; turned it into `(f64-from-bits <i64>)` -- so the branch above, which
+    ;; asks `value/f64-value?` (a host double), never fired on ClojureScript.
+    ;; The literal fell through to the generic f64 lowering and every f32
+    ;; operation rejected its own argument: `(defn main [] :f32 1.5)` and
+    ;; `(f32-add 1.5 2.5)` were unwritable on nbb while the JVM compiled both.
+    ;;
+    ;; The frontend already carries this shim in the two other places the
+    ;; reader shape reaches a literal branch (`f64-literal-key?` for map
+    ;; keys, `document-reader-f64-form?` for document literals) and in the
+    ;; `f32` argument path at the bottom of this file. This branch is the one
+    ;; that was missed, and it stayed missed because `f32_literal_test.clj` is
+    ;; `.clj`: the only suite that ever exercised f32 literals was the one
+    ;; host where the bug does not exist. That test is `.cljc` as of this
+    ;; commit and runs on both.
+    (and (= :f32 contextual-result-type) (document-reader-f64-form? form))
+    (list 'f32-from-bits (f32-literal-bits! (value/i64-bits-to-f64 (second form))))
     (value/f64-value? form) (list 'f64-from-bits (value/f64-to-i64-bits form))
     (keyword? form) form
     (boolean? form) form
