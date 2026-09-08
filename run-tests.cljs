@@ -99,6 +99,15 @@
             ;; a self-recursive let binding needed only under a later branch
             ;; f32 decimal literals. `.clj` until 2026-09-08, which is why the
             ;; feature was broken on THIS runtime and green on the other one.
+            ;; 2026-09-08: four `.cljc` suites that no runner named. The JVM
+            ;; runner scans `test/` and picked them up; this one is an explicit
+            ;; list, so on nbb they were never run at all -- the same shape as
+            ;; the f32 literal defect one line above, four more times.
+            ;; `scripts/verify-cljs-runner-completeness.cljs` names them.
+            [kotoba.compiler.affine-test]
+            [kotoba.compiler.i64-min-max-test]
+            [kotoba.compiler.map-source-type-test]
+            [kotoba.compiler.uefi-boundary-test]
             [kotoba.compiler.f32-literal-test]
             [kotoba.compiler.eager-recursive-let-binding-test]
             ;; an export that is a def / a defn- / undefined names which; the
@@ -146,6 +155,10 @@
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
              'kotoba.compiler.parameter-use-conflict-test
+             'kotoba.compiler.affine-test
+             'kotoba.compiler.i64-min-max-test
+             'kotoba.compiler.map-source-type-test
+             'kotoba.compiler.uefi-boundary-test
              'kotoba.compiler.f32-literal-test
              'kotoba.compiler.eager-recursive-let-binding-test
              'kotoba.compiler.export-names-constant-test
