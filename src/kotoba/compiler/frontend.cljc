@@ -12832,6 +12832,111 @@
     (coll? form) (into #{} (mapcat in-place-targets form))
     :else #{}))
 
+(defn- affine-param-names
+  "Parameter NAMES from a raw parameter vector, typed or not.
+
+  `[t :vector-i64 i :i64]` and `[t i]` both give `[t i]`, and the position of
+  a name in that vector is the position an argument takes at a call site --
+  which is what `module-linear-returning` indexes by.
+
+  A malformed declaration is not this pass's business: `(defn f 7 0)` has no
+  parameter vector at all, and the refusal that names that belongs to the
+  guard that already exists for it. Returning `[]` here keeps this pass inert
+  on such a form instead of making it the first thing to touch it -- measured
+  2026-09-08, filtering a non-vector threw and turned a
+  `:kotoba.error/subset-reject` into an internal compiler error."
+  [raw-params]
+  (if (vector? raw-params)
+    (vec (filter symbol? raw-params))
+    []))
+
+(defn- check-affine-writes-module!
+  "Refuse `vector-assoc!` on a handle that is not provably dead afterwards,
+  for every function in the module at once.
+
+  ## Why the module and not the function
+
+  It used to run inside `defn-parts`, one function at a time, and one function
+  is not enough to decide the question. The shape every accumulator has is a
+  helper that takes a vector, updates it, and RETURNS it -- and a returned
+  handle is an escape as far as a single body can tell, because the caller may
+  keep it. So the helper copied, and so did `x25519.field/mul`: measured
+  2026-09-08 on aarch64, the same 3000-iteration loop costs 3001 vector
+  handles and 48,016 arena items copying and 1 handle and 16 items in place.
+
+  Deciding it needs both halves at once -- the callee lets the handle escape
+  nowhere but its return, AND every caller gives it up at the call -- and the
+  second half is a fact about other functions. `affine/module-linear-returning`
+  computes the pairs that satisfy both; `*linear-returning*` is how `linear?`
+  is told, and it is empty unless a module proved something, so a program that
+  compiled before compiles the same way.
+
+  ## Why the bang still has to be written
+
+  Nothing here makes `vector-assoc` in-place. This admits a `vector-assoc!`
+  the author wrote and this analysis can now prove safe; without the bang the
+  update allocates as it always did.
+
+  ## What this does NOT close, measured
+
+  A function whose vector PARAMETER is linear in its own body is admitted
+  whatever its callers do, and has been since the gate existed. That is
+  unsound and the consequence is observable, not theoretical -- measured
+  2026-09-08 by compiling and running it:
+
+      (defn- bump [t :vector-i64] :vector-i64
+        (vector-assoc! t 0 (+ (vector-at t 0) 1)))
+      (defn main [] :i64
+        (let [t (vector-alloc 4) u (bump t)]
+          (+ (vector-at u 0) (vector-at t 0))))
+
+  answers 2 as an aarch64 binary. It should answer 1: `main` reads its own
+  `t` after handing it over, and the store `bump` made was never supposed to
+  be visible to a reader that did not ask for it. `main` writes no bang, so
+  the gate never looks at it.
+
+  `module-linear-returning` is the machinery that would close it -- it checks
+  every call site -- but turning it into a REQUIREMENT rather than an
+  additional way to qualify refuses two shapes that work today: a public
+  helper whose callers are in another module (`torihiki.book`'s `slab/add!`
+  is exactly that, and superproject ADR-2609010500 exists for it), and any
+  function this module does not see called. Whole-program linking would
+  answer the first. That is a decision about the language, not a patch to
+  make here, so this pass widens what qualifies and leaves the old path
+  exactly as it was."
+  [all-functions]
+  (let [functions (filter #(and (symbol? (:name %)) (coll? (:body %)))
+                          all-functions)
+        ;; An exported function's callers are not in this module, so no call
+        ;; site can be checked and the answer has to be no. Excluded by
+        ;; removing it from the input rather than by filtering the result:
+        ;; a pair that cannot be decided must not be assumed while OTHER
+        ;; pairs are being decided against it.
+        private-functions (remove :public? functions)
+        proved (affine/module-linear-returning
+                (mapv (fn [{:keys [name raw-params body]}]
+                        {:name name
+                         :params (affine-param-names raw-params)
+                         :body body})
+                      private-functions))]
+    (binding [affine/*linear-returning* proved]
+      (doseq [{:keys [name raw-params body]} functions
+              target (in-place-targets body)]
+        (let [index (first (keep-indexed #(when (= %2 target) %1)
+                                         (affine-param-names raw-params)))]
+          ;; Two ways to earn the bang, and the second is what this pass
+          ;; added. NOT a replacement for the first: `linear?` is what every
+          ;; program compiled against before, and narrowing it here would
+          ;; refuse programs that work today for a reason unrelated to this
+          ;; change. See the module docstring for the hole that leaves open
+          ;; and why closing it is a separate decision.
+          (when-not (or (affine/linear? (cons 'do body) target)
+                        (and index (contains? proved [name index])))
+            (reject! (str "vector-assoc! requires a linear handle: " target
+                          " is used more than once on some path through " name
+                          ", or reaches somewhere this cannot see")
+                     body)))))))
+
 (defn- check-affine-writes!
   "Refuse `vector-assoc!` on a handle that is not provably dead afterwards.
 
@@ -12889,7 +12994,6 @@
     (when (and docstring (> (count docstring) max-function-docstring-chars))
       (reject! "function docstring exceeds admission limit" docstring))
     (when-not (= ::absent result) (validate-value-type! result))
-    (check-affine-writes! name body)
     (cond-> {:name name :raw-params raw-params
              :result (if (or (= ::absent result) (callable-type? result)) :i64 result)
              :body body}
@@ -14310,6 +14414,10 @@
                 {} def-parts)
         _ (when (> (count def-parts) max-functions)
             (reject! "function count exceeds admission limit" (count def-parts)))
+        ;; After every function is parsed and before anything is desugared:
+        ;; the affine analysis reads SOURCE shapes, and it needs all of them
+        ;; at once. See `check-affine-writes-module!`.
+        _ (check-affine-writes-module! def-parts)
         overloaded-sources (->> def-parts
                                 (group-by :source-name)
                                 (keep (fn [[name clauses]]

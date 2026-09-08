@@ -722,3 +722,74 @@
                  kernel-rdtsc kernel-rdtscp kernel-swapgs]]
     (is (contains? @#'kotoba.compiler.frontend/reserved-function-names head)
         head)))
+
+(deftest an-accumulator-threaded-through-helpers-earns-the-bang
+  ;; The shape `x25519.field/mul` has and could not write: an inner loop and
+  ;; an outer loop that each take the accumulator, update it, and RETURN it.
+  ;; A returned handle is an escape as far as one body can tell, so every one
+  ;; of these updates copied -- measured 2026-09-08 on aarch64, the same
+  ;; 3000-iteration loop costs 3001 vector handles and 48,016 arena items
+  ;; copying and 1 handle and 16 items in place.
+  ;;
+  ;; Admitted now because the decision is made over the MODULE: the callee
+  ;; lets the handle escape nowhere but its return, and every caller gives it
+  ;; up at the call. Neither half is sound alone, so both are asserted.
+  (testing "admitted: the accumulator is returned and every caller drops it"
+    (is (hir/valid?
+         (sema/analyze
+          "(defn- inner [x :vector-i64 y :vector-i64 i :i64 j :i64 t :vector-i64] :vector-i64
+             (if (>= j 16)
+               t
+               (inner x y i (+ j 1)
+                      (vector-assoc! t (+ i j) (+ (vector-at t (+ i j))
+                                                  (* (vector-at x i) (vector-at y j)))))))
+           (defn- outer [x :vector-i64 y :vector-i64 i :i64 t :vector-i64] :vector-i64
+             (if (>= i 16) t (outer x y (+ i 1) (inner x y i 0 t))))
+           (defn main [] :i64
+             (let [t (vector-alloc 31)
+                   u (outer (vector-alloc 16) (vector-alloc 16) 0 t)]
+               (vector-at u 0)))"))))
+  (testing "refused: the callee keeps the handle somewhere this cannot follow"
+    (is (thrown-with-msg?
+         Exception #"requires a linear handle"
+         (sema/analyze
+          "(defn- keep-it [i :i64 t :vector-i64] :vector-i64
+             (if (>= i 16)
+               (vector-assoc! t 0 (vector-at t 1))
+               (keep-it (+ i 1) (vector-assoc t i (+ (vector-at t i) 1)))))
+           (defn main [] :i64
+             (let [t (vector-alloc 16)
+                   u (keep-it 0 t)
+                   w (keep-it 0 t)]
+               (+ (vector-at u 0) (vector-at w 0))))")))))
+
+(deftest a-caller-that-reads-after-handing-over-is-still-admitted
+  ;; A KNOWN HOLE, asserted so that closing it is visible rather than silent.
+  ;;
+  ;; A function whose vector parameter is linear in its OWN body earns the
+  ;; bang whatever its callers do, and has since the gate existed. The
+  ;; consequence is observable rather than theoretical: measured 2026-09-08,
+  ;; this program compiled to aarch64-macos and executed under kexe_loader
+  ;; answers 2, and it should answer 1 -- `main` reads its own `t` after
+  ;; handing it over, and sees a store it never asked for. `main` writes no
+  ;; bang, so the gate never looks at it.
+  ;;
+  ;; `module-linear-returning` is the machinery that would close it, and
+  ;; requiring it refuses two shapes that work today: a public helper whose
+  ;; callers are in another module (`torihiki.book`'s `slab/add!`, which
+  ;; superproject ADR-2609010500 exists for), and any function this module
+  ;; does not see called. That is a decision about the language rather than a
+  ;; patch, so the widening landed and this stayed.
+  ;;
+  ;; WHEN IT IS CLOSED, invert this assertion. It is written as an admission
+  ;; on purpose: a suite that simply omitted the case would go green through
+  ;; the fix and through a regression alike.
+  (is (hir/valid?
+       (sema/analyze
+        "(defn- bump [t :vector-i64] :vector-i64
+           (vector-assoc! t 0 (+ (vector-at t 0) 1)))
+         (defn main [] :i64
+           (let [t (vector-alloc 4)
+                 u (bump t)]
+             (+ (vector-at u 0) (vector-at t 0))))"))
+      "still admitted -- see the comment: this is the hole, not the contract"))
