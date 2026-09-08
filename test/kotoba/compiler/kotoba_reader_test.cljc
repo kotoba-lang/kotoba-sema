@@ -120,3 +120,62 @@
 (deftest nine-keywords-in-a-set-still-read
   ;; The barrier is the BigInt, not the count -- keywords hash fine.
   (is (= 9 (count (first (r/read-forms "#{:a :b :c :d :e :f :g :h :i}"))))))
+
+;; ---------------------------------------------------------------------------
+;; 2026-09-08: the two things that were wrong here, found only by making this
+;; reader the reader for BOTH hosts. Neither was findable while the JVM read
+;; source with `clojure.tools.reader` and only ClojureScript came through here.
+;; ---------------------------------------------------------------------------
+
+(deftest an-integer-in-range-is-a-long-on-the-jvm
+  ;; `parse-int-token` called `(bigint token)` unconditionally, so on the JVM
+  ;; `5` came back `clojure.lang.BigInt` where `clojure.tools.reader` returns
+  ;; `java.lang.Long`. `(= 5 (bigint 5))` is true, so no program ever computed
+  ;; a wrong VALUE from it -- what broke was every assertion comparing a
+  ;; printed AST or a sha256 of one, because `5` and `5N` are different text.
+  ;; 18 assertions across the corpus, all golden-hash or `pr-str` mismatches.
+  ;;
+  ;; This asserts the TYPE, not the value, because value equality is exactly
+  ;; what hid the defect. `(is (= 5 ...))` passes either way.
+  #?(:clj (is (instance? Long (first (r/read-forms "5")))
+              "an integer that fits in an i64 is a Long, as tools.reader gives")
+     :cljs (is (identical? js/BigInt (.-constructor (first (r/read-forms "5"))))
+               "ClojureScript has no Long; a JS Number loses precision above 2^53")))
+
+(deftest an-integer-past-the-i64-boundary-promotes
+  ;; The other direction, so the fix cannot be "always Long" either. The
+  ;; boundary itself stays exact; one past it must not silently wrap.
+  #?(:clj (do (is (instance? Long (first (r/read-forms "9223372036854775807")))
+                  "i64 max is still a Long")
+              (is (instance? clojure.lang.BigInt
+                             (first (r/read-forms "9223372036854775808")))
+                  "one past i64 max promotes rather than throwing or wrapping"))
+     :cljs (is (= "9223372036854775808"
+                  (str (first (r/read-forms "9223372036854775808"))))
+               "bigint carries it exactly")))
+
+(deftest deref-reads-as-a-deref-form
+  ;; `read-form`'s dispatch had no case for `@`, and `@` is not a delimiter,
+  ;; so `@a` fell through to `read-symbol-or-number` and became the single
+  ;; SYMBOL `@a`. The frontend then refused it as an unbound variable -- a
+  ;; true statement about a wrong input, which sends the author looking for a
+  ;; missing binding that was never the problem. 17 assertions in
+  ;; `local_state_test`.
+  (is (= (list 'deref 'a) (first (r/read-forms "@a"))))
+  (is (= (list 'swap! 'a '+ one)
+         (first (r/read-forms "(swap! a + 1)")))
+      "the surrounding local-state forms are untouched")
+  (is (= (list 'f (list 'deref 'a))
+         (first (r/read-forms "(f @a)")))
+      "and it composes inside a call"))
+
+(deftest the-other-reader-macros-are-still-absent
+  ;; Stated as a test so it cannot quietly stop being true. quote,
+  ;; syntax-quote, unquote, var-quote and `^meta` have no case in this reader
+  ;; either. Nothing in the `.kotoba` corpus exercises them, so their absence
+  ;; is UNMEASURED rather than known-good -- do not read the `@` clause above
+  ;; as evidence the rest are covered. If one of these starts reading as a
+  ;; form instead of a symbol, someone added it and this test should be
+  ;; updated deliberately rather than deleted.
+  (is (symbol? (first (r/read-forms "'a")))
+      "quote is read as a symbol today, not as (quote a)"))

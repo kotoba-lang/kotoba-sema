@@ -16,10 +16,13 @@
             [kotoba.hir :as hir]
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
-            #?@(:clj [[clojure.tools.reader :as reader]
-                      [clojure.tools.reader.reader-types :as rt]]
-                :cljs [[kotoba.compiler.kotoba-reader :as kr]
-                       [kotoba.kir.cljs-i64 :as i64]])))
+            ;; ONE reader, both hosts. `clojure.tools.reader` used to be the
+            ;; `:clj` half of this pair; it was the last third-party JVM
+            ;; library in this repository's dependency closure, and the only
+            ;; reason `orgs/kotoba-lang/amu` carried one on its production
+            ;; classpath.
+            [kotoba.compiler.kotoba-reader :as kr]
+            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
 
 (defn- load-catalog-forbidden
   "P0: merge catalog forbidden-heads when guest-grammar.edn is on classpath."
@@ -1584,33 +1587,29 @@
   (when (re-find #"#=" source)
     (throw (ex-info "reader evaluation is forbidden" {:phase :read})))
   (check-reader-depth! source)
-  #?(:clj
-     (let [r (rt/indexing-push-back-reader source)]
-       (loop [out []]
-         (when (> (count out) 10000)
-           (throw (ex-info "too many top-level forms" {:phase :read})))
-         (let [x (try
-                   (reader/read {:read-cond :allow :features #{:kotoba} :eof ::eof} r)
-                   (catch Exception error
-                     (throw (ex-info "source reader rejected input"
-                                     {:phase :read} error))))]
-           (if (= x ::eof) out (recur (conj out x))))))
-     ;; kotoba-reader (kr) is a purpose-built substitute for the JVM-only
-     ;; clojure.tools.reader -- see its own ns docstring for why
-     ;; cljs.tools.reader (the nominal ClojureScript sibling) isn't used
-     ;; instead. It parses the whole source in one pass rather than one form
-     ;; at a time, so the >10000 admission check runs post-hoc here instead
-     ;; of per-iteration -- equivalent outcome, same 1 MiB source cap already
-     ;; bounds how large that one pass can be.
-     :cljs
-     (let [out (try
-                 (kr/read-forms source)
-                 (catch :default error
-                   (throw (ex-info "source reader rejected input"
-                                   {:phase :read} error))))]
-       (when (> (count out) 10000)
-         (throw (ex-info "too many top-level forms" {:phase :read})))
-       out)))
+  ;; This forked until 2026-09-08: `clojure.tools.reader` on the JVM,
+  ;; `kotoba-reader` on ClojureScript. Two readers for one grammar is two
+  ;; answers to every question about that grammar, with only one of them
+  ;; exercised by whichever suite happened to run -- and this repository has
+  ;; now paid for that twice in one day. Once when f32 decimal literals
+  ;; compiled on the JVM and were refused on nbb, because the frontend
+  ;; branch was written for the shape only the JVM reader produces. Once
+  ;; when collapsing the fork revealed that `kotoba-reader` had no `@`
+  ;; (deref) case at all and boxed every JVM integer as `BigInt`. Neither
+  ;; was findable while each host had its own reader.
+  ;;
+  ;; It parses the whole source in one pass rather than one form at a time,
+  ;; so the >10000 admission check runs post-hoc here instead of
+  ;; per-iteration -- equivalent outcome, and the same 1 MiB source cap
+  ;; already bounds how large that one pass can be.
+  (let [out (try
+              (kr/read-forms source)
+              (catch #?(:clj Exception :cljs :default) error
+                (throw (ex-info "source reader rejected input"
+                                {:phase :read} error))))]
+    (when (> (count out) 10000)
+      (throw (ex-info "too many top-level forms" {:phase :read})))
+    out))
 
 (defn- form-span [form]
   (let [{:keys [line column end-line end-column offset end-offset]} (meta form)]
