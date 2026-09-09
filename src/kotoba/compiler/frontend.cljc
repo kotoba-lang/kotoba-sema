@@ -125,7 +125,13 @@
     ;; fs/app-data (runtime id 202): sandboxed read/write on the
     ;; granted path scope — wire id 35 for the native loader provider
     ;; table (ADR-2609051100 slice 4).
-    :fs/app-data 35})
+    :fs/app-data 35
+    ;; io/write (kotoba-lang a0408d81): the bytes a COMMAND writes to its
+    ;; standard output, `:string -> :string` answering the decimal byte
+    ;; count. Wire 37. Before it this compiler had no capability for stdout
+    ;; and none for argv, so a guest could compute an answer and had no way
+    ;; to say one.
+    :io/write 37})
 
 (defn- load-capability-catalog []
   #?(:clj
