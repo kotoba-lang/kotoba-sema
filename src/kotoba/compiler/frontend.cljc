@@ -137,7 +137,11 @@
     ;; answers that argument. Wire 38. With :io/write it is the pair a
     ;; command cannot be built without: one to see what it was asked, one to
     ;; answer.
-    :cli/args 38})
+    :cli/args 38
+    ;; io/write-error (kotoba-lang): a command's DIAGNOSTIC output, wire 39.
+    ;; Its own capability and its own effect -- stdout is the answer, stderr
+    ;; is not, and one grant must not carry both.
+    :io/write-error 39})
 
 (defn- load-capability-catalog []
   #?(:clj
