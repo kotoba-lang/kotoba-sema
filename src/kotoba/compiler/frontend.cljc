@@ -131,7 +131,13 @@
     ;; count. Wire 37. Before it this compiler had no capability for stdout
     ;; and none for argv, so a guest could compute an answer and had no way
     ;; to say one.
-    :io/write 37})
+    :io/write 37
+    ;; cli/args (kotoba-lang): the arguments a COMMAND was invoked with,
+    ;; `:string -> :string` -- the empty request answers the count, a decimal
+    ;; answers that argument. Wire 38. With :io/write it is the pair a
+    ;; command cannot be built without: one to see what it was asked, one to
+    ;; answer.
+    :cli/args 38})
 
 (defn- load-capability-catalog []
   #?(:clj
