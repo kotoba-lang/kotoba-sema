@@ -141,7 +141,13 @@
     ;; io/write-error (kotoba-lang): a command's DIAGNOSTIC output, wire 39.
     ;; Its own capability and its own effect -- stdout is the answer, stderr
     ;; is not, and one grant must not carry both.
-    :io/write-error 39})
+    :io/write-error 39
+    ;; sys/cwd (kotoba-lang 7483551c): where the process was started, wire 40.
+    ;; The empty request answers an absolute path. Its own capability and NOT
+    ;; a form of :env/read -- /bin/pwd -L validates $PWD against the real
+    ;; directory rather than trusting it, so a grant to read environment
+    ;; variables cannot answer this question.
+    :sys/cwd 40})
 
 (defn- load-capability-catalog []
   #?(:clj
