@@ -7111,9 +7111,32 @@
         (contains? i64-operations op)
         (do (when-not (= (get i64-operations op) (count args))
               (reject-operation-arity! "i64 operation" op (get i64-operations op) (count args) form))
+            ;; The count was admitted only as a literal in [0,63] until
+            ;; 2026-09-10. The reason recorded in kotoba-native was that a
+            ;; literal "lets a backend lower a shift onto CL without a mask" --
+            ;; an implementation convenience, not a property of the operation,
+            ;; and it made variable-count shift and rotate inexpressible, which
+            ;; is most of what a cipher is.
+            ;;
+            ;; Measured before changing it: the x86-64 emitter ALREADY emits the
+            ;; variable-count group (`shl rax,cl` / `sar rax,cl` / `shr rax,cl`)
+            ;; and already routes the count through `emit-rhs-window`, which
+            ;; evaluates an arbitrary expression into rcx. Nothing about the
+            ;; lowering needed to change; only this admission did.
+            ;;
+            ;; A literal still takes the checked path here, so an out-of-range
+            ;; CONSTANT is still a compile-time reject rather than a runtime
+            ;; trap -- the diagnostic a caller can act on. A non-literal count
+            ;; is validated as an ordinary expression and the backend emits a
+            ;; range guard, because `kotoba.kir` traps on a count outside
+            ;; [0,63] and x86 CL is taken mod 64: without the guard the native
+            ;; artifact and its own sealed oracle would disagree for exactly
+            ;; the inputs nobody tests.
             (when (contains? '#{i64-shift-left i64-shift-right u64-shift-right} op)
-              (when-not (and (kotoba-integer? (second args)) (<= 0 (second args) 63))
-                (reject! "i64 shift count must be an integer literal in [0,63]" form)))
+              (if (kotoba-integer? (second args))
+                (when-not (<= 0 (second args) 63)
+                  (reject! "i64 shift count literal must be in [0,63]" form))
+                (validate-expr (second args) locals functions (inc depth) budget)))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? i32-operations op)
