@@ -17,6 +17,10 @@
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
+            ;; a defn / defn- / fn body of several forms is one `do`, as let's
+            ;; is; the implicit and explicit spellings are one analysis; empty
+            ;; bodies, loop, try and protocol methods keep their refusals
+            [kotoba.compiler.defn-body-sequences-test]
             [kotoba.compiler.case-uniqueness-test]
             ;; the first test that reaches infer-closure-refinements
             [kotoba.compiler.closure-refinement-test]
@@ -167,6 +171,7 @@
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.variadic-defn-test
+             'kotoba.compiler.defn-body-sequences-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test
              'kotoba.compiler.boot-scratch-test

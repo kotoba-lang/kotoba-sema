@@ -146,12 +146,15 @@
     (is (= 105 (w (run "(defn f [n :i64] :i64 (do (+ n 10) (+ n 100)))" 'f [5]))))))
 
 (deftest the-heads-that-refuse-a-multi-form-body-still-refuse
-  ;; `defn`, `fn` and `loop` take one body expression and say so. They were
-  ;; never part of this defect -- they failed CLOSED. Pinned here so that
-  ;; teaching `let` to sequence is not read as having taught them to.
-  (testing "defn"
-    (is (re-find #"one result expression"
-                 (:message (refusal "(defn f [n :i64] :i64 (+ n 10) (+ n 100))")))))
+  ;; `loop` takes one body expression and says so. It was never part of this
+  ;; defect -- it failed CLOSED. Pinned here so that teaching `let` to
+  ;; sequence is not read as having taught it to. `defn` and `fn` were pinned
+  ;; here the same way until 2026-09-12, when the grammar moved them to
+  ;; `:implicit-body-forms :sequences` (`defn-body-sequences-test`); they
+  ;; failed closed too, and now sequence as `let` does -- by the SAME collapse
+  ;; to `do`, not by keeping the first form.
+  (testing "defn sequences now, to the LAST form"
+    (is (= 105 (w (run "(defn f [n :i64] :i64 (+ n 10) (+ n 100))" 'f [5])))))
   (testing "loop"
     (is (re-find #"exactly one body expression"
                  (:message (refusal (str "(defn f [n :i64] :i64"

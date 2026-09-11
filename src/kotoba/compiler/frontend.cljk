@@ -2927,6 +2927,38 @@
     (= 1 (count forms)) (first forms)
     :else (list* 'do forms)))
 
+(defn- implicit-do-body
+  "The ONE expression a `defn` / `defn-` / `fn` body is, from the one or more
+  forms the author wrote.
+
+  `lang/guest-grammar.edn` `:implicit-body-forms` puts `defn`, `defn-` and
+  `fn` in `:sequences` (2026-09-12, adr-2609111900): several body forms
+  collapse to `do`, exactly as `let`'s do in `sequenced-body` above, and for
+  the same reason -- `do` is a first-class head that keeps a kernel store or
+  a cap-call in non-final position alive, where a nested `let` would make it
+  an unused binding. `(defn f [x] a b)` and `(defn f [x] (do a b))` are one
+  function with one body; the same forms, so the same HIR and the same CID.
+
+  Until 2026-09-12 every one of those sites REFUSED a second form (`function
+  must contain one result expression`, `single-arity fn value requires
+  exactly one body`, `map fn must contain one result expression; ...`). That
+  was IMPLEMENTATION STATE, not a property: the collapse adds no semantics
+  the `do` head does not already have. Measured against the compiler's own
+  225 sources (lang/selfhost-distance.edn, measurement 14): 14 modules were
+  refused at exactly this sentence, and 272 `defn` forms carry a guard
+  `(when-not ok (throw ...))` before their result.
+
+  An EMPTY body is not this function's to answer: every caller refuses it
+  first, with the sentence it always had, and hands only a non-empty seq
+  here. The `do` takes the first form's reader metadata (its location), the
+  forms themselves keep their own."
+  [forms]
+  (if (= 1 (count forms))
+    (first forms)
+    (let [m (meta (first forms))
+          collapsed (apply list 'do forms)]
+      (if (seq m) (with-meta collapsed m) collapsed))))
+
 (defn- let-body
   "The ONE body expression of a core `let`, refusing anything else.
 
@@ -3025,13 +3057,15 @@
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
         [_ params-or-clause & tail] form
+        ;; A body of several forms is one `do` (`implicit-do-body`); an
+        ;; empty one stays `nil` here so the refusal below still names it.
         raw-clauses (if (vector? params-or-clause)
-                      [[params-or-clause (first tail)]]
+                      [[params-or-clause (when (seq tail) (implicit-do-body tail))]]
                       (mapv (fn [clause]
                               (when-not (and (seq? clause) (vector? (first clause))
-                                             (= 2 (count clause)))
+                                             (<= 2 (count clause)))
                                 (reject! "multi-arity fn requires ([params] body) clauses" clause))
-                              [(first clause) (second clause)])
+                              [(first clause) (implicit-do-body (rest clause))])
                             (cons params-or-clause tail)))
         parsed (mapv (fn [[params body :as clause]]
                        (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
@@ -3078,7 +3112,7 @@
                            clauses)
                    (= (count clauses) (count (distinct (map (comp count first) clauses)))))
       (reject! "fn value requires unique arities with zero to four unique parameters" form))
-    (when (and (vector? params-or-clause) (not= 1 (count tail)))
+    (when (and (vector? params-or-clause) (empty? tail))
       (reject! "single-arity fn value requires exactly one body" form))
     (let [lowered (mapv (fn [[params body]]
                           (let [clause-result (get contract-results (count params))]
@@ -6469,9 +6503,11 @@
 
                     (and (seq? f-form) (= 'fn (first f-form)))
                     (let [[_ params & body] f-form]
+                      ;; `single-expr` is the sentence's word for a NON-EMPTY
+                      ;; body: several forms are one `do` (`implicit-do-body`).
                       (when-not (and (vector? params) (= 2 (count params))
                                      (every? symbol? params)
-                                     (= 1 (count body)))
+                                     (seq body))
                         (reject! "reduce fn must be (fn [acc x] single-expr)" f-form))
                       (let [[a b] params]
                         (list 'let [a acc
@@ -6479,7 +6515,7 @@
                               (binding [*lexical-bindings*
                                         (into *lexical-bindings* params)
                                         *abort-lexical-context* :fn]
-                                (desugar-expr (first body))))))
+                                (desugar-expr (implicit-do-body body))))))
 
                     ;; Named binary module function (fail-closed if unbound / wrong arity).
                     named?
@@ -6643,11 +6679,10 @@
                       (reject! "map fn parameters must be unique" f-form))
                     (when (empty? body)
                       (reject! "map fn requires a body expression" f-form))
-                    (when-not (= 1 (count body))
-                      (reject! (str "map fn must contain one result expression; "
-                                    "explicit (do ...) is the spelling")
-                               f-form))
-                    [params (first body)]))
+                    ;; Several forms are one `do` (`implicit-do-body`); until
+                    ;; 2026-09-12 this site refused them `map fn must contain
+                    ;; one result expression; explicit (do ...) is the spelling`.
+                    [params (implicit-do-body body)]))
                 _ (when (and stored? (> n-colls 4))
                     (reject! "stored map callbacks support at most four sources" f-form))
                 packed? (> n-colls 2)
@@ -6804,11 +6839,8 @@
                         (reject! "map-indexed fn parameters must be unique" f-form))
                       (when (empty? body)
                         (reject! "map-indexed fn requires a body expression" f-form))
-                      (when-not (= 1 (count body))
-                        (reject! (str "map-indexed fn must contain one result expression; "
-                                      "explicit (do ...) is the spelling")
-                                 f-form))
-                      [params (first body)]))
+                      ;; Several forms are one `do`, as at `map`'s site.
+                      [params (implicit-do-body body)]))
                   coll* (desugar-vector-i64-source coll-form)
                   v (synthetic "mapindexed_v")
                   i (synthetic "mapindexed_i")
@@ -6860,9 +6892,11 @@
                 (cond
                   (and (seq? p-form) (= 'fn (first p-form)))
                   (let [[_ params & body] p-form]
+                    ;; `single-expr` is the sentence's word for a NON-EMPTY
+                    ;; body: several forms are one `do` (`implicit-do-body`).
                     (when-not (and (vector? params) (= 1 (count params))
                                    (every? symbol? params)
-                                   (= 1 (count body)))
+                                   (seq body))
                       (reject! "filter pred must be (fn [x] single-expr)" p-form))
                     (let [[px] params]
                       ;; Bind user param to element; desugar body in that scope.
@@ -6870,7 +6904,7 @@
                             (binding [*lexical-bindings*
                                       (into *lexical-bindings* params)
                                       *abort-lexical-context* :fn]
-                              (desugar-expr (first body))))))
+                              (desugar-expr (implicit-do-body body))))))
 
                   named?
                   (list p-form x)
@@ -13613,7 +13647,15 @@
                  (contains? ceiling-form :effects)
                  (= #{:effects} (set (keys ceiling-form))))
           [(normalize-effect-ceiling (:effects ceiling-form) form) (rest tail)]
-          [nil tail])]
+          [nil tail])
+        ;; Several body forms are ONE `do` from here on (`implicit-do-body`;
+        ;; guest-grammar `:implicit-body-forms :sequences` holds defn since
+        ;; 2026-09-12), so every later reader of `:body` -- the variadic
+        ;; specialization, the affine check, the elaboration site that
+        ;; refuses `function must contain one result expression` -- sees a
+        ;; one-form seq. An empty body is left empty: that refusal is still
+        ;; the empty body's, with the sentence it always had.
+        body (if (< 1 (count body)) (list (implicit-do-body body)) body)]
     (when (and docstring (> (count docstring) max-function-docstring-chars))
       (reject! "function docstring exceeds admission limit" docstring))
     (when-not (= ::absent result) (validate-value-type! result))
@@ -13844,9 +13886,10 @@
               (when-let [raw (first variadic-raws)]
                 (let [{:keys [min-arity] :as parts}
                       (variadic-clause-parts (:raw-params raw) constants form)
-                      ;; The body is a one-form seq; a clause with more or
-                      ;; fewer keeps its shape so `function must contain one
-                      ;; result expression` still names it downstream.
+                      ;; The body is a one-form seq (`defn-parts` collapsed
+                      ;; several forms to one `do`); an empty clause keeps its
+                      ;; shape so `function must contain one result
+                      ;; expression` still names it downstream.
                       body (:body raw)
                       used (set (filter #(<= min-arity % max-parameters) call-arities))
                       always (first (remove fixed-arities (range min-arity (inc max-parameters))))
@@ -15738,6 +15781,9 @@
                            (reject! "reserved function name" name))
                          (when-not (vector? raw-params)
                            (reject! "function parameters must be a vector" raw-params))
+                         ;; Reached only by an EMPTY body since 2026-09-12:
+                         ;; `defn-parts` collapses several forms to one `do`
+                         ;; (guest-grammar `:implicit-body-forms :sequences`).
                          (when-not (= 1 (count body))
                            (reject! "function must contain one result expression" body))
                          (let [param-parts (typed-param-parts raw-params constants)

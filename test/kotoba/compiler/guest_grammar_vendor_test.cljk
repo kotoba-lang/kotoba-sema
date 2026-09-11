@@ -155,8 +155,26 @@
   exactly as `map`'s stored callback does; a one-parameter callback is
   refused by name -- `map-indexed passes the index first` -- ahead of the
   generic count sentence; a module's own `map-indexed` is kept, the
-  into/mapv rule). One head ADMITTED; the previous digest was `11fd920c`."
-  "63dc6e9afb8affd5414ecc871ac77f62602b6e0d0d3b8b87afdfbc640073e39b")
+  into/mapv rule). One head ADMITTED; the previous digest was `11fd920c`.
+
+  NOT advanced for `7644f32d` (2026-09-12, the merge of the variadic defn
+  wave 53e4d2f0 and the map-indexed wave 63dc6e9a): main e4e9521 carried the
+  COPY at 7644f32d and left this literal at 63dc6e9a -- this file is `.clj`
+  under a `.cljk` name and no runner here executes it since the rename, so
+  nothing said so. Recorded rather than silently skipped, as kotoba-lang's
+  own history vector records its skip of b957f5cd.
+
+  Advanced 2026-09-12 to `5b8af0f9` for the implicit-do body of `defn` /
+  `defn-` / `fn` (authority kotoba-lang, adr-2609111900): `:implicit-body-
+  forms` moves the three heads from `:refuses` to `:sequences` -- several
+  body forms collapse to `do`, as `let`'s do, IMPLEMENTATION STATE not a
+  property (`do` is a first-class head on every backend, so the widening is
+  a spelling). THIS commit implements it in the frontend (`implicit-do-body`,
+  applied in `defn-parts`, `lift-lambda`, and the map / map-indexed / reduce /
+  filter inline-callback sites; empty bodies, `loop`, `try` and protocol
+  methods keep their refusals). No head admitted or withdrawn; the previous
+  digest was `7644f32d`."
+  "5b8af0f9db6ae93d44cc3a8c47d40eece4a8303274959fd5862a46f6a378bf1d")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
