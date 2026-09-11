@@ -68,6 +68,10 @@
             ;; a keyword-keyed literal with a non-i64 value is a closed record
             ;; (adr-2609111900); the all-i64 one is byte-identical to before
             [kotoba.compiler.keyword-map-record-literal-test]
+            ;; a top-level def whose value is a pure call form folds at
+            ;; analysis time; (def k 4096) and (def k (* 4 1024)) are one
+            ;; constant; atom / delay / forward reference / fuel refused by name
+            [kotoba.compiler.computed-constant-fold-test]
             ;; a loop's accumulator may be any admitted type, not only an i64
             [kotoba.compiler.loop-accumulator-type-test]
             ;; conj/disj on a typed set, and a set-item refusal that names
@@ -170,6 +174,7 @@
              'kotoba.compiler.typed-map-key-types-test
              'kotoba.compiler.typed-map-value-types-test
              'kotoba.compiler.keyword-map-record-literal-test
+             'kotoba.compiler.computed-constant-fold-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
              'kotoba.compiler.collection-heads-test
