@@ -159,7 +159,7 @@
             :kotoba.error/subset-reject]
            ["(defn f 7 0)"          "function parameters must be a vector"
             :kotoba.error/subset-reject]
-           ["(defn f [])"           "function must contain one result expression"
+           ["(defn f [])"           "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
             :kotoba.error/subset-reject]
            ["(defn f [x x] (+ x x))"
             "function parameters must be unique bounded symbols with ABI-supported arity"

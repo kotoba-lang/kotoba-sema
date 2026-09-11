@@ -15784,8 +15784,15 @@
                          ;; Reached only by an EMPTY body since 2026-09-12:
                          ;; `defn-parts` collapses several forms to one `do`
                          ;; (guest-grammar `:implicit-body-forms :sequences`).
+                         ;; Measured the same day (selfhost measurement 17,
+                         ;; amu b6052761): 13 of the compiler's own modules
+                         ;; still stopped here, and every one was a body
+                         ;; spelled as `#?(:clj ... :cljs ...)` only -- which
+                         ;; this reader (features #{:kotoba}) reads as NOTHING.
+                         ;; The sentence says so; "one result expression" alone
+                         ;; read as if the sequencing had not landed.
                          (when-not (= 1 (count body))
-                           (reject! "function must contain one result expression" body))
+                           (reject! "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)" body))
                          (let [param-parts (typed-param-parts raw-params constants)
                                _ (when (> (count param-parts) max-parameters)
                                    (reject! "function parameters exceed ABI-supported arity" raw-params
