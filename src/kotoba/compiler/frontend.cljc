@@ -13897,13 +13897,40 @@
     (mapv
      (fn [[method-name params & body :as method-form]]
        (let [declared-params (get-in protocol [:methods method-name])]
+         ;; One code, four sentences. This was a single `and` of five
+         ;; conditions behind `protocol method does not match its
+         ;; declaration`, and that sentence was wrong for the one cause that
+         ;; occurs in the Q9 corpus. Measured 2026-09-11 at 9b153c7:
+         ;;
+         ;;   (area [this] (+ 1 1) (:side this))       refused, "does not match its declaration"
+         ;;   (area [this] (do (+ 1 1) (:side this)))  admitted
+         ;;
+         ;; The declaration matched perfectly; the body had two expressions.
+         ;; `defn` refuses the same shape as `function must contain one
+         ;; result expression`. A reader handed the protocol sentence
+         ;; compares parameter vectors and finds nothing (real instance:
+         ;; `datom.source/CountingSource`, `(-scan [_ pattern] (swap! calls
+         ;; inc) (let ...))`).
+         ;;
+         ;; What is admitted does not move: the single-expression rule is
+         ;; the profile's, `defn` has it too, and explicit `do` is the
+         ;; spelling. The order is `defn`'s -- parameters before body -- so
+         ;; a method wrong in both places is told about its parameters
+         ;; first, as a function would be. `vector?` is checked before
+         ;; anything counts PARAMS, because `(count 'this)` is a host error.
+         (when-not (vector? params)
+           (reject! "protocol method parameters must be a vector"
+                    method-form :kotoba.error/protocol-method))
          (when-not (and declared-params
-                        (= 1 (count body))
-                        (vector? params)
-                        (= (count params) (count declared-params))
-                        (every? valid-name? params)
-                        (= (count params) (count (distinct params))))
+                        (= (count params) (count declared-params)))
            (reject! "protocol method does not match its declaration"
+                    method-form :kotoba.error/protocol-method))
+         (when-not (and (every? valid-name? params)
+                        (= (count params) (count (distinct params))))
+           (reject! "protocol method parameters must be unique unqualified symbols"
+                    method-form :kotoba.error/protocol-method))
+         (when-not (= 1 (count body))
+           (reject! "protocol method must contain one result expression"
                     method-form :kotoba.error/protocol-method))
          {:protocol protocol-name
           :method method-name
