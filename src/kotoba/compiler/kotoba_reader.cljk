@@ -374,6 +374,14 @@
                   [(case nxt
                      \n \newline \t \tab \r \return
                      \\ \\ \" \" \0 (char 0)
+                     ;; `\b` and `\f` are the two remaining single-letter
+                     ;; escapes Clojure's StringReader accepts (backspace,
+                     ;; form feed). Measured 2026-09-12: the reader refused
+                     ;; osaho's `kir/value.cljk` (a JSON escape table) and
+                     ;; THIS file (its own EDN printer) whole for one each,
+                     ;; and every compiler module that requires either was
+                     ;; refused `source reader rejected input` in a dependency.
+                     \b (char 8) \f (char 12)
                      (reject! "unsupported string escape" {:escape nxt}))
                    2])]
             (recur (+ i width) (conj! acc mapped)))
