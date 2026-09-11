@@ -6060,7 +6060,18 @@
         dissoc (do (when-not (>= (count args) 2)
                      (reject! "dissoc requires a map and at least one key" form))
                    (list* 'dissoc (mapv desugar-expr args)))
-        some (do (when-not (= 1 (count args)) (reject! "some requires one i64 operand" form))
+        ;; `some` here is the OPTION CONSTRUCTOR (`(some x)` -> `[:option
+        ;; i64]`), not clojure.core/some. The two-argument spelling is
+        ;; Clojure's predicate-over-a-collection, and it is a name collision
+        ;; -- measured 2026-09-12 (selfhost measurement 16, 8 of the
+        ;; compiler's own modules): "requires one i64 operand" read as an
+        ;; arity slip on a call the author never meant as a constructor. The
+        ;; sentence names the collision; nothing is admitted here.
+        some (do (when-not (= 1 (count args))
+                   (reject! (if (= 2 (count args))
+                              "some with two arguments is clojure.core/some (a predicate over a collection); in this language `some` is the option constructor and takes one i64 operand -- search with filter / first, or write the loop"
+                              "some requires one i64 operand")
+                            form))
                  (list 'option-some (desugar-expr (first args))))
         some? (do (when-not (= 1 (count args)) (reject! "some? requires one option operand" form))
                   (list 'option-some? (desugar-expr (first args))))
