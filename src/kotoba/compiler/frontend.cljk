@@ -6401,12 +6401,28 @@
         into
         (if (contains? *function-arities* 'into)
           (apply list 'into (map desugar-expr args))
-          (do (when-not (= 2 (count args))
-                (reject! "into requires a destination and one source in this subset" form))
-              (desugar-expr
-               (with-meta
-                (list* 'reduce (list 'fn '[acc x] (list 'vector-conj 'acc 'x)) args)
-                (meta form)))))
+          ;; The transducer 3-arity `(into to (xf f) src)` for the five
+          ;; single-step transducers is rewritten to the 2-arity
+          ;; `(into to (xf f src))` -- the same value, the same lowering,
+          ;; no transducer machinery. Measured 2026-09-11 (adr-2609111900):
+          ;; 7 of the compiler's own sources spell `into` this way, all with
+          ;; map / filter / remove / keep / mapcat. A composed xform
+          ;; (`(comp ...)`) or any other head stays refused by name.
+          (let [args (if (and (= 3 (count args))
+                              (seq? (second args))
+                              (contains? '#{map filter remove keep mapcat} (first (second args)))
+                              (= 2 (count (second args))))
+                       [(first args) (list (first (second args)) (second (second args)) (nth args 2))]
+                       args)]
+            (when-not (= 2 (count args))
+              (reject! (if (= 3 (count args))
+                         "into with a transducer admits only (map f) (filter f) (remove f) (keep f) (mapcat f) as the middle argument"
+                         "into requires a destination and one source in this subset")
+                       form))
+            (desugar-expr
+             (with-meta
+              (list* 'reduce (list 'fn '[acc x] (list 'vector-conj 'acc 'x)) args)
+              (meta form)))))
         map
         (do
           (when-not (<= 2 (count args) 6)
