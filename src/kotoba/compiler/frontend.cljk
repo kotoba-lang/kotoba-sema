@@ -1281,8 +1281,13 @@
 (def max-parameters 5)
 (def max-symbol-chars 128)
 (def max-list-items 128)
-(def max-namespace-docstring-chars 4096)
-(def max-function-docstring-chars 4096)
+(def max-namespace-docstring-chars 65536)
+(def max-function-docstring-chars 65536)
+;; Docstrings carry no meaning a declaration depends on and are outside the
+;; definition CID, so their bound exists only to keep input bounded. It was
+;; 4096, which refused 3 of the compiler's own sources whose ns docstrings
+;; run to 27,879 chars -- this workspace writes its "why" in docstrings on
+;; purpose (measured 2026-09-11, adr-2609111900). 64 KiB is still a bound.
 (def max-type-depth 8)
 (def max-type-nodes 64)
 (def max-variant-cases 32)

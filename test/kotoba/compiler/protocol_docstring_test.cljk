@@ -117,8 +117,10 @@
     (is (some? (outcome (unit "(defprotocol IP (m \"doc\"))"))))))
 
 (deftest a-docstring-is-bounded-like-every-other
-  (let [over (apply str (repeat 4097 "x"))
-        under (apply str (repeat 4096 "x"))]
+  ;; The bound is read from the frontend, not spelled here: it moved from
+  ;; 4096 to 65536 on 2026-09-11 and a literal would have pinned the old one.
+  (let [over (apply str (repeat (inc sema/max-function-docstring-chars) "x"))
+        under (apply str (repeat sema/max-function-docstring-chars "x"))]
     (testing "at the limit is admitted"
       (is (nil? (outcome (unit (str "(defprotocol IP \"" under "\" (-scan [this p]))"))))))
     (testing "one byte over is refused, and says so"
@@ -129,3 +131,14 @@
         (is (= :kotoba.error/protocol-declaration (:code r)))))
     (testing "a method docstring is bounded too"
       (is (some? (outcome (unit (str "(defprotocol IP (-scan [this p] \"" over "\"))"))))))))
+
+(deftest namespace-docstrings-are-bounded-at-64-kib-not-4-kib
+  ;; A 30,000-char ns docstring is what the compiler's own sources carry
+  ;; (measured 2026-09-11: 27,879 max); it must be admitted. One past the
+  ;; bound must still be refused, by the same message (the bound moved, the
+  ;; rule did not).
+  (let [doc-30k (apply str (repeat 30000 "d"))
+        doc-over (apply str (repeat (inc sema/max-namespace-docstring-chars) "d"))]
+    (is (nil? (outcome (str "(ns t \"" doc-30k "\")\n(defn main [] :i64 42)"))))
+    (is (= "namespace docstring exceeds admission limit"
+           (:message (outcome (str "(ns t \"" doc-over "\")\n(defn main [] :i64 42)")))))))
