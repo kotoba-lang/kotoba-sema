@@ -52,9 +52,11 @@
      (not merely \"not refused\");
   2. the refusals, each by its exact message and code, so a program that is
      refused for a DIFFERENT reason cannot be counted as this case passing;
-  3. the interaction with the keyword-keyed literal, which deliberately stays
-     the legacy untagged pair map and therefore does NOT get an inferred value
-     type -- it is refused by name and pointed at `typed-map-new`;
+  3. the interaction with the keyword-keyed literal: until 2026-09-11 it
+     stayed the legacy untagged pair map and a non-i64 value was refused by
+     name; it now lowers to a closed record (adr-2609111900, see
+     `keyword_map_record_literal_test.cljk`), and the all-i64 one is
+     unchanged;
   4. a BYTE-IDENTITY control on i64-valued, keyword-keyed and
      all-unknown-value programs, whose HIR and KIR must be unchanged character
      for character. Captured on sema df383ba0 on BOTH runtimes before the
@@ -210,33 +212,20 @@
            (:message (refusal (str "(typed-map-count [:map :string :bool]"
                                    " {\"b\" 1 \"a\" true})")))))))
 
-(deftest a-keyword-keyed-literal-does-not-get-an-inferred-value-type
-  ;; This is the interaction with the decision the key work made: a
-  ;; keyword-keyed literal stays the legacy untagged pair map, because
-  ;; `map-get`, `map-assoc` and every `match` map pattern are written against
-  ;; that form. Its values are i64. Before this change the program below was
-  ;; refused with `expression type mismatch: expected i64, got string`, which
-  ;; is true and says nothing about what to do instead.
-  (is (= {:message (str "map literal with keyword keys carries i64 values; "
-                        "the value at key :a is :string. A keyword-keyed "
-                        "literal lowers to the legacy untagged pair map that "
-                        "`map-get`, `map-assoc` and every `match` map pattern "
-                        "are written against, so its value type is not "
-                        "inferred; write (typed-map-new [:map :keyword "
-                        ":string] ...) for a typed map with keyword keys")
-          :code :kotoba.error/map-literal-value}
-         (refusal "(map-get {:a \"x\"} :a \"\")")))
-  (testing "the suggested descriptor names the type the program actually wrote"
-    (is (= {:message (str "map literal with keyword keys carries i64 values; "
-                          "the value at key :a is :bool. A keyword-keyed "
-                          "literal lowers to the legacy untagged pair map that "
-                          "`map-get`, `map-assoc` and every `match` map "
-                          "pattern are written against, so its value type is "
-                          "not inferred; write (typed-map-new [:map :keyword "
-                          ":bool] ...) for a typed map with keyword keys")
-            :code :kotoba.error/map-literal-value}
-           (refusal "(if (map-get {:a true} :a false) 7 8)"))))
-  (testing "and the suggestion works"
+(deftest a-keyword-keyed-literal-with-a-non-i64-value-is-a-closed-record
+  ;; Until 2026-09-11 this pinned the OPPOSITE: the literal was refused by
+  ;; name and pointed at `typed-map-new`, because "a keyword-keyed literal
+  ;; stays the legacy untagged pair map". That was the pair map's state, not a
+  ;; property (`lang/surface-status.edn` carried it as `:implemented-partial`),
+  ;; and `typed-map-new [:map :keyword :string]` could not have held a MIXED
+  ;; literal anyway. The literal now lowers to a closed record whose fields
+  ;; are read off the values, the way a `defrecord` constructor lowers; see
+  ;; `keyword_map_record_literal_test.cljk` for the descriptor, the nested
+  ;; cases and the refusals. The all-i64 keyword literal is unchanged (the
+  ;; byte-identity control at the end of this file).
+  (is (= 1 (run "(string-length (:a {:a \"x\"}))")))
+  (is (= 7 (run "(if (:a {:a true}) 7 8)")))
+  (testing "the typed-map spelling with keyword keys still works beside it"
     (is (= 7 (run (str "(if (option-value-of [:option :bool]"
                        " (typed-map-get [:map :keyword :bool]"
                        " (typed-map-new [:map :keyword :bool] :a true) :a)"
