@@ -89,8 +89,16 @@
   `:attr-map` entry -- `{:kotoba/export [...]}` after the docstring means
   `(:export [...])`, and the frontend in THIS commit implements it
   (`namespace-attr-map->clauses`, one validation path). No head admitted or
-  withdrawn; the previous digest was `10ff0062`."
-  "5a5a3d6c2aea65159f795160c1554382a79bcffb5c2edd5f012317a215076e20")
+  withdrawn; the previous digest was `10ff0062`.
+
+  Advanced 2026-09-11 to `7262fae3` for `:refer` in a require spec (authority
+  kotoba-lang f69b6a3d): `:core-form-shapes :require-spec` admits
+  `[m :refer [f]]` / `[m :as a :refer [f]]` -- implemented by amu's project
+  linker, which is the only place a `:require` clause is ever read -- and
+  gains `:ns-refused-clauses`, which THIS commit implements in the frontend
+  (`namespace-refused-clauses`: `:import` and its kin are refused by name).
+  No head admitted or withdrawn; the previous digest was `5a5a3d6c`."
+  "7262fae36127e58a9681f7790344827cc89e4c8f6b57dda1ed1f0175352aa1e0")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

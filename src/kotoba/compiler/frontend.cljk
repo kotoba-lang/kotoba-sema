@@ -2326,6 +2326,22 @@
     (into (mapv (fn [[k v]] (list (get namespace-attr-map-keys k) v)) attr-map)
           explicit-clauses)))
 
+;; Clause heads the namespace form refuses BY NAME (kotoba-lang
+;; `lang/guest-grammar.edn` `:ns-refused-clauses`, 2026-09-11). None is
+;; admitted; naming them lets a census of refusals tell host interop
+;; (`:import`) from a macro harness (`:require-macros`) from a Clojure-only
+;; harness clause (`:refer-clojure`) from a malformed admitted clause, which
+;; the one generic sentence could not. Measured 2026-09-11 over the
+;; compiler's own 178 sources: 18 carry `:import`, 13 `:refer-clojure`.
+(def namespace-refused-clauses
+  "clause head -> why it stays outside the language"
+  {:import "host interop (a Java / JS class) is outside the language"
+   :require-macros "macros are outside the language"
+   :use "an unqualified ambient namespace is outside the language"
+   :refer-clojure "there is no clojure.core to exclude from"
+   :load "loading source at run time is outside the language"
+   :gen-class "host interop is outside the language"})
+
 (defn- namespace-parts
   "Parse the bounded namespace header. `:export` and `:capabilities`
   (ADR-2607182410) are the only admitted clauses, each at most once (in
@@ -2361,6 +2377,15 @@
       (let [tail (if attr-map
                    (namespace-attr-map->clauses attr-map tail reject!)
                    tail)]
+        ;; Before the count: a header that carries `:import` beside three
+        ;; admitted clauses is refused for the `:import`, not for its length.
+        (doseq [clause tail]
+          (when (and (seq? clause) (contains? namespace-refused-clauses (first clause)))
+            (reject! (str "namespace clause " (pr-str (first clause)) " is not admitted: "
+                          (get namespace-refused-clauses (first clause))
+                          "; the admitted clauses are :export, :capabilities and :schemas"
+                          " (and :require / :params on the project route)")
+                     clause :kotoba.error/namespace-host-clause)))
         (when (> (count tail) 3)
           (reject! "namespace admits at most :export, :capabilities, and :schemas clauses" form :kotoba.error/namespace-clause-count))
         ;; ADR-2607182410: `:export`'s original (pre-existing, test-asserted)
@@ -2381,6 +2406,9 @@
                             (reject! "only a bounded :capabilities set is admitted in namespace clauses" clause :kotoba.error/namespace-capabilities-clause))
             :schemas (when-not (and (= 2 (count clause)) (map? (second clause)))
                        (reject! "only a closed :schemas map is admitted in namespace clauses" clause :kotoba.error/namespace-schemas-clause))
+            ;; `:require` and `:params` keep the generic message VERBATIM: amu's
+            ;; `kotoba.compiler.diagnostic/refine` recognises exactly that
+            ;; code + head and renames it to the project-route remedy.
             (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause)))
         (when (not= (count tail) (count (distinct (map first tail))))
           (reject! "namespace admits each clause at most once" form :kotoba.error/namespace-clause-duplicate))
