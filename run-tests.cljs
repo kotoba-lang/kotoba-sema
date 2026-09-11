@@ -22,6 +22,9 @@
             ;; `^meta` reads (it was read as a SYMBOL and shifted the form),
             ;; `^:private` on a defn is defn-, and the export refusal proves it
             [kotoba.compiler.reader-metadata-test]
+            ;; a protocol method refusal names its cause: body count, arity,
+            ;; parameter shape -- one code, four sentences
+            [kotoba.compiler.protocol-method-diagnostic-test]
             ;; boot-scratch: the writable region and a function's address
             [kotoba.compiler.boot-scratch-test]
             ;; fwstore: writing to pages the firmware allocated
@@ -130,6 +133,7 @@
 
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
              'kotoba.compiler.reader-metadata-test
+             'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test
