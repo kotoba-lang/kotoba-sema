@@ -119,6 +119,9 @@
             [kotoba.compiler.pure-head-slice-test]
             ;; one undeclared surface alias taking a name the module defined
             [kotoba.compiler.mapv-alias-shadowing-test]
+            ;; map-indexed: the callback takes the index first, (fn [i x]
+            ;; ...); reuses map's callback admission verbatim, own-name kept
+            [kotoba.compiler.map-indexed-test]
             ;; an unbound symbol names itself and the nearest defined names;
             ;; the edit distance walks strings with `nth`, which is a char on
             ;; the JVM and a one-character string here
@@ -195,6 +198,7 @@
              'kotoba.compiler.string-upper-test
              'kotoba.compiler.pure-head-slice-test
              'kotoba.compiler.mapv-alias-shadowing-test
+             'kotoba.compiler.map-indexed-test
              'kotoba.compiler.unbound-symbol-nearest-test
              'kotoba.compiler.operation-refusal-cause-test
              'kotoba.compiler.parameter-use-conflict-test

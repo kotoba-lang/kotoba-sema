@@ -2880,7 +2880,8 @@
     (or (and (str/starts-with? s "__kotoba_map_source_")
              (not (str/starts-with? s "__kotoba_map_sources_")))
         (str/starts-with? s "__kotoba_filter_v_")
-        (str/starts-with? s "__kotoba_reduce_v_"))))
+        (str/starts-with? s "__kotoba_reduce_v_")
+        (str/starts-with? s "__kotoba_mapindexed_v_"))))
 
 (defn- desugar-bool-expr [form]
   (desugar-result-expr :bool form))
@@ -6715,6 +6716,130 @@
                                  acc
                                  (list 'recur (list '+ i 1)
                                        (list 'vector-conj acc mapped)))))))))
+        ;; map-indexed: (map-indexed f coll) over one vector-i64 source. The
+        ;; callback takes the INDEX FIRST, then the item: (fn [i x] ...) --
+        ;; the arity is fixed at two (never the source count, since there is
+        ;; only ever one source). IMPLEMENTATION STATE, not a property:
+        ;; nothing in lang/guest-grammar.edn / surface-status.edn refused an
+        ;; index before this arm (adr-2609111900, the selfhost ceiling loop);
+        ;; the wall measured at amu 10469db0 (225 sources) was stdlib
+        ;; coverage -- 9 modules refused `unknown operation: map-indexed is
+        ;; not a builtin, a sugar head, or a function of this module` (e.g.
+        ;; multiformats base32.cljk) -- not a designed exclusion. Every
+        ;; refusal below reuses `map`'s callback admission verbatim (adr-
+        ;; 2609111900's map-callback-shapes split): the ONLY two differences
+        ;; are the fixed arity and the one-parameter refusal, which names its
+        ;; own cause instead of falling through to `map`'s "N-source ... got
+        ;; 1" sentence, because a one-parameter (fn [x] ...) is the shape a
+        ;; `map` callback author reaches for first.
+        map-indexed
+        ;; A module may define `map-indexed` itself (the into/mapv "do not
+        ;; steal a module's own name" rule -- mapv-alias-shadowing-test).
+        ;; Steal the call only when this module did not.
+        (if (contains? *function-arities* 'map-indexed)
+          (apply list 'map-indexed (map desugar-expr args))
+          (do
+            (when-not (= 2 (count args))
+              (reject! "map-indexed requires a callback and one vector-i64 collection" form))
+            (let [[f-form coll-form] args
+                  top-level? (top-level-function-symbol? f-form)
+                  inline? (and (seq? f-form) (= 'fn (first f-form)))
+                  stored? (not (or top-level? inline?))
+                  _ (when (and top-level?
+                               (not (contains? (get *function-arities* f-form) 2)))
+                      (reject! (str "named map-indexed callback does not support two parameters; "
+                                    "map-indexed passes the index first: (fn [i x] ...)")
+                               f-form))
+                  ;; Reuse map's literal / not-a-head refusals verbatim.
+                  _ (when stored?
+                      (let [kind (cond (keyword? f-form) "keyword"
+                                       (string? f-form) "string"
+                                       (kotoba-integer? f-form) "integer"
+                                       (boolean? f-form) "boolean"
+                                       (nil? f-form) "nil"
+                                       (vector? f-form) "vector"
+                                       (map? f-form) "map"
+                                       (set? f-form) "set")]
+                        (when kind
+                          (reject! (str "map-indexed callback must be a named function, an inline fn, "
+                                        "or a closure value; got a " kind
+                                        " literal -- a map-indexed source is a vector-i64 and its "
+                                        "item is an i64, so no keyword or literal can map it")
+                                   f-form)))
+                      (when (and (seq? f-form)
+                                 (contains? '#{partial comp juxt complement} (first f-form))
+                                 (not (contains? *function-arities* (first f-form)))
+                                 (not (contains? *lexical-bindings* (first f-form))))
+                        (reject! (str "map-indexed callback (" (first f-form) " ...) is not admitted: "
+                                      (first f-form) " is not a head of this language; "
+                                      "write the callback as (fn [i x] ...)")
+                                 f-form)))
+                  inline-parts
+                  (when inline?
+                    (let [[_ params & body] f-form]
+                      (when-not (vector? params)
+                        (reject! (str "map-indexed fn requires a parameter vector; a multi-arity "
+                                      "(fn ([i x] ...) ...) is not a map-indexed callback")
+                                 f-form))
+                      ;; The one-parameter shape is refused BY NAME, first:
+                      ;; it is the shape a `map` callback author reaches for,
+                      ;; and the generic count sentence below would not say
+                      ;; why two are required.
+                      (when (= 1 (count params))
+                        (reject! (str "map-indexed fn requires 2 parameters; got 1 -- "
+                                      "map-indexed passes the index first: (fn [i x] ...), not (fn [x] ...)")
+                                 f-form))
+                      (when-not (= 2 (count params))
+                        (reject! (str "map-indexed fn requires 2 parameters (index, item); got "
+                                      (count params))
+                                 f-form))
+                      (when-not (every? symbol? params)
+                        (reject! (str "map-indexed fn parameter destructures ("
+                                      (pr-str (first (remove symbol? params)))
+                                      "): the index and the item of a vector-i64 source are i64 and "
+                                      "have no positions to bind; take symbols and index "
+                                      "a typed value inside the body")
+                                 f-form))
+                      (when-not (= (count params) (count (distinct params)))
+                        (reject! "map-indexed fn parameters must be unique" f-form))
+                      (when (empty? body)
+                        (reject! "map-indexed fn requires a body expression" f-form))
+                      (when-not (= 1 (count body))
+                        (reject! (str "map-indexed fn must contain one result expression; "
+                                      "explicit (do ...) is the spelling")
+                                 f-form))
+                      [params (first body)]))
+                  coll* (desugar-vector-i64-source coll-form)
+                  v (synthetic "mapindexed_v")
+                  i (synthetic "mapindexed_i")
+                  acc (synthetic "mapindexed_acc")
+                  x (synthetic "mapindexed_x")
+                  callback (when stored? (synthetic "mapindexed_callback"))
+                  mapped
+                  (cond
+                    inline?
+                    (let [[params body] inline-parts
+                          [i-param x-param] params]
+                      (list 'let [i-param i x-param x]
+                            (binding [*lexical-bindings*
+                                      (into *lexical-bindings* params)
+                                      *abort-lexical-context* :fn]
+                              (desugar-expr body))))
+                    top-level? (list f-form i x)
+                    ;; REQUEST the dispatcher, exactly as `map`'s stored
+                    ;; callback path does (adr-2609111900).
+                    :else (apply list (request-invoke-dispatcher :i64 2) callback [i x]))]
+              (binding [*loop-result-type* :vector-i64
+                        *loop-known-types* (cond-> {i :i64 acc :vector-i64 v :vector-i64}
+                                             callback (assoc callback :i64))]
+                (desugar-expr
+                 (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
+                       (list 'loop [i 0 acc (list 'vector-i64)]
+                             (list 'if (list '< i (list 'vector-count v))
+                                   (list 'let [x (list 'vector-at v i)]
+                                         (list 'recur (list '+ i 1)
+                                               (list 'vector-conj acc mapped)))
+                                   acc))))))))
         ;; T4.5: bounded filter over vector-i64 → zero-charge loop + vector-conj.
         ;; (filter (fn [x] pred) coll) or (filter named-pred coll).
         filter
