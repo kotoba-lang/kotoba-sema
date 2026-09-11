@@ -107,8 +107,17 @@
   (`validate-refer-clojure-clauses!`: shape-checked, `:rename` refused by
   name, then dropped before the clause loop), and `:refer-clojure` leaves
   `:ns-refused-clauses`. No head admitted or withdrawn; the previous digest
-  was `7262fae3`."
-  "d07b8816546b8ff2d78e1db2f375c92ee5e654e20d04eb554a5c4f38fe031587")
+  was `7262fae3`.
+
+  Advanced 2026-09-11 to `48fb5241` for the heterogeneous keyword-map
+  literal (authority kotoba-lang): `:sugar :map-literal :value-types
+  :keyword-keys` becomes a map -- a keyword-keyed literal with a value that
+  spells a non-i64 type lowers to a closed record read off its values, which
+  THIS commit implements in the frontend (`keyword-map-literal-record-fields`
+  / `map-literal-record-type` in `desugar-map`; the all-i64 keyword literal
+  is unchanged byte for byte), and `:entry-limits` gains `:keyword-record 20`.
+  No head admitted or withdrawn; the previous digest was `d07b8816`."
+  "48fb5241483bb38fc33944047e3456a9360e8e3c9315aa06bb085e3ada8828db")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

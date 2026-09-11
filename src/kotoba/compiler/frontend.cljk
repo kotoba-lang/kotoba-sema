@@ -4136,9 +4136,11 @@
     \"direct floating map keys or values are outside the structured scalar
     ABI\" for it, measured. The two facts are said as two messages.
   * DISAGREEING value types, naming both types and both entries.
-  * a non-`:i64` literal value under KEYWORD keys, which keep the legacy
-    untagged pair map (see `desugar-map`) and therefore do not get an inferred
-    value type at all."
+  KEYWORD keys never reach this function: their literal is typed by
+  `keyword-map-literal-record-fields` (a legacy pair map when every spelled
+  value is `:i64`, a closed record otherwise), which is why the two float
+  refusals below stay the typed map's alone -- a record field HAS an `:f64`
+  encoding."
   [kind entries]
   (let [typed (vec (keep (fn [[k v]]
                            (when-let [t (map-literal-value-type v)] [k t]))
@@ -4155,38 +4157,124 @@
                       "and is refused because the typed map's value slot has "
                       "no floating encoding")
                  entries :kotoba.error/floating-map-kv)))
-    (if (= :keyword kind)
-      (do (when-let [[k t] (first (remove (fn [[_ t]] (= :i64 t)) typed))]
-            (reject! (str "map literal with keyword keys carries i64 values; "
-                          "the value at key "
-                          (map-literal-key-description-for-message k) " is "
-                          (map-literal-type-description t)
-                          ". A keyword-keyed literal lowers to the legacy "
-                          "untagged pair map that `map-get`, `map-assoc` and "
-                          "every `match` map pattern are written against, so "
-                          "its value type is not inferred; write "
-                          "(typed-map-new [:map :keyword "
-                          (map-literal-type-description t)
-                          "] ...) for a typed map with keyword keys")
-                     entries :kotoba.error/map-literal-value))
-          :i64)
-      (if-let [[first-key first-type] (first typed)]
-        ;; `=` rather than `distinct`: a value type may be a descriptor
-        ;; vector, and hashing is not something both runtimes agree on for
-        ;; every literal shape (`run-tests.cljk` records the `desugar-case`
-        ;; bigint hashing defect that taught this).
-        (if-let [[other-key other-type]
-                 (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
-          (reject! (str "map literal values must all be one type; the value "
-                        "at key "
-                        (map-literal-key-description-for-message first-key)
-                        " is " (map-literal-type-description first-type)
-                        " and the value at key "
-                        (map-literal-key-description-for-message other-key)
-                        " is " (map-literal-type-description other-type))
-                   entries :kotoba.error/map-literal-value)
-          first-type)
-        :i64))))
+    (if-let [[first-key first-type] (first typed)]
+      ;; `=` rather than `distinct`: a value type may be a descriptor
+      ;; vector, and hashing is not something both runtimes agree on for
+      ;; every literal shape (`run-tests.cljk` records the `desugar-case`
+      ;; bigint hashing defect that taught this).
+      (if-let [[other-key other-type]
+               (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
+        (reject! (str "map literal values must all be one type; the value "
+                      "at key "
+                      (map-literal-key-description-for-message first-key)
+                      " is " (map-literal-type-description first-type)
+                      " and the value at key "
+                      (map-literal-key-description-for-message other-key)
+                      " is " (map-literal-type-description other-type))
+                 entries :kotoba.error/map-literal-value)
+        first-type)
+      :i64)))
+
+(def ^:private map-literal-record-namespace
+  "The namespace of every anonymous record type a keyword-keyed literal
+  lowers to. FIXED, not the module's: the type is structural (the whole
+  `[:record id fields]` descriptor is the type -- `record-equal` and
+  `bounded-typed-value!` compare it whole), so the same literal shape names
+  the same type from every module, and a function in one module can hand the
+  literal to a reader in another without either declaring a `defrecord`."
+  "kotoba.map-literal")
+
+(defn- map-literal-record-field-segment
+  "One key of the literal, as a segment of the record id's name. A keyword
+  name cannot carry `/`, so a namespaced key folds its namespace in with `.`:
+  `:containment/status` -> `containment.status`. The name is a discovery
+  alias, not the identity -- the fields vector beside it is."
+  [key]
+  (if (namespace key)
+    (str (namespace key) "." (name key))
+    (name key)))
+
+(defn- map-literal-record-type
+  "The anonymous closed record type of a keyword-keyed literal, from its
+  already-ordered fields: `[:record :kotoba.map-literal/a+b [[:a T] [:b U]]]`.
+  Deterministic from the source alone -- keys are in the same total order
+  `desugar-map` emits entries in -- so a definition CID that contains one is
+  reproducible."
+  [fields]
+  [:record (keyword map-literal-record-namespace
+                    (str/join "+" (map (comp map-literal-record-field-segment first)
+                                       fields)))
+   fields])
+
+(declare map-literal-lowered-type)
+
+(defn- map-literal-record-field-type
+  "The field type ONE value of a keyword-keyed literal determines on its own,
+  or `nil` for an expression whose type only inference can know.
+
+  This is `map-literal-value-type` plus the two literal shapes a config map
+  actually nests -- a vector literal (through `closed-vector-literal-type`,
+  the same reading a bare vector gets) and a map literal (through the type
+  the nested literal itself lowers to)."
+  [form]
+  (cond
+    (map? form) (map-literal-lowered-type form)
+    (vector? form) (closed-vector-literal-type form)
+    :else (map-literal-value-type form)))
+
+(defn- keyword-map-literal-record-fields
+  "The fields of the closed record a keyword-keyed literal lowers to, or
+  `nil` when the literal stays the legacy untagged pair map.
+
+  The rule is one predicate: does any value SPELL a type other than `:i64`?
+  If none does -- every value is an integer literal or an expression whose
+  type only inference can know -- the literal is the pair map it always was,
+  byte for byte, and its definition CID does not move. If any does, the
+  literal is a closed record: keyword keys only (`desugar-map` has already
+  refused a mixed key kind by name), the key set closed, at most
+  `max-record-fields` entries, fields in the same total order the pair map's
+  entries are emitted in. A value that spells no type takes `:i64`, which is
+  `:not-spelled :i64` from the typed-keyed literal applied unchanged, and is
+  checked against that by `record-new`'s own inference afterwards.
+
+  Two refusals are BY NAME here because downstream has only a shape to report:
+
+  * `nil`, which has no value type. An absent field is an `[:option T]` and
+    is spelled as one.
+  * more than `max-record-fields` entries -- the bound `defrecord` has."
+  [form entries]
+  (let [typed (mapv (fn [[k v]] [k (map-literal-record-field-type v)]) entries)]
+    (when (some (fn [[_ t]] (and (some? t) (not= :i64 t))) typed)
+      (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
+        (reject! (str "map literal with keyword keys and a non-i64 value lowers "
+                      "to a closed record, and the value at key "
+                      (map-literal-key-description-for-message k)
+                      " is nil, which has no value type; an absent field is an "
+                      "[:option T] -- write (option-none) under a declared "
+                      "[:option T] field, or leave the key out")
+                 form :kotoba.error/map-literal-value))
+      (when (> (count entries) max-record-fields)
+        (reject! (str "map literal with keyword keys and a non-i64 value lowers "
+                      "to a closed record and exceeds the record field limit: "
+                      (count entries) " entries, at most " max-record-fields)
+                 form :kotoba.error/map-literal-value))
+      (mapv (fn [[k t]] [k (or t :i64)]) typed))))
+
+(defn- map-literal-lowered-type
+  "The type a map literal will lower to, read off its source alone -- what a
+  NESTED literal contributes as a record field type. `nil` when the key set
+  is not one admitted kind; the nested literal's own `desugar-map` then
+  refuses it by name, and this function never has to say it twice."
+  [form]
+  (let [kinds (into #{} (map map-literal-key-kind) (keys form))
+        kind (or (first kinds) :keyword)]
+    (when (and (not (contains? kinds nil)) (<= (count kinds) 1))
+      (let [entries (sort-by key (map-literal-key-order kind) form)]
+        (if (= :keyword kind)
+          (if-let [fields (keyword-map-literal-record-fields form entries)]
+            (map-literal-record-type fields)
+            :map)
+          [:map kind (map-literal-item-type kind entries)])))))
 
 (defn- desugar-map
   "Lower a bounded literal into an owned map KIR operation.
@@ -4213,9 +4301,21 @@
   the literal was pinned. `map-literal-item-type` now reads the value type off
   the literal's own value expressions.
 
-  KEYWORD keys do not get that: their literal stays the legacy pair map, whose
-  values are i64, so a keyword-keyed literal with a non-i64 literal value is
-  refused BY NAME and pointed at `typed-map-new`.
+  KEYWORD keys with a value that SPELLS a non-i64 type lower to a closed
+  record instead (`keyword-map-literal-record-fields`): `{:runtime :nbb
+  :compiler \"amu\" :ok? true}` is `(record-new [:record
+  :kotoba.map-literal/compiler+ok?+runtime [[:compiler :string] [:ok? :bool]
+  [:runtime :keyword]]] \"amu\" true :nbb)`, exactly what a `defrecord`
+  constructor lowers to, so `(:compiler m)`, `get` and destructuring already
+  read it with the field's static type. Until 2026-09-11 that literal was
+  refused by name and pointed at `typed-map-new` -- which is homogeneous in V
+  and could not have held it either. The refusal described the pair map, not
+  a property of the language: `lang/surface-status.edn` carried it as
+  `:implemented-partial` / `:keyword-keys :not-inferred`, and the record layer
+  underneath already validated every one of these field types (measured
+  2026-09-11 on the KIR interpreter: `:string`, `:bool`, `:keyword`, `:f64`,
+  `:map`, `:document` fields all construct and project). A keyword-keyed
+  literal whose spelled values are ALL `:i64` is untouched, byte for byte.
 
   Entries are emitted in the key type's total order (`compare-typed-values` in
   `kotoba.kir.value` is the same order the runtime keeps the entry chain in),
@@ -4249,16 +4349,22 @@
 
       :else
       (let [kind (or (first kinds) :keyword)
-            entries (sort-by key (map-literal-key-order kind) form)
-            item-type (map-literal-item-type kind entries)
-            pairs (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)]
+            entries (sort-by key (map-literal-key-order kind) form)]
         (if (= :keyword kind)
-          (apply list 'map-new pairs)
-          (do (when (> (count form) max-typed-map-entries)
-                (reject! (str "map literal with " (name kind)
-                              " keys exceeds the typed map entry limit")
-                         form :kotoba.error/map-literal-key))
-              (apply list 'typed-map-new [:map kind item-type] pairs)))))))
+          (if-let [fields (keyword-map-literal-record-fields form entries)]
+            (list* 'record-new (map-literal-record-type fields)
+                   (map (fn [[_ v] [_ field-type]]
+                          (desugar-expected-value field-type v))
+                        entries fields))
+            (apply list 'map-new
+                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)))
+          (let [item-type (map-literal-item-type kind entries)]
+            (when (> (count form) max-typed-map-entries)
+              (reject! (str "map literal with " (name kind)
+                            " keys exceeds the typed map entry limit")
+                       form :kotoba.error/map-literal-key))
+            (apply list 'typed-map-new [:map kind item-type]
+                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries))))))))
 
 (defn- document-reader-f64-form?
   "The JVM reader represents an f64 literal as a Double. The JVM-free reader
