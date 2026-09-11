@@ -2332,15 +2332,65 @@
 ;; (`:import`) from a macro harness (`:require-macros`) from a Clojure-only
 ;; harness clause (`:refer-clojure`) from a malformed admitted clause, which
 ;; the one generic sentence could not. Measured 2026-09-11 over the
-;; compiler's own 178 sources: 18 carry `:import`, 13 `:refer-clojure`.
+;; compiler's own 178 sources: 18 carry `:import`. `:refer-clojure` left this
+;; set the same day -- see `validate-refer-clojure-clauses!` below.
 (def namespace-refused-clauses
   "clause head -> why it stays outside the language"
   {:import "host interop (a Java / JS class) is outside the language"
    :require-macros "macros are outside the language"
    :use "an unqualified ambient namespace is outside the language"
-   :refer-clojure "there is no clojure.core to exclude from"
    :load "loading source at run time is outside the language"
    :gen-class "host interop is outside the language"})
+
+;; `(:refer-clojure :exclude [sym ...])` / `(:refer-clojure :only [sym ...])`
+;; is admitted as a NO-OP (kotoba-lang `lang/guest-grammar.edn` `:ns :clauses
+;; :refer-clojure`, 2026-09-11). On a Clojure host the clause only NARROWS
+;; what `ns` auto-refers from clojure.core; Kotoba refers nothing from
+;; clojure.core, so the clause has no meaning and no effect -- refusing it
+;; bought no safety and cost every dual-runtime module that shadows a core
+;; name (measured 2026-09-11: 19 of the compiler's own 181 sources were
+;; refused on the project route for this clause alone). It is implementation
+;; state, not a property: nothing in the language changes when it is read.
+;;
+;; What stays refused, by name: `:rename` (it DOES change name resolution),
+;; any other option key, a non-symbol entry, and a second `:refer-clojure`.
+;; The clause does not count toward the `:export` / `:capabilities` /
+;; `:schemas` clause count, and `namespace-parts` drops it before the loop
+;; below so no later check ever sees it.
+(def ^:private refer-clojure-option-keys #{:exclude :only})
+
+(defn- refer-clojure-clause? [clause]
+  (and (seq? clause) (= :refer-clojure (first clause))))
+
+(defn- validate-refer-clojure-clauses!
+  "Shape-check every `(:refer-clojure ...)` clause of one header; admits
+  none of its content (there is nothing to admit), refuses the rest by name."
+  [clauses form]
+  (when (> (count clauses) 1)
+    (reject! "namespace admits :refer-clojure at most once" form :kotoba.error/namespace-clause-duplicate))
+  (doseq [clause clauses]
+    (let [options (rest clause)]
+      (when-not (even? (count options))
+        (reject! "namespace clause :refer-clojure takes :exclude [sym ...] and/or :only [sym ...]"
+                 clause :kotoba.error/namespace-refer-clojure-clause))
+      (let [pairs (partition 2 options)
+            keys-seen (map first pairs)]
+        (doseq [k keys-seen]
+          (when (= :rename k)
+            (reject! "namespace clause :refer-clojure :rename is not admitted: renaming changes name resolution; :exclude and :only are admitted as no-ops"
+                     clause :kotoba.error/namespace-refer-clojure-clause))
+          (when-not (contains? refer-clojure-option-keys k)
+            (reject! (str "namespace clause :refer-clojure option " (pr-str k)
+                          " is not admitted; the admitted options are :exclude and :only")
+                     clause :kotoba.error/namespace-refer-clojure-clause)))
+        (when (not= (count keys-seen) (count (distinct keys-seen)))
+          (reject! "namespace clause :refer-clojure repeats an option" clause :kotoba.error/namespace-refer-clojure-clause))
+        (doseq [[k names] pairs]
+          (when-not (and (vector? names)
+                         (<= (count names) max-functions)
+                         (every? valid-name? names))
+            (reject! (str "namespace clause :refer-clojure " (pr-str k) " takes a bounded vector of simple symbols")
+                     clause :kotoba.error/namespace-refer-clojure-clause)))))))
 
 (defn- namespace-parts
   "Parse the bounded namespace header. `:export` and `:capabilities`
@@ -2355,7 +2405,9 @@
 
   The clauses may also be spelled as an ATTR-MAP after the docstring
   (`namespace-attr-map->clauses`); the map is rewritten into clauses here
-  and every check below sees one shape."
+  and every check below sees one shape. A `(:refer-clojure :exclude/:only
+  [...])` clause is shape-checked and dropped (a no-op; see
+  `validate-refer-clojure-clauses!`)."
   [form]
   (let [[op namespace-symbol & tail] form]
     (when-not (and (= 'ns op) (symbol? namespace-symbol)
@@ -2376,7 +2428,11 @@
                  stray :kotoba.error/namespace-attr-map))
       (let [tail (if attr-map
                    (namespace-attr-map->clauses attr-map tail reject!)
-                   tail)]
+                   tail)
+            ;; `(:refer-clojure ...)` is validated and then DROPPED: it is a
+            ;; no-op, counts toward nothing below, and appears at most once.
+            harness (filter refer-clojure-clause? tail)
+            tail (remove refer-clojure-clause? tail)]
         ;; Before the count: a header that carries `:import` beside three
         ;; admitted clauses is refused for the `:import`, not for its length.
         (doseq [clause tail]
@@ -2386,6 +2442,7 @@
                           "; the admitted clauses are :export, :capabilities and :schemas"
                           " (and :require / :params on the project route)")
                      clause :kotoba.error/namespace-host-clause)))
+        (validate-refer-clojure-clauses! harness form)
         (when (> (count tail) 3)
           (reject! "namespace admits at most :export, :capabilities, and :schemas clauses" form :kotoba.error/namespace-clause-count))
         ;; ADR-2607182410: `:export`'s original (pre-existing, test-asserted)

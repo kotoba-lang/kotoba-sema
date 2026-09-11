@@ -26,6 +26,10 @@
             ;; `:import` / `:require-macros` / `:refer-clojure` / `:use` are
             ;; refused BY NAME; `:require` keeps the generic sentence amu refines
             [kotoba.compiler.namespace-refused-clause-test]
+            ;; `(:refer-clojure :exclude/:only [...])` is a NO-OP: same analysis
+            ;; with and without it; :rename / unknown key / non-symbol / a
+            ;; second clause refused by name
+            [kotoba.compiler.namespace-refer-clojure-test]
             ;; `^meta` reads (it was read as a SYMBOL and shifted the form),
             ;; `^:private` on a defn is defn-, and the export refusal proves it
             [kotoba.compiler.reader-metadata-test]
@@ -141,6 +145,7 @@
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
              'kotoba.compiler.namespace-attr-map-test
              'kotoba.compiler.namespace-refused-clause-test
+             'kotoba.compiler.namespace-refer-clojure-test
              'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
