@@ -198,18 +198,16 @@
   (let [{:keys [message code]} (refusal "(def k '(1 2))")]
     (is (= :kotoba.error/subset-reject code))
     (is (str/starts-with? message "constant value must be closed bounded")))
-  ;; a quoted symbol set is named as such (5 of the compiler's own sources
-  ;; carry one, `'#{if let ...}`); a symbol is not a constant kind
-  (let [{:keys [message code]} (refusal "(def heads '#{if let})")]
-    (is (= :kotoba.error/subset-reject code))
-    (is (str/starts-with? message "constant value is quoted data holding symbols: "))
-    (is (str/includes? message "a symbol is not an admitted constant kind")))
-  ;; a quoted SYMBOL is the same refusal, not an alias lookup: the author
-  ;; quoted it to keep it a symbol (measured 2026-09-11 on
-  ;; kotoba-native/string_index.cljk: `(def find-name 'kotoba$string-index-
-  ;; find)` was answered `constant alias must name a declared constant`)
-  (let [{:keys [message]} (refusal "(def find-name 'kotoba$string-index-find)")]
-    (is (str/starts-with? message "constant value is quoted data holding symbols: (quote kotoba$string-index-find)")))
+  ;; Until 2026-09-12 a quoted symbol set (`'#{if let}`) and a quoted
+  ;; symbol (`'kotoba$string-index-find`) were refused here `constant value
+  ;; is quoted data holding symbols: ... spell the entries as keywords`.
+  ;; That refusal is WITHDRAWN (measurement 18: 12 of 225 compiler sources,
+  ;; every one an operation table whose members are symbols): both are
+  ;; constants now, and NOT alias lookups -- pinned, with the CID control
+  ;; and the by-name refusals that remain, in quoted_symbol_constants_test.
+  (is (= 2 (answer-i64 "(def heads '#{if let})" "(count heads)")))
+  (is (= 'kotoba$string-index-find
+         (answer "(def find-name 'kotoba$string-index-find)" ":symbol" "find-name")))
   ;; a string past the portable byte bound names the bound and the size
   ;; (measured on kotoba/abi/wit_data.cljk, a 4 KiB+ .wit file as a def:
   ;; the closedness sentence, about a value that is closed)
