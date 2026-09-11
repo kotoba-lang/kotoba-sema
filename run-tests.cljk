@@ -21,6 +21,8 @@
             ;; is; the implicit and explicit spellings are one analysis; empty
             ;; bodies, loop, try and protocol methods keep their refusals
             [kotoba.compiler.defn-body-sequences-test]
+            ;; two-argument `some` is clojure.core/some, a name collision named as such
+            [kotoba.compiler.some-name-collision-test]
             [kotoba.compiler.case-uniqueness-test]
             ;; the first test that reaches infer-closure-refinements
             [kotoba.compiler.closure-refinement-test]
@@ -172,6 +174,7 @@
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.defn-body-sequences-test
+             'kotoba.compiler.some-name-collision-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test
              'kotoba.compiler.boot-scratch-test
