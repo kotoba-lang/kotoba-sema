@@ -125,8 +125,11 @@
 ;; ------------------------------------------------ still refused, by name
 
 (deftest an-empty-body-is-still-refused-by-its-sentence
+  (testing "defn whose only body form is a #?(:clj ...) -- reads as empty on this reader"
+    (is (= "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
+           (:message (refusal "(defn f [x :i64] :i64 #?(:clj (inc x) :cljs (inc x)))" "(f 21)")))))
   (testing "defn"
-    (is (= "function must contain one result expression"
+    (is (= "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
            (:message (refusal "(defn f [x :i64] :i64)" "(f 21)")))))
   (testing "fn value"
     (is (= "fn value requires unique arities with zero to four unique parameters"
