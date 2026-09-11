@@ -496,11 +496,66 @@
       ;; through this reader -- 17 assertions in `local_state_test`.
       ;;
       ;; The other Clojure reader macros -- quote, syntax-quote, unquote,
-      ;; var-quote, `^meta` -- are equally absent here. Nothing in the
-      ;; `.kotoba` corpus exercises them, so their absence is UNMEASURED, not
+      ;; var-quote -- are equally absent here. Nothing in the `.kotoba`
+      ;; corpus exercises them, so their absence is UNMEASURED, not
       ;; known-good. Do not read this clause as evidence the rest are covered.
+      ;; (`^meta` was on this list until 2026-09-11; see the `\^` arm below.)
       (= ch \@) (let [[st inner _] (read-form (advance st))]
                   [st (located (list 'deref inner) start st) false])
+
+      ;; `^meta form`. Same defect shape as `@` above, measured 2026-09-11
+      ;; at 8b288047: `^` is not a delimiter, so `^:private` fell through to
+      ;; `read-symbol-or-number` and became the SYMBOL `^:private`, shifting
+      ;; every element after the head by two. `(defn ^:private h [x :i64]
+      ;; :i64 x)` was refused with `function parameters must be a vector`
+      ;; pointing at `h` -- true of what the reader handed over, and not the
+      ;; author's mistake.
+      ;;
+      ;; Normalised as Clojure normalises: `^:kw` is `{:kw true}`, `^sym` and
+      ;; `^"str"` are `{:tag ...}`, `^{...}` is the map itself. Stacked
+      ;; metadata merges with the OUTERMOST (leftmost) winning on a shared
+      ;; key -- measured on Clojure 1.12: `(meta '^{:a 1} ^{:a 2} x)` is
+      ;; `{:a 1}` -- because the inner form is read first and the outer map
+      ;; is assoc'd over it.
+      ;;
+      ;; Two things this arm refuses rather than guesses. A form that cannot
+      ;; carry metadata (keyword, number, string, nil, boolean) is a refusal
+      ;; in `:phase :read`, not a silent drop: metadata that vanishes is
+      ;; worse than metadata that is refused, because `^:private` on the
+      ;; wrong element would compile as public. And a `#?()` clause with no
+      ;; matching feature leaves nothing to attach to.
+      ;;
+      ;; `located` runs on the RESULT so the span starts at `^` (Clojure puts
+      ;; the `^` position on a seq too), and `located` merges into the
+      ;; existing meta -- it does not `with-meta` a fresh map -- so the user's
+      ;; keys survive it. A refusal inside a `^:private` function still
+      ;; carries a `:span`; `reader_metadata_test` pins that.
+      (= ch \^)
+      (let [[st meta-form meta-skipped?] (read-form (advance st))
+            _ (when meta-skipped?
+                (reject! "metadata must be a keyword, symbol, string, or map"
+                         {:meta nil}))
+            m (cond
+                (keyword? meta-form) {meta-form true}
+                (symbol? meta-form) {:tag meta-form}
+                (string? meta-form) {:tag meta-form}
+                (map? meta-form) meta-form
+                :else (reject! "metadata must be a keyword, symbol, string, or map"
+                               {:meta meta-form}))
+            [st form skipped?] (read-form st)]
+        (when skipped?
+          (reject! "metadata must precede a form" {:meta m}))
+        ;; A decimal literal reads as the synthesised `(f64-from-bits N)`
+        ;; list (`f64-form`) -- a collection standing for a number. `coll?`
+        ;; alone would let `^:a 1.5` through while `^:a 1` is refused; the
+        ;; reader's own marker says which collections are literals.
+        (when-not (and (or (symbol? form) (coll? form))
+                       (not (:kotoba.reader/f64-literal (meta form))))
+          (reject! "metadata may only precede a symbol or a collection"
+                   {:meta m :form form}))
+        ;; `{}` first so the result is a plain map even when M is the
+        ;; comparator-ordered map `reader-map` builds and FORM has no meta.
+        [st (located (with-meta form (merge {} (meta form) m)) start st) false])
 
       (= ch \:) (read-keyword st)
 

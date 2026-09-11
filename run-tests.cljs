@@ -19,6 +19,9 @@
             [kotoba.compiler.closure-refinement-test]
             ;; a protocol may carry documentation, and the signature check still fires
             [kotoba.compiler.protocol-docstring-test]
+            ;; `^meta` reads (it was read as a SYMBOL and shifted the form),
+            ;; `^:private` on a defn is defn-, and the export refusal proves it
+            [kotoba.compiler.reader-metadata-test]
             ;; boot-scratch: the writable region and a function's address
             [kotoba.compiler.boot-scratch-test]
             ;; fwstore: writing to pages the firmware allocated
@@ -126,6 +129,7 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
+             'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test

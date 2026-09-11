@@ -10647,10 +10647,18 @@
   (let [text (use-site-text value)]
     (if (> (count text) 40) (str (subs text 0 37) "...") text)))
 
+(defn- private-spelling
+  "How a private function was declared, for the export refusal: `defn-`, or
+  `defn` with `^:private` on the name. One code either way
+  (`:kotoba.error/export-names-private-function`); only the sentence's fix
+  differs, because the two spellings have two different edits."
+  [source-name]
+  (if (:private (meta source-name)) "^:private" "defn-"))
+
 (defn- export-not-a-public-function!
   "Refuse EXPORTS, naming the first that is not in SOURCE-PUBLIC and why: a
   constant of RAW-CONSTANTS (name -> value as written), a private function
-  of PRIVATE-NAMES, or undefined."
+  of PRIVATE-NAMES (name -> spelling, see `private-spelling`), or undefined."
   [exports source-public private-names raw-constants]
   (let [offender (first (remove (set source-public) exports))
         head (str "namespace exports must name declared public functions: " offender)]
@@ -10664,8 +10672,11 @@
                  exports :kotoba.error/export-names-constant
                  {:kotoba.error/export offender :kotoba.error/fix fix}))
       (contains? private-names offender)
-      (reject! (str head " is declared with defn-, which is private; declare it "
-                    "with defn to export it")
+      (reject! (if (= "^:private" (get private-names offender))
+                 (str head " is declared with ^:private, which is private; drop the "
+                      "^:private metadata to export it")
+                 (str head " is declared with defn-, which is private; declare it "
+                      "with defn to export it"))
                exports :kotoba.error/export-names-private-function
                {:kotoba.error/export offender})
       :else
@@ -13110,13 +13121,25 @@
                      {:function source-name}))
         [docstring declaration] (if (string? (first declaration0))
                                   [(first declaration0) (rest declaration0)]
-                                  [nil declaration0])]
+                                  [nil declaration0])
+        ;; Public is the head AND the name's metadata. `(defn ^:private h
+        ;; ...)` is `defn-` spelled the way Clojure spells it; until
+        ;; 2026-09-11 the reader could not read it at all (`kotoba-reader`'s
+        ;; `\^` arm), and once it could, deciding on the head alone would
+        ;; have compiled a declared-private function as public -- the one
+        ;; outcome worse than refusing it. Every OTHER metadata key
+        ;; (`:no-doc`, `:tag`, `:deprecated`, anything) is documentation to
+        ;; this analyzer and is not read. The name keeps its metadata: a
+        ;; symbol with metadata is equal to itself, so `valid-name?` and the
+        ;; name-keyed maps below see the same symbol they always did
+        ;; (`reader_metadata_test` measures this rather than assumes it).
+        public? (and (= op 'defn) (not (:private (meta source-name))))]
     (when (and docstring (> (count docstring) max-function-docstring-chars))
       (reject! "function docstring exceeds admission limit" docstring))
     (when (re-find #"\$arity\$" (name source-name))
       (reject! "function name uses reserved multi-arity ABI marker" source-name))
     (if-not (multi-arity-declaration? declaration)
-      [(assoc (defn-parts form constants) :source-name source-name :public? (= op 'defn))]
+      [(assoc (defn-parts form constants) :source-name source-name :public? public?)]
       (do
         (when (> (count declaration) max-arity-clauses)
           (reject! "multi-arity clause count exceeds admission limit" form))
@@ -13128,7 +13151,7 @@
                         (when (some #{'&} (:raw-params raw))
                           (reject! "variadic parameters are outside the multi-arity profile" (:raw-params raw)))
                         (assoc raw :source-name source-name :logical-arity arity
-                               :public? (= op 'defn))))
+                               :public? public?)))
                     declaration)
               arities (mapv :logical-arity clauses)]
           (when-not (= (count arities) (count (distinct arities)))
@@ -14882,7 +14905,11 @@
                             [source-name])))
         exports (cond
                   (some? (:exports namespace-info)) (vec (mapcat expand-export (:exports namespace-info)))
-                  (some #(= 'defn- (first %)) defs) (vec (mapcat expand-export source-public))
+                  ;; Any private function -- `defn-` or `defn ^:private` --
+                  ;; narrows the implicit export set to the public ones. Was
+                  ;; `(some #(= 'defn- (first %)) defs)`, which read the
+                  ;; head and would have exported a `^:private` function.
+                  (some (complement :public?) def-parts) (vec (mapcat expand-export source-public))
                   :else (mapv :name parsed))
         entry (when (contains? signatures 'main) 'main)]
     (when (seq (set/intersection (set (keys constants)) (set source-names)))
@@ -14894,7 +14921,10 @@
     (when (and (some? (:exports namespace-info))
                (not-every? (set source-public) (:exports namespace-info)))
       (export-not-a-public-function! (:exports namespace-info) source-public
-                                     (->> def-parts (remove :public?) (map :source-name) set)
+                                     (->> def-parts (remove :public?)
+                                          (map (fn [{:keys [source-name]}]
+                                                 [source-name (private-spelling source-name)]))
+                                          (into {}))
                                      raw-constants))
     (when (and (nil? entry) (nil? (:exports namespace-info)))
       (reject! "entryless library requires an explicit non-empty namespace export list" defs))
