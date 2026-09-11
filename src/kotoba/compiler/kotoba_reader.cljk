@@ -353,11 +353,22 @@
       (let [ch (nth s i)]
         (if (and (= ch \\) (< (inc i) (count s)))
           (let [nxt (nth s (inc i))
-                mapped (case nxt
-                         \n \newline \t \tab \r \return
-                         \\ \\ \" \" \0 (char 0)
-                         (reject! "unsupported string escape" {:escape nxt}))]
-            (recur (+ i 2) (conj! acc mapped)))
+                ;; `\uXXXX` -- exactly four hex digits, one UTF-16 code unit,
+                ;; as Clojure's reader defines it. Measured 2026-09-11 in the
+                ;; compiler's own bounded_edn / elf64 sources; without it the
+                ;; whole file is refused at the reader, before any semantics.
+                [mapped width]
+                (if (= nxt \u)
+                  (let [hex (subs s (+ i 2) (min (count s) (+ i 6)))]
+                    (when-not (and (= 4 (count hex)) (re-matches #"[0-9a-fA-F]{4}" hex))
+                      (reject! "unsupported string escape" {:escape nxt :hex hex}))
+                    [(char #?(:clj (Integer/parseInt hex 16) :cljs (js/parseInt hex 16))) 6])
+                  [(case nxt
+                     \n \newline \t \tab \r \return
+                     \\ \\ \" \" \0 (char 0)
+                     (reject! "unsupported string escape" {:escape nxt}))
+                   2])]
+            (recur (+ i width) (conj! acc mapped)))
           (recur (inc i) (conj! acc ch)))))))
 
 (defn- read-string-literal [st]
@@ -370,6 +381,13 @@
           (and (= ch \\) (some? (peek-ch2 st)))
           (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
           :else (recur (advance st) (conj acc ch)))))))
+
+(defn- splice?
+  "The marker `#?@` leaves for the enclosing `read-delimited`: a map, because
+  the reader's own values are the only currency read-form returns, and no
+  admitted source form is a map with this key."
+  [form]
+  (and (map? form) (true? (:kotoba.reader/splice form))))
 
 (defn- read-delimited
   "Reads forms up to CLOSE (already-consumed OPEN), returning `[state forms]`.
@@ -388,14 +406,15 @@
           (nil? ch) (reject! "unterminated collection" {:expected close})
           (= ch close) [(assoc (advance st) :depth (dec depth)) acc]
           :else (let [[st' form skip?] (read-form st)]
-                  (recur st' (if skip? acc (conj acc form)))))))))
+                  (recur st' (cond skip? acc
+                                   (splice? form) (into acc (:forms form))
+                                   :else (conj acc form)))))))))
 
 (defn- reader-conditional-branch
   "Given the parsed clauses vector `[:kotoba a :clj b :default c ...]`,
   selects the first clause whose feature is `:kotoba` or `:default` --
   mirrors `clojure.tools.reader`'s `:features #{:kotoba}` selection this
-  compiler's frontend already requests, without splicing-conditional
-  (`#?@`) support (not used anywhere in this admission-gated grammar)."
+  compiler's frontend already requests. Returns `[form matched?]`."
   [clauses]
   (loop [pairs (partition 2 clauses)]
     (if-let [[feature form] (first pairs)]
@@ -565,13 +584,47 @@
           (= ch2 \() (read-fn-shorthand st)
           (= ch2 \{) (let [[st forms] (read-delimited (advance (advance st)) \})]
                        [st (located (reader-set forms) start st) false])
+          ;; `#_ form` -- the discard is a reader-level comment: the next
+          ;; form is read (so nesting and balance are honoured) and dropped.
+          (= ch2 \_) (let [[st _ _] (read-form (advance (advance st)))]
+                       [st nil true])
           (= ch2 \?) (let [st (advance (advance st))
+                           splicing? (= (peek-ch st) \@)
+                           st (if splicing? (advance st) st)
                            st (skip-ws+comments st)]
                        (when-not (= (peek-ch st) \()
-                         (reject! "expected `(` after `#?`" {}))
+                         (reject! (if splicing? "expected `(` after `#?@`" "expected `(` after `#?`") {}))
                        (let [[st clauses] (read-delimited (advance st) \))
                              [form matched?] (reader-conditional-branch clauses)]
-                         (if matched? [st form false] [st nil true])))
+                         (cond
+                           (not matched?) [st nil true]
+                           ;; `#?@(...)` splices the chosen branch's elements
+                           ;; into the enclosing collection. Clojure requires
+                           ;; a collection there and refuses a top-level
+                           ;; splice; both are refused here the same way.
+                           splicing? (do (when-not (sequential? form)
+                                           (reject! "`#?@` branch must be a sequential collection" {:form form}))
+                                         (when (zero? (:depth st))
+                                           (reject! "`#?@` is not admitted at top level" {}))
+                                         [st {:kotoba.reader/splice true :forms (vec form)} false])
+                           :else [st form false])))
+          ;; `#:ns{...}` -- namespaced map literal. Unqualified keyword keys
+          ;; take the namespace; `_/k` keeps the key bare; qualified keys and
+          ;; non-keyword keys are untouched. Values are never rewritten.
+          (= ch2 \:) (let [[st ns-token] (read-token (advance (advance st)))
+                           st (skip-ws+comments st)]
+                       (when (or (str/blank? ns-token) (not= (peek-ch st) \{))
+                         (reject! "expected `{` after `#:ns`" {:ns ns-token}))
+                       (let [[st forms] (read-delimited (advance st) \})
+                             _ (when (odd? (count forms))
+                                 (reject! "map literal must contain an even number of forms" {}))
+                             qualify (fn [k]
+                                       (cond (not (keyword? k)) k
+                                             (= "_" (namespace k)) (keyword (name k))
+                                             (namespace k) k
+                                             :else (keyword ns-token (name k))))
+                             forms (vec (map-indexed (fn [i f] (if (even? i) (qualify f) f)) forms))]
+                         [st (located (reader-map forms) start st) false]))
           (= ch2 \#) (let [[st token] (read-token (advance (advance st)))
                             value (case token
                                     "NaN" (f64-form #?(:clj Double/NaN :cljs js/NaN))
