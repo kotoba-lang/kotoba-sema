@@ -29,6 +29,21 @@
 (def max-function-docstring-chars frontend/max-function-docstring-chars)
 (def kernel-region-report frontend/kernel-region-report)
 
+(def namespace-attr-map-keys
+  "The namespace header's attr-map spelling: key -> the clause head it stands
+  for (`{:kotoba/export [...]}` is `(:export [...])`). Public because the
+  amu project linker parses the same header and must admit the same keys;
+  see `namespace-attr-map->clauses`."
+  frontend/namespace-attr-map-keys)
+
+(def namespace-attr-map->clauses
+  "Rewrite a namespace ATTR-MAP into the clauses it stands for, refusing an
+  unknown key by name and a key whose clause is also spelled explicitly
+  (declared twice). `(namespace-attr-map->clauses attr-map explicit-clauses
+  reject-fn)`; reject-fn takes (message data code). Values are NOT validated
+  here -- the caller's clause loop is the one path that does."
+  frontend/namespace-attr-map->clauses)
+
 (def kernel-operation-heads
   "Every kernel head this frontend admits as a builtin: the byte-indexed and
   element-indexed memory operations, the CARRIED slice family, and the

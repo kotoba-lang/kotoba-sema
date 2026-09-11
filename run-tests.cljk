@@ -19,6 +19,10 @@
             [kotoba.compiler.closure-refinement-test]
             ;; a protocol may carry documentation, and the signature check still fires
             [kotoba.compiler.protocol-docstring-test]
+            ;; the ns attr-map spelling `{:kotoba/export [...]}` is the
+            ;; `(:export ...)` clause, validated by the same loop; unknown
+            ;; keys, double declarations and a map out of position refused
+            [kotoba.compiler.namespace-attr-map-test]
             ;; `^meta` reads (it was read as a SYMBOL and shifted the form),
             ;; `^:private` on a defn is defn-, and the export refusal proves it
             [kotoba.compiler.reader-metadata-test]
@@ -132,6 +136,7 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
+             'kotoba.compiler.namespace-attr-map-test
              'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test

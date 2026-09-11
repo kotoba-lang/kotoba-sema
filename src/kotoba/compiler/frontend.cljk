@@ -2213,13 +2213,28 @@
   [form head]
   (or (:kotoba/pure-source-head (meta form)) head))
 
+(declare namespace-attr-map->clauses)
+
+(defn- namespace-header-clauses
+  "The clauses of a namespace form -- what follows NAME and DOCSTRING? --
+  with an ATTR-MAP in its one position rewritten to the clauses it stands
+  for. Shape only: `namespace-parts` validates the values."
+  [form]
+  (let [tail (drop 2 form)
+        tail (if (string? (first tail)) (rest tail) tail)]
+    (if (map? (first tail))
+      (namespace-attr-map->clauses (first tail) (rest tail) reject!)
+      tail)))
+
 (defn- check-pure-product-source-forms!
   "T2.1: writeable pure-product source must not declare capabilities or use
   disallowed sugar / cap-call. Empty effects are checked after analyze."
   [forms]
   (doseq [form forms]
     (when (and (seq? form) (= 'ns (first form)))
-      (doseq [clause (drop 2 form)]
+      ;; Both spellings: `(:capabilities ...)` and the attr-map's
+      ;; `:kotoba/capabilities` (see `namespace-attr-map->clauses`).
+      (doseq [clause (namespace-header-clauses form)]
         (when (and (seq? clause) (= :capabilities (first clause)))
           (reject! "pure-product profile rejects :capabilities (guest must be effect-free)"
                    form
@@ -2245,6 +2260,49 @@
 
 (declare valid-name?)
 
+;; The namespace header's ATTR-MAP spelling (kotoba-lang `lang/guest-grammar.edn`
+;; `:ns :attr-map`, 2026-09-11). Clojure's `ns` already admits a map after the
+;; docstring and ignores it, so a module that must ALSO load on nbb / Clojure
+;; -- the compiler's own source, measured 2026-09-11: 83 of amu's 178 files
+;; were refused ONLY for the missing `(:export ...)`, and SCI's `ns` refuses
+;; that clause with "No matching clause: export" -- can carry the declaration
+;; there. Each admitted key means exactly what the clause of the same name
+;; means, and is validated by the same code: the map is rewritten into
+;; synthetic clauses BEFORE the clause loop, so there is one validation path.
+;;
+;; The keys are namespaced on purpose. An `{:author "..."}` or `{:doc "..."}`
+;; attr-map in the wild must not silently become an export, and a namespaced
+;; key nobody declared is not a comment either -- it is refused by name.
+(def namespace-attr-map-keys
+  "attr-map key -> the namespace clause head it stands for."
+  {:kotoba/export :export
+   :kotoba/capabilities :capabilities
+   :kotoba/schemas :schemas
+   :kotoba/params :params})
+
+(defn namespace-attr-map->clauses
+  "Rewrite the optional namespace ATTR-MAP into the clauses it stands for,
+  refusing what it must: an unknown key (named), and a key whose clause is
+  also spelled explicitly (declared twice). Returns the synthetic clauses
+  FOLLOWED by the explicit ones, in source order within each group. The
+  values are not validated here -- the caller's clause loop does that, once,
+  for both spellings. `reject-fn` is called with (message data code)."
+  [attr-map explicit-clauses reject-fn]
+  (let [explicit-heads (into #{} (keep #(when (seq? %) (first %))) explicit-clauses)]
+    (doseq [[k v] attr-map]
+      (let [head (get namespace-attr-map-keys k)]
+        (when-not head
+          (reject-fn (str "namespace attr-map key " (pr-str k)
+                          " is not admitted; the admitted keys are "
+                          (pr-str (vec (sort (keys namespace-attr-map-keys)))))
+                     attr-map :kotoba.error/namespace-attr-map))
+        (when (contains? explicit-heads head)
+          (reject-fn (str "namespace declares " (pr-str head) " twice: attr-map "
+                          (pr-str k) " and clause (" (pr-str head) " ...)")
+                     attr-map :kotoba.error/namespace-clause-duplicate))))
+    (into (mapv (fn [[k v]] (list (get namespace-attr-map-keys k) v)) attr-map)
+          explicit-clauses)))
+
 (defn- namespace-parts
   "Parse the bounded namespace header. `:export` and `:capabilities`
   (ADR-2607182410) are the only admitted clauses, each at most once (in
@@ -2254,7 +2312,11 @@
   forms may use -- `analyze`'s `check-namespace-capabilities!` then requires
   this declared set to exactly match what's actually used (declare-then-
   check, mirroring the `:aiueos/imports` pattern). Import/require clauses
-  remain fail-closed."
+  remain fail-closed.
+
+  The clauses may also be spelled as an ATTR-MAP after the docstring
+  (`namespace-attr-map->clauses`); the map is rewritten into clauses here
+  and every check below sees one shape."
   [form]
   (let [[op namespace-symbol & tail] form]
     (when-not (and (= 'ns op) (symbol? namespace-symbol)
@@ -2263,56 +2325,66 @@
                    (<= (count (str namespace-symbol)) max-symbol-chars))
       (reject! "invalid bounded namespace symbol" form :kotoba.error/namespace-symbol))
     (let [[docstring tail] (if (string? (first tail))
-                             [(first tail) (rest tail)] [nil tail])]
+                             [(first tail) (rest tail)] [nil tail])
+          [attr-map tail] (if (map? (first tail))
+                            [(first tail) (rest tail)] [nil tail])]
       (when (and docstring (> (count docstring) max-namespace-docstring-chars))
         (reject! "namespace docstring exceeds admission limit" docstring :kotoba.error/namespace-docstring-limit))
-      (when (> (count tail) 3)
-        (reject! "namespace admits at most :export, :capabilities, and :schemas clauses" form :kotoba.error/namespace-clause-count))
-      ;; ADR-2607182410: `:export`'s original (pre-existing, test-asserted)
-      ;; rejection message is preserved VERBATIM for every clause shape it
-      ;; already covered pre-`:capabilities` -- a non-`seq?` clause, an
-      ;; unrecognized clause head, or a malformed `(:export ...)` -- so
-      ;; existing callers/tests asserting on that exact string are
-      ;; unaffected. Only a recognized-but-malformed `(:capabilities ...)`
-      ;; clause gets the new, `:capabilities`-specific message (a shape no
-      ;; pre-existing source could ever have produced).
-      (doseq [clause tail]
-        (when-not (seq? clause)
-          (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause))
-        (case (first clause)
-          :export (when-not (and (= 2 (count clause)) (vector? (second clause)))
-                    (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause))
-          :capabilities (when-not (and (= 2 (count clause)) (set? (second clause)))
-                          (reject! "only a bounded :capabilities set is admitted in namespace clauses" clause :kotoba.error/namespace-capabilities-clause))
-          :schemas (when-not (and (= 2 (count clause)) (map? (second clause)))
-                     (reject! "only a closed :schemas map is admitted in namespace clauses" clause :kotoba.error/namespace-schemas-clause))
-          (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause)))
-      (when (not= (count tail) (count (distinct (map first tail))))
-        (reject! "namespace admits each clause at most once" form :kotoba.error/namespace-clause-duplicate))
-      (let [export-clause (first (filter #(= :export (first %)) tail))
-            capabilities-clause (first (filter #(= :capabilities (first %)) tail))
-            schemas-clause (first (filter #(= :schemas (first %)) tail))
-            exports (when export-clause (vec (second export-clause)))
-            capabilities (when capabilities-clause (set (second capabilities-clause)))
-            ;; Defrecord descriptors are collected by the declaration expansion
-            ;; that precedes this parse. Keep the authored table raw here so
-            ;; analyze can merge those same-module nominal schemas before the
-            ;; closed graph is validated once. Shape checks above still run
-            ;; immediately; no unvalidated table reaches expression analysis.
-            schemas (when schemas-clause (second schemas-clause))]
-        (when (and exports
-                   (or (> (count exports) max-functions)
-                       (not= (count exports) (count (distinct exports)))
-                       (not-every? valid-name? exports)))
-          (reject! "namespace exports must be unique bounded function names" exports :kotoba.error/namespace-exports))
-        (when (and capabilities
-                   (or (> (count capabilities) max-namespace-capabilities)
-                       (not-every? #(and (keyword? %) (namespace %)) capabilities)))
-          (reject! "namespace :capabilities must be a bounded set of namespaced keywords" capabilities :kotoba.error/namespace-capabilities-shape))
-        {:namespace namespace-symbol :exports exports :capabilities capabilities
-         :schemas schemas
-         ;; Populated from the once-validated merged graph in analyze.
-         :schema-identities nil}))))
+      ;; A map anywhere later is an attr-map out of its one position, not a
+      ;; clause; say so rather than reporting it as a malformed :export.
+      (when-let [stray (first (filter map? tail))]
+        (reject! "namespace attr-map must follow the docstring: (ns NAME DOCSTRING? ATTR-MAP? CLAUSE ...)"
+                 stray :kotoba.error/namespace-attr-map))
+      (let [tail (if attr-map
+                   (namespace-attr-map->clauses attr-map tail reject!)
+                   tail)]
+        (when (> (count tail) 3)
+          (reject! "namespace admits at most :export, :capabilities, and :schemas clauses" form :kotoba.error/namespace-clause-count))
+        ;; ADR-2607182410: `:export`'s original (pre-existing, test-asserted)
+        ;; rejection message is preserved VERBATIM for every clause shape it
+        ;; already covered pre-`:capabilities` -- a non-`seq?` clause, an
+        ;; unrecognized clause head, or a malformed `(:export ...)` -- so
+        ;; existing callers/tests asserting on that exact string are
+        ;; unaffected. Only a recognized-but-malformed `(:capabilities ...)`
+        ;; clause gets the new, `:capabilities`-specific message (a shape no
+        ;; pre-existing source could ever have produced).
+        (doseq [clause tail]
+          (when-not (seq? clause)
+            (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause))
+          (case (first clause)
+            :export (when-not (and (= 2 (count clause)) (vector? (second clause)))
+                      (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause))
+            :capabilities (when-not (and (= 2 (count clause)) (set? (second clause)))
+                            (reject! "only a bounded :capabilities set is admitted in namespace clauses" clause :kotoba.error/namespace-capabilities-clause))
+            :schemas (when-not (and (= 2 (count clause)) (map? (second clause)))
+                       (reject! "only a closed :schemas map is admitted in namespace clauses" clause :kotoba.error/namespace-schemas-clause))
+            (reject! "only a bounded :export vector is admitted in namespace clauses" clause :kotoba.error/namespace-export-clause)))
+        (when (not= (count tail) (count (distinct (map first tail))))
+          (reject! "namespace admits each clause at most once" form :kotoba.error/namespace-clause-duplicate))
+        (let [export-clause (first (filter #(= :export (first %)) tail))
+              capabilities-clause (first (filter #(= :capabilities (first %)) tail))
+              schemas-clause (first (filter #(= :schemas (first %)) tail))
+              exports (when export-clause (vec (second export-clause)))
+              capabilities (when capabilities-clause (set (second capabilities-clause)))
+              ;; Defrecord descriptors are collected by the declaration expansion
+              ;; that precedes this parse. Keep the authored table raw here so
+              ;; analyze can merge those same-module nominal schemas before the
+              ;; closed graph is validated once. Shape checks above still run
+              ;; immediately; no unvalidated table reaches expression analysis.
+              schemas (when schemas-clause (second schemas-clause))]
+          (when (and exports
+                     (or (> (count exports) max-functions)
+                         (not= (count exports) (count (distinct exports)))
+                         (not-every? valid-name? exports)))
+            (reject! "namespace exports must be unique bounded function names" exports :kotoba.error/namespace-exports))
+          (when (and capabilities
+                     (or (> (count capabilities) max-namespace-capabilities)
+                         (not-every? #(and (keyword? %) (namespace %)) capabilities)))
+            (reject! "namespace :capabilities must be a bounded set of namespaced keywords" capabilities :kotoba.error/namespace-capabilities-shape))
+          {:namespace namespace-symbol :exports exports :capabilities capabilities
+           :schemas schemas
+           ;; Populated from the once-validated merged graph in analyze.
+           :schema-identities nil})))))
 
 (declare desugar-expr desugar-result-expr desugar-bool-expr desugar-do desugar-list thread-form form-free-symbols
          nth-pair-second replace-recur valid-name?)

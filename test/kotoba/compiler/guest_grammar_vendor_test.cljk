@@ -82,8 +82,15 @@
   `:ns` and `:require-spec` -- the `(:params [sym ...])` module clause and the
   `:require [ns :as a :with {sym type}]` binding -- and `:admission-limits`
   gains `:max-template-parameters 8`. No head admitted or withdrawn; the
-  previous digest was `515bbc7d`."
-  "10ff0062271d3a557deab865510c948125a84aba7d760298bcaf345cd0370a6b")
+  previous digest was `515bbc7d`.
+
+  Advanced 2026-09-11 to `5a5a3d6c` for the ns attr-map spelling (authority
+  kotoba-lang 1c7934ba): `:core-form-shapes :ns` gains `ATTR-MAP?` and an
+  `:attr-map` entry -- `{:kotoba/export [...]}` after the docstring means
+  `(:export [...])`, and the frontend in THIS commit implements it
+  (`namespace-attr-map->clauses`, one validation path). No head admitted or
+  withdrawn; the previous digest was `10ff0062`."
+  "5a5a3d6c2aea65159f795160c1554382a79bcffb5c2edd5f012317a215076e20")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

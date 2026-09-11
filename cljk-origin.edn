@@ -37,6 +37,7 @@
   "test/kotoba/compiler/local_state_test.cljk" ".clj"
   "test/kotoba/compiler/loop_accumulator_type_test.cljk" ".cljc"
   "test/kotoba/compiler/malformed_definition_form_test.cljk" ".cljc"
+  "test/kotoba/compiler/namespace_attr_map_test.cljk" ".cljc"
   "test/kotoba/compiler/malformed_type_argument_test.cljk" ".cljc"
   "test/kotoba/compiler/map_source_type_test.cljk" ".cljc"
   "test/kotoba/compiler/mapv_alias_shadowing_test.cljk" ".cljc"
