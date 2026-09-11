@@ -346,3 +346,13 @@
   (is (= 3 (answer "(defn run [n :i64] :i64 (clojure.core/+ n 2))" [1])))
   ;; and a bare head that is refused stays refused under the prefix
   (is (some? (:code (refusal "(defn run [n :i64] :i64 (clojure.core/load-string n))")))))
+
+;; -------------------------------------------------------------------------
+;; map-indexed (adr-2609111900): the callback takes the index FIRST, then
+;; the item -- (fn [i x] ...). The shape-by-shape refusals and the own-name
+;; rule are measured in kotoba.compiler.map-indexed-test; this is the one
+;; value-checked positive on the interpreter.
+
+(deftest map-indexed-passes-the-index-first
+  (is (= 32 (answer "(defn run [n :i64] :i64 (vector-at (map-indexed (fn [i x] (+ i x)) [10 20 30]) 2))"
+                    [0]))))

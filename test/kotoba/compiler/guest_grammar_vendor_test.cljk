@@ -141,8 +141,22 @@
   (THIS commit splits it in the `map` desugar, refuses a literal / partial /
   comp callback by name, and makes the stored-callback path REQUEST its
   dispatcher). No head admitted or withdrawn; the previous digest was
-  `c308cc04`."
-  "11fd920ceabccedf5f4edc148b8167d6f182bc4a66475dbbe4ecb8bd88200388")
+  `c308cc04`.
+
+  Advanced 2026-09-12 to `63dc6e9a` for `map-indexed` (authority kotoba-lang,
+  adr-2609111900): `:sugar` gains `:map-indexed` -- a new head admitted
+  between `:map` and `:filter`, IMPLEMENTATION STATE not a property (the
+  wall measured at amu 10469db0 against 225 sources was stdlib coverage --
+  `unknown operation: map-indexed is not a builtin, a sugar head, or a
+  function of this module` -- not a designed exclusion). The callback reuses
+  `:map :callback`'s admission verbatim (THIS commit implements it in the
+  frontend, a new `map-indexed` case clause: named / inline / closure-value
+  callback of fixed arity two, index first, requesting its dispatcher
+  exactly as `map`'s stored callback does; a one-parameter callback is
+  refused by name -- `map-indexed passes the index first` -- ahead of the
+  generic count sentence; a module's own `map-indexed` is kept, the
+  into/mapv rule). One head ADMITTED; the previous digest was `11fd920c`."
+  "63dc6e9afb8affd5414ecc871ac77f62602b6e0d0d3b8b87afdfbc640073e39b")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
