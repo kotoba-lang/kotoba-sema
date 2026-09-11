@@ -170,15 +170,18 @@
       "and it composes inside a call"))
 
 (deftest the-other-reader-macros-are-still-absent
-  ;; Stated as a test so it cannot quietly stop being true. quote,
-  ;; syntax-quote, unquote, var-quote and `^meta` have no case in this reader
-  ;; either. Nothing in the `.kotoba` corpus exercises them, so their absence
-  ;; is UNMEASURED rather than known-good -- do not read the `@` clause above
-  ;; as evidence the rest are covered. If one of these starts reading as a
-  ;; form instead of a symbol, someone added it and this test should be
-  ;; updated deliberately rather than deleted.
-  (is (symbol? (first (r/read-forms "'a")))
-      "quote is read as a symbol today, not as (quote a)"))
+  ;; Stated as a test so it cannot quietly stop being true. syntax-quote,
+  ;; unquote and var-quote have no case in this reader. Nothing in the
+  ;; `.kotoba` corpus exercises them, so their absence is UNMEASURED rather
+  ;; than known-good. `quote` LEFT this list on 2026-09-11 (deliberately: the
+  ;; compiler's own sources quote sets of symbols, and `'a` had been reading
+  ;; as the symbol `'a`); `^meta` left it the same day. If another one starts
+  ;; reading as a form instead of a symbol, someone added it and this test
+  ;; should be updated deliberately rather than deleted.
+  (is (symbol? (first (r/read-forms "`a")))
+      "syntax-quote is read as a symbol today, not as a form")
+  (is (= (list 'quote 'a) (first (r/read-forms "'a")))
+      "quote reads as (quote a) since 2026-09-11"))
 
 (deftest hex-literals-read
   ;; 79 `.kotoba` files in this workspace use `0x...`, and none of them could
@@ -288,3 +291,25 @@
 (deftest unicode-escape-refuses-short-hex
   (is (= "unsupported string escape" (refusal "(def s \"\\u00e\")")))
   (is (= "unsupported string escape" (refusal "(def s \"\\x41\")"))))
+
+(deftest regex-literal-is-read-as-a-tagged-pattern
+  (is (= (list 'kotoba.reader/regex "a\\d+\"b")
+         (first (r/read-forms "#\"a\\d+\\\"b\"")))))
+
+(deftest regex-literal-inside-a-discarded-branch-no-longer-refuses-the-file
+  (is (= [one] (first (r/read-forms "[1 #?(:clj #\"x+\")]")))))
+
+(deftest regex-literal-refuses-unterminated
+  (is (= "unterminated regex literal" (refusal "#\"abc"))))
+
+(deftest js-literal-is-read-as-a-tagged-form
+  (is (= (list 'kotoba.reader/js {:a one}) (first (r/read-forms "#js {:a 1}"))))
+  (is (= [one] (first (r/read-forms "[1 #?(:cljs #js [1 2])]")))))
+
+(deftest quote-reads-as-a-quote-form
+  (is (= (list 'quote 'sym) (first (r/read-forms "'sym"))))
+  (is (= (list 'quote #{'a 'b}) (first (r/read-forms "'#{a b}"))))
+  (is (= (list 'def 'x (list 'quote #{'a})) (first (r/read-forms "(def x '#{a})")))))
+
+(deftest quote-refuses-nothing-to-quote
+  (is (= "quote must precede a form" (refusal "'#_ x"))))
