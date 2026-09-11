@@ -97,8 +97,18 @@
   linker, which is the only place a `:require` clause is ever read -- and
   gains `:ns-refused-clauses`, which THIS commit implements in the frontend
   (`namespace-refused-clauses`: `:import` and its kin are refused by name).
-  No head admitted or withdrawn; the previous digest was `5a5a3d6c`."
-  "7262fae36127e58a9681f7790344827cc89e4c8f6b57dda1ed1f0175352aa1e0")
+  No head admitted or withdrawn; the previous digest was `5a5a3d6c`.
+
+  Advanced 2026-09-11 to `d07b8816` for `:refer-clojure` as a no-op
+  (authority kotoba-lang): `:core-form-shapes :ns :clauses` gains
+  `:refer-clojure` and `:ns` a `:refer-clojure` entry -- `(:refer-clojure
+  :exclude [..])` / `(:refer-clojure :only [..])` is admitted as a NO-OP,
+  which THIS commit implements in the frontend
+  (`validate-refer-clojure-clauses!`: shape-checked, `:rename` refused by
+  name, then dropped before the clause loop), and `:refer-clojure` leaves
+  `:ns-refused-clauses`. No head admitted or withdrawn; the previous digest
+  was `7262fae3`."
+  "d07b8816546b8ff2d78e1db2f375c92ee5e654e20d04eb554a5c4f38fe031587")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

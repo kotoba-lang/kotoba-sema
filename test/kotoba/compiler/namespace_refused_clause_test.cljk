@@ -1,14 +1,15 @@
 (ns kotoba.compiler.namespace-refused-clause-test
   "The namespace clauses the frontend refuses BY NAME (kotoba-lang
   `lang/guest-grammar.edn` `:ns-refused-clauses`, 2026-09-11): `:import`,
-  `:require-macros`, `:use`, `:refer-clojure`, `:load`, `:gen-class`.
+  `:require-macros`, `:use`, `:load`, `:gen-class`. (`:refer-clojure` left
+  the set the same day: it is admitted as a no-op, see
+  `namespace_refer_clojure_test`.)
 
   Nothing here is admitted. What the test pins is that each refusal says
   which clause it saw and why, so a census of refusals over dual-runtime
-  source (the compiler's own modules: 18 carry `:import`, 13 carry
-  `:refer-clojure :exclude`) can tell host interop from a Clojure-only
-  harness clause from a malformed admitted clause -- three different
-  answers that the one generic sentence used to flatten.
+  source (the compiler's own modules: 18 carry `:import`) can tell host
+  interop from a malformed admitted clause -- answers that the one generic
+  sentence used to flatten.
 
   The control is `:require`: it must keep the generic sentence VERBATIM,
   because amu's `kotoba.compiler.diagnostic/refine` recognises exactly that
@@ -32,7 +33,6 @@
           [["(:import [java.io File])" ":import" "host interop (a Java / JS class) is outside the language"]
            ["(:require-macros [m :refer [x]])" ":require-macros" "macros are outside the language"]
            ["(:use [m])" ":use" "an unqualified ambient namespace is outside the language"]
-           ["(:refer-clojure :exclude [read])" ":refer-clojure" "there is no clojure.core to exclude from"]
            ["(:load \"x\")" ":load" "loading source at run time is outside the language"]
            ["(:gen-class)" ":gen-class" "host interop is outside the language"]]]
     (testing clause
