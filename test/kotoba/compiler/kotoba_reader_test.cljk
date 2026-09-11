@@ -242,3 +242,49 @@
     (is (= 2 (count form)))
     (is (true? (:kotoba.reader/f64-literal (meta form)))
         "and it carries the marker the frontend's shims match on")))
+
+;; ---------------------------------------------------------------------------
+;; Reader widenings measured against the compiler's own sources (2026-09-11,
+;; adr-2609111900 iteration 2): `#_`, `#?@`, `#:ns{}`, `\uXXXX`. Each has a
+;; positive and a refusing case; a refusal is asserted on its message so a
+;; different failure cannot pass as the intended one (CLAUDE.md 8 問 ⑥).
+
+(defn- refusal [src]
+  (try (r/read-forms src) nil (catch :default e (.-message e))))
+
+(deftest discard-drops-exactly-one-form
+  (is (= (list 'def 'v two) (first (r/read-forms "(def v #_ 1 2)"))))
+  ;; nested discard: the discarded form is read in full, so balance holds
+  (is (= (list 'def 'v two) (first (r/read-forms "(def v #_ (a #_ b c) 2)")))))
+
+(deftest discard-refuses-unbalanced-form
+  (is (= "unterminated collection" (refusal "(def v #_ (a b 2)"))))
+
+(deftest splicing-conditional-splices-kotoba-branch
+  (is (= [one two (js/BigInt "3")]
+         (first (r/read-forms "[1 #?@(:clj [9 9] :kotoba [2 3])]")))))
+
+(deftest splicing-conditional-default-branch-and-no-match
+  (is (= [one (js/BigInt "4")] (first (r/read-forms "[1 #?@(:clj [9] :default [4])]"))))
+  (is (= [one] (first (r/read-forms "[1 #?@(:clj [9])]")))))
+
+(deftest splicing-conditional-refuses-non-collection-and-top-level
+  (is (= "`#?@` branch must be a sequential collection" (refusal "[#?@(:kotoba 1)]")))
+  (is (= "`#?@` is not admitted at top level" (refusal "#?@(:kotoba [1])")))
+  (is (= "expected `(` after `#?@`" (refusal "[#?@ x]"))))
+
+(deftest namespaced-map-qualifies-bare-keys-only
+  (is (= {:a/b one :c/d two :e one}
+         (first (r/read-forms "#:a{:b 1 :c/d 2 :_/e 1}")))))
+
+(deftest namespaced-map-refuses-bad-shape
+  (is (= "expected `{` after `#:ns`" (refusal "#:a[1]")))
+  (is (= "map literal must contain an even number of forms" (refusal "#:a{:b}"))))
+
+(deftest unicode-escape-reads-one-code-unit
+  (is (= (list 'def 's "é") (first (r/read-forms "(def s \"\\u00e9\")"))))
+  (is (= (list 'def 's "A\tB") (first (r/read-forms "(def s \"\\u0041\\tB\")")))))
+
+(deftest unicode-escape-refuses-short-hex
+  (is (= "unsupported string escape" (refusal "(def s \"\\u00e\")")))
+  (is (= "unsupported string escape" (refusal "(def s \"\\x41\")"))))
