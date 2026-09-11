@@ -75,6 +75,19 @@
   (is (= 2 (answer-i64 "(def s (disj #{:a :b :c} :a))" "(count s)")))
   (is (= 2 (answer-i64 "(def s (conj #{:a} :b))" "(count s)"))))
 
+(deftest an-empty-set-constant-is-spelled-as-its-constructor
+  ;; `#{}` has no literal that carries a type (the literal rule wants a
+  ;; non-empty keyword set), so the folded empty set is spelled as
+  ;; `(typed-set-new [:set :keyword])` -- the shape a def already admits.
+  ;; Measured 2026-09-12 (selfhost measurement 20): `(def ^:dynamic
+  ;; *linear-returning* #{})` in this repository's own affine.cljk was
+  ;; refused `outside the constant bounds`, a bounds sentence for zero items.
+  (is (= 0 (answer-i64 "(def s #{})" "(count s)")))
+  (is (= 0 (answer-i64 "(def s (disj #{:a} :a))" "(count s)")))
+  (is (= 1 (answer-i64 "(def s #{})" "(count (conj s :a))")))
+  ;; a typed set with items keeps its constructor spelling
+  (is (= 2 (answer-i64 "(def s (typed-set-new [:set :i64] 1 2))" "(count s)"))))
+
 (deftest assoc-onto-a-map-literal-folds-and-runs
   ;; `merge` is NOT an admitted head (measured 2026-09-11, the same
   ;; `unknown operation` sentence); `assoc` is the smallest admitted shape
