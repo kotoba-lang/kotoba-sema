@@ -326,3 +326,18 @@
 (deftest large-integer-set-is-refused-by-name-not-as-an-internal-error
   (let [r (refusal "(defn run [n :i64] :i64 (if #?(:kotoba #{1 2 3 4 5 6 7 8 9}) n 0))")]
     (is (= :kotoba.error/host-literal (:code r)) (pr-str r))))
+
+;; `into` with a single-step transducer (2026-09-11, adr-2609111900): the
+;; 3-arity `(into to (map f) src)` is rewritten to `(into to (map f src))`.
+(deftest into-with-a-single-step-transducer-is-the-two-arity-into
+  (testing "map"
+    (is (= 9 (answer (str "(defn inc1 [x :i64] :i64 (+ x 1))\n"
+                          "(defn run [n :i64] :i64 (vector-count (into (vector-alloc 0) (map inc1) [1 2 3 4 5 6 7 8 9])))")
+                     [1]))))
+  (testing "filter keeps the value, not just the count"
+    (is (= 6 (answer (str "(defn even2? [x :i64] :bool (= 0 (- x (* 2 (quot x 2)))))\n"
+                          "(defn run [n :i64] :i64 (vector-at (into (vector-alloc 0) (filter even2?) [1 2 3 4 5 6]) 2))")
+                     [1]))))
+  (testing "a composed transducer is refused by name"
+    (is (= "into with a transducer admits only (map f) (filter f) (remove f) (keep f) (mapcat f) as the middle argument"
+           (:message (refusal "(defn run [n :i64] :i64 (vector-count (into (vector-alloc 0) (comp (map n) (filter n)) [1 2])))"))))))
