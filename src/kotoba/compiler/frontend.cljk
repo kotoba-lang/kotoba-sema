@@ -1612,8 +1612,12 @@
     (throw (ex-info "source must be a string" {:phase :read})))
   (when (> (count source) (* 1024 1024))
     (throw (ex-info "source exceeds 1 MiB admission limit" {:phase :read})))
-  (when (re-find #"#=" source)
-    (throw (ex-info "reader evaluation is forbidden" {:phase :read})))
+  ;; `#=` (reader evaluation) is refused by the READER's dispatch arm, not by a
+  ;; textual scan: the scan matched the two characters anywhere -- inside a
+  ;; string, a comment, or the very regex that spelled it -- and so refused
+  ;; this file's own source once the self-host route linked it (measured
+  ;; 2026-09-11, adr-2609111900: 5 amu modules refused with "reader
+  ;; evaluation is forbidden" for a `#=` that was never a reader macro).
   (check-reader-depth! source)
   ;; This forked until 2026-09-08: `clojure.tools.reader` on the JVM,
   ;; `kotoba-reader` on ClojureScript. Two readers for one grammar is two
