@@ -44,7 +44,7 @@ resolve by operand type, the way Unison resolves `+` to `Nat.+` or `Float.+`:
   binary calls (`(< a b c)` on f64 lowers to two `f64-lt`) and before
   validation; every backend still sees only the typed operations.
 - A program with no float operands is byte-identical to what it was before
-  the rule existed (`test/kotoba/compiler/type_directed_arithmetic_test.clj`
+  the rule existed (`test/kotoba/compiler/type_directed_arithmetic_test.cljk`
   holds two integer programs beside their pre-change output).
 - The explicit spellings (`f64-add`, `f32-lt`, ...) remain valid; typed and
   ABI boundaries may still name their operation exactly.

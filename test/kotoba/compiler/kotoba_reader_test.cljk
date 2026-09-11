@@ -1,6 +1,6 @@
 (ns kotoba.compiler.kotoba-reader-test
   "JVM-free reader tests for the `#()` fn shorthand (lang-cosientist
-  iteration 3). Runs on the nbb route like the rest of run-tests.cljs.
+  iteration 3). Runs on the nbb route like the rest of run-tests.cljk.
 
   Integer literals read as JS bigint, so expected forms are built with
   `(js/BigInt \"2\")` rather than quoted literals -- a quoted `2` in CLJS

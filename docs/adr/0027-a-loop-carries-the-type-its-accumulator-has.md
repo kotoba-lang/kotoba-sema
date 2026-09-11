@@ -160,7 +160,7 @@ beside `*loop-counter*`) and the function map is left exactly as it was.
 | | before | after |
 |---|---|---|
 | `loop-accumulator-type-test`, JVM | exit 1 — 13 tests, 53 assertions, 8 failures, 26 errors | exit 0 — 13 tests, 53 assertions, 0 failures, 0 errors |
-| `loop-accumulator-type-test`, nbb (in `run-tests.cljs`) | exit 1 — 108 tests, 309 assertions, 8 failures, 26 errors | exit 0 — 108 tests, 309 assertions, 0 failures, 0 errors |
+| `loop-accumulator-type-test`, nbb (in `run-tests.cljk`) | exit 1 — 108 tests, 309 assertions, 8 failures, 26 errors | exit 0 — 108 tests, 309 assertions, 0 failures, 0 errors |
 | full `clojure -M:test` | — | exit 0 — 267 tests, 1275 assertions, 0 failures |
 
 No existing fixture relied on the `:i64` default. The full suite was run with

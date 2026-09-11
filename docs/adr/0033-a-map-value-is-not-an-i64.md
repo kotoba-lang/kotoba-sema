@@ -147,9 +147,9 @@ quotes on.
 
 ## Evidence
 
-* `test/kotoba/compiler/typed_map_value_types_test.cljc` — 18 tests, 40
+* `test/kotoba/compiler/typed_map_value_types_test.cljk` — 18 tests, 40
   assertions. Against the pinned frontend: **6 failures, 22 errors, exit 1**.
-  After: **0, 0, exit 0**. Registered in both of `run-tests.cljs`'s lists.
+  After: **0, 0, exit 0**. Registered in both of `run-tests.cljk`'s lists.
 * Full suites: JVM 343 tests / 1521 assertions, nbb 188 tests / 590 assertions,
   0 failures either way.
 * End to end: `amu compile --target wasm32-browser` on a string-valued map

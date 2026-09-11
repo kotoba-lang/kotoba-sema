@@ -64,11 +64,11 @@ message and stay green in **both** directions, so the suite is not merely
 counting admissions.
 
 JVM `clojure -M:test -n kotoba.compiler.rodata-literal-test`: 7 tests, 53
-assertions. nbb `run-tests.cljs`: 102 tests, 309 assertions.
+assertions. nbb `run-tests.cljk`: 102 tests, 309 assertions.
 
 ## Consequences
 
-- `kotoba.compiler.rodata-literal-test` is now registered in `run-tests.cljs`.
+- `kotoba.compiler.rodata-literal-test` is now registered in `run-tests.cljk`.
   It had landed unregistered and had never run on ClojureScript. Registering it
   made one pre-existing case red, which is why registering it was worth doing:
   the surrogate case was spelled as a `\uD83D` escape, and the two routes refuse

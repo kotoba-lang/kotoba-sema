@@ -70,8 +70,8 @@ Both are carried in kotoba-native `docs/avx2-guard-sequence.md`.
 
 `kotoba.compiler.kernel-xsetbv-test`, 3 tests / 18 assertions, run on **both**
 runtimes: `clojure -M:test -n kotoba.compiler.kernel-xsetbv-test` and
-`nbb run-tests.cljs` (73 tests / 216 assertions after registration in both lists
-of `run-tests.cljs`; being required is not being run).
+`nbb run-tests.cljk` (73 tests / 216 assertions after registration in both lists
+of `run-tests.cljk`; being required is not being run).
 
 Positive rows include the sequence the family exists for — read CR4, set bits
 9/10/18, write back, then `(kernel-xsetbv 0 (bit-or (kernel-xgetbv 0) 6))` —
