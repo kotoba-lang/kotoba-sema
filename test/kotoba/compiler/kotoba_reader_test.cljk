@@ -283,6 +283,13 @@
   (is (= "unsupported string escape" (refusal "(def s \"\\u00e\")")))
   (is (= "unsupported string escape" (refusal "(def s \"\\x41\")"))))
 
+(deftest backspace-and-form-feed-escapes-read-as-clojure-reads-them
+  ;; osaho's kir/value.cljk spells a JSON escape table with `\\b` / `\\f`;
+  ;; before 2026-09-12 that one literal refused the whole file.
+  (is (= (list 'def 's (str (char 8) "|" (char 12))) (first (r/read-forms "(def s \"\\b|\\f\")"))))
+  ;; The letter next to them is still not an escape.
+  (is (= "unsupported string escape" (refusal "(def s \"\\g\")"))))
+
 (deftest regex-literal-is-read-as-a-tagged-pattern
   (is (= (list 'kotoba.reader/regex "a\\d+\"b")
          (first (r/read-forms "#\"a\\d+\\\"b\"")))))
