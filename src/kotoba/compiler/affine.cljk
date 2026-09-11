@@ -59,6 +59,7 @@
   `kotoba-sema` is what holds source, and a backend repo is not on this one's
   dependency path -- so the gate could never have been consulted from where
   the decision is made."
+  {:kotoba/export [*linear-returning* consuming in-place-candidates linear-let-thread? linear-parameter? linear-returning? linear? module-linear-returning producing reading]}
   (:require [clojure.set :as set]))
 
 (def consuming
