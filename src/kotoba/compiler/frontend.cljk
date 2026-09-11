@@ -3013,6 +3013,9 @@
     (string? form) :string
     (keyword? form) :keyword
     (boolean? form) :bool
+    ;; `'sym` (the reader's `(quote sym)`) is a `:symbol` item, so `[1 'a]`
+    ;; is a heterogeneous vector the way `[1 :a]` is (2026-09-12)
+    (and (seq? form) (= 'quote (first form)) (= 2 (count form)) (symbol? (second form))) :symbol
     (vector? form)
     (let [item-types (mapv closed-vector-literal-type form)]
       (cond
@@ -5191,6 +5194,169 @@
                form :kotoba.error/f32-literal-inexact))
     (value/f32-to-i64-bits narrowed)))
 
+;; ── quoted symbol data: `'sym` `'#{a b}` `'{a 1}` `'[a b]` ──────────────────
+;;
+;; The reader hands `'datum` over as `(quote datum)` (2026-09-11). Until
+;; 2026-09-12 no pass gave the form a meaning: in a function body it was
+;; `unknown operation: quote`, and at a `def` the payload was refused
+;; `constant value is quoted data holding symbols ... spell the entries as
+;; keywords`. Measured on the selfhost distance (lang/selfhost-distance.edn
+;; measurement 18, amu cdebca89, 225 compiler sources): 12 modules refused
+;; at exactly that sentence -- 8 with a quoted SET of symbols, 4 with a quoted
+;; MAP whose keys are symbols -- every one an operation table of the
+;; compiler's own (`(def arithmetic '#{+ - * quot bit-xor bit-and bit-or})`,
+;; `(def heap-operations '{pair 2 pair-first 1 pair-second 1})`, `(def
+;; find-name 'kotoba$string-index-find)`). "Spell the entries as keywords"
+;; is not available to those authors: the members ARE symbols, operation
+;; heads compared against read source.
+;;
+;; CLASSIFICATION (CLAUDE.md, "is it a property or implementation state"),
+;; written before the change: IMPLEMENTATION STATE. `:symbol` is already a
+;; value type of this frontend (`value-types`), `(symbol "a")` builds one
+;; from a `:string`, `(typed-set-new [:set :symbol] ...)` and `(typed-map-new
+;; [:map :symbol V] ...)` check and run. What was missing was the LITERAL
+;; spelling. So `(quote sym)` elaborates to exactly `(symbol "sym")` -- the
+;; same KIR, one definition CID for the two spellings -- and the quoted
+;; collections elaborate to the constructors the keyword literals already
+;; lower to, with `:symbol` in the descriptor. A namespaced `'ns/x` is the
+;; symbol `(symbol "ns/x")` gives (measured 2026-09-12: that call is admitted
+;; and executes to `ns/x`; mirrored, not refused).
+;;
+;; At a `def`, the quoted datum IS the constant's literal representation --
+;; `(quote #{a b})` is held as written, the way a keyword set `#{:a :b}` is
+;; held as written -- because a bare symbol at a def is an ALIAS of another
+;; constant, and a raw set of symbols would be substituted and then read as
+;; variable references. `substitute-constants` and every rewriting pass
+;; already leave `quote` subtrees alone. A folded `:symbol` / `[:set
+;; :symbol]` / scalar-valued `[:map :symbol V]` result is spelled back as
+;; the same quoted datum (`spell-folded-value`), so `(def s 'a)` and `(def s
+;; (symbol "a"))` are one constant.
+;;
+;; NOT widened here, recorded: `=` on two `:symbol`s is refused `equality
+;; type is outside the safe value profile` (measured 2026-09-12); membership
+;; is `typed-set-contains [:set :symbol]`, lookup is `get` on the typed map.
+;;
+;; Refused BY NAME (one sentence each, the same at a def and in a body): a
+;; set / vector mixing symbols with other kinds, a map mixing symbol keys
+;; with other key kinds, a symbol-key map whose values are not one scalar
+;; kind (integer / string / keyword / boolean), and a quoted list.
+
+(defn- quote-form? [form]
+  (and (seq? form) (= 'quote (first form)) (= 2 (count form))))
+
+(defn- holds-symbol? [datum]
+  (some symbol? (tree-seq coll? seq datum)))
+
+(defn- quoted-scalar-type
+  "The value type of a scalar inside a quoted symbol-key map, or nil."
+  [v]
+  (cond
+    (kotoba-integer? v) :i64
+    (string? v) :string
+    (keyword? v) :keyword
+    (boolean? v) :bool
+    :else nil))
+
+(defn- quoted-symbol-datum-kind
+  "The literal kind of DATUM, the payload of `(quote datum)`, when it is
+  admitted symbol data: `:symbol`, `:symbol-set`, `:symbol-key-map` (with
+  `:value-type`), `:symbol-vector`; nil for anything else."
+  [datum]
+  (cond
+    (symbol? datum) {:kind :symbol}
+    (and (set? datum) (seq datum) (<= (count datum) max-typed-set-items)
+         (every? symbol? datum))
+    {:kind :symbol-set}
+    (and (map? datum) (seq datum) (<= (count datum) max-typed-map-entries)
+         (every? symbol? (keys datum)))
+    (let [value-types (distinct (map quoted-scalar-type (vals datum)))]
+      (when (and (= 1 (count value-types)) (some? (first value-types)))
+        {:kind :symbol-key-map :value-type (first value-types)}))
+    (and (vector? datum) (seq datum) (<= (count datum) value/vector-literal-item-limit)
+         (every? symbol? datum))
+    {:kind :symbol-vector}
+    :else nil))
+
+(defn- quoted-datum-text
+  "FORM as the author wrote it, for a refusal: integers as digits on both
+  runtimes (a ClojureScript BigInt would otherwise print as
+  `#object[BigInt 1]`), set members and map entries in `pr-str` order so
+  the sentence does not depend on hash order, bounded."
+  [form]
+  (letfn [(text [f]
+            (cond
+              (seq? f) (str "(" (str/join " " (map text f)) ")")
+              (vector? f) (str "[" (str/join " " (map text f)) "]")
+              (set? f) (str "#{" (str/join " " (map text (sort-by pr-str f))) "}")
+              (map? f) (str "{" (str/join ", " (map (fn [[k v]] (str (text k) " " (text v)))
+                                                     (sort-by (comp pr-str key) f))) "}")
+              (kotoba-integer? f) (str f)
+              (symbol? f) (str f)
+              :else (pr-str f)))]
+    (let [t (text form)]
+      (if (> (count t) 80) (str (subs t 0 77) "...") t))))
+
+(defn- reject-quoted-symbol-datum!
+  "The by-name refusal for a `(quote datum)` that holds symbols but is not
+  one of the four admitted kinds. Text pinned by
+  quoted_symbol_constants_test."
+  [form]
+  (let [datum (second form)
+        spelled (quoted-datum-text form)]
+    (cond
+      (set? datum)
+      (reject! (str "quoted set mixes symbols with other kinds: " spelled
+                    " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword")
+               form :kotoba.error/subset-reject)
+      (vector? datum)
+      (reject! (str "quoted vector mixes symbols with other kinds: " spelled
+                    " -- a symbol vector ([:vector [:symbol ...]]) holds symbols only; spell every item as a symbol")
+               form :kotoba.error/subset-reject)
+      (and (map? datum) (not (every? symbol? (keys datum))))
+      (reject! (str "quoted map mixes symbol keys with other key kinds: " spelled
+                    " -- a symbol-key map ([:map :symbol V]) holds symbol keys only; spell every key as a symbol, or every key as a keyword")
+               form :kotoba.error/subset-reject)
+      (map? datum)
+      (reject! (str "quoted symbol-key map values are not one scalar kind: " spelled
+                    " -- a symbol-key map is [:map :symbol V] for one V of integer / string / keyword / boolean; a symbol or a collection is not a value it holds")
+               form :kotoba.error/subset-reject)
+      (seq? datum)
+      (reject! (str "quoted list has no literal spelling: " spelled
+                    " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector; a list is a heap value built with list")
+               form :kotoba.error/subset-reject)
+      :else
+      (reject! (str "quoted data is outside the admitted symbol kinds: " spelled
+                    " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector")
+               form :kotoba.error/subset-reject))))
+
+(defn- symbol-literal-form [sym]
+  (list 'symbol (str sym)))
+
+(declare desugar-expr*)
+
+(defn- desugar-quoted-datum
+  "`(quote datum)` as an expression. Symbol data lowers to the same forms
+  the unquoted `(symbol \"...\")` / typed constructors are; a quoted datum
+  holding no symbol is that datum (the quote comes off, as at a def)."
+  [form contextual-result-type]
+  (let [datum (second form)]
+    (if-not (holds-symbol? datum)
+      (if (seq? datum)
+        (reject-quoted-symbol-datum! form)
+        (desugar-expr* datum contextual-result-type))
+      (let [{:keys [kind value-type]} (quoted-symbol-datum-kind datum)]
+        (case kind
+          :symbol (symbol-literal-form datum)
+          :symbol-set (list* 'typed-set-new [:set :symbol]
+                             (map symbol-literal-form (sort-by pr-str datum)))
+          :symbol-key-map (list* 'typed-map-new [:map :symbol value-type]
+                                 (mapcat (fn [[k v]] [(symbol-literal-form k)
+                                                      (desugar-expected-value value-type v)])
+                                         (sort-by (comp pr-str key) datum)))
+          :symbol-vector (list* 'hetero-vector-new [:vector (vec (repeat (count datum) :symbol))]
+                                (map symbol-literal-form datum))
+          (reject-quoted-symbol-datum! form))))))
+
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; A closed EDN-shaped value in a :document context is already fully
@@ -5271,6 +5437,9 @@
             :else
             (apply list 'vector-new (map desugar-expr form)))))
     (not (seq? form)) form
+    ;; `(quote datum)` -- the reader's `'datum`. See the section comment
+    ;; above `quote-form?`.
+    (quote-form? form) (desugar-quoted-datum form contextual-result-type)
     ;; `(:field r)` — the Clojure keyword accessor. Desugars to the 2-arity
     ;; `record-get`, which `rewrite-record-projection` then resolves against the
     ;; value's inferred type (ADR 0189/0190). Keeping it a desugar means no new
@@ -14083,6 +14252,14 @@
     ;; spelled one. Admitting it here is what lets a folded constant take the
     ;; literal path (`resolve-constant-aliases!`, `substitute-constants`)
     ;; without a second evaluation.
+    ;; Quoted symbol data (2026-09-12, see the section comment above
+    ;; `quote-form?`): `'sym`, `'#{a b}`, `'{a 1 b 2}`, `'[a b]` are held AS
+    ;; WRITTEN, quote and all -- the quote is what keeps a symbol from being
+    ;; read as a constant alias, and `substitute-constants` never enters a
+    ;; quote. Each lowers, where it is used, to the same form `(symbol
+    ;; "...")` and the typed constructors already lower to.
+    (quote-form? value) (and (holds-symbol? (second value))
+                             (some? (quoted-symbol-datum-kind (second value))))
     (seq? value) (and (contains? '#{typed-set-new typed-map-new} (first value))
                       (vector? (second value))
                       (<= (count value) (+ 2 max-list-items))
@@ -14180,6 +14357,10 @@
               (= :bool type) value
               (= :string type) value
               (= :keyword type) value
+              ;; a symbol is spelled as the quoted datum `'sym` -- the
+              ;; literal `(def s 'a)` is held as, so `(def s (symbol "a"))`
+              ;; is the same constant (2026-09-12)
+              (= :symbol type) (list 'quote value)
               (= :f64 type)
               #?(:clj value
                  :cljs (with-meta (list 'f64-from-bits (value/f64-to-i64-bits value))
@@ -14191,14 +14372,24 @@
               (and (vector? type) (= :set (first type)))
               (let [item-type (second type)
                     items (second value)]
-                (if (= :keyword item-type)
-                  (set items)
-                  (list* 'typed-set-new type (map #(spell item-type %) items))))
+                (cond
+                  (= :keyword item-type) (set items)
+                  ;; the symbol set's literal is the quoted set, as the
+                  ;; keyword set's is the bare one (2026-09-12)
+                  (= :symbol item-type) (list 'quote (set items))
+                  :else (list* 'typed-set-new type (map #(spell item-type %) items))))
               (and (vector? type) (= :map (first type)))
               (let [[_ key-type value-type] type]
-                (list* 'typed-map-new type
-                       (mapcat (fn [[k v]] [(spell key-type k) (spell value-type v)])
-                               (second value))))
+                (if (and (= :symbol key-type)
+                         (contains? #{:i64 :string :keyword :bool} value-type))
+                  ;; the scalar-valued symbol-key map's literal is the quoted
+                  ;; map `'{a 1 b 2}` (2026-09-12); any other value type has
+                  ;; no map literal and takes the constructor below with
+                  ;; quoted keys
+                  (list 'quote (into {} (map (fn [[k v]] [k (spell value-type v)]) (second value))))
+                  (list* 'typed-map-new type
+                         (mapcat (fn [[k v]] [(spell key-type k) (spell value-type v)])
+                                 (second value)))))
               (and (vector? type) (= :vector (first type)))
               (mapv spell (second type) (rest value))
               (and (vector? type) (= :record (first type)))
@@ -14230,7 +14421,8 @@
     (when (contains? effectful-def-heads head)
       (reject! (str "def value is stateful/effectful: (" head " ...) -- move it into a function or a capability")
                form :kotoba.error/def-value-stateful {:constant name :head head}))
-    (let [mentioned (set (filter symbol? (tree-seq coll? seq value-form)))]
+    (let [mentioned (set (filter symbol? (tree-seq #(and (coll? %) (not (quote-form? %)))
+                                                   seq value-form)))]
       (when (contains? mentioned name)
         (def-refusal! name (str "refers to itself: " name " -- a constant cannot be recursive; write the value out") form))
       (when-let [forward (seq (filter later mentioned))]
@@ -14349,17 +14541,23 @@
                   :else value-form)]
       (cond
         ;; quoted data holding a symbol: `'#{if let}` (the compiler's own
-        ;; tables, 5 of its sources) and `'name` (a quoted symbol, which is
-        ;; NOT an alias -- the author quoted it to keep it a symbol). Named
-        ;; as such, BEFORE the literal rule can read the bare symbol as an
-        ;; alias: a symbol is not a constant kind, and neither the closedness
-        ;; sentence nor `constant alias must name a declared constant` says
-        ;; so (measured 2026-09-11 on kotoba-native/string_index.cljk, whose
-        ;; `(def find-name 'kotoba$string-index-find)` got the alias sentence)
-        (and (not= value-form value) (some symbol? (tree-seq coll? seq value)))
-        (reject! (str "constant value is quoted data holding symbols: " (pr-str value-form)
-                      " -- a symbol is not an admitted constant kind (integer/string/keyword/boolean/nil/vector/map/keyword-set); spell the entries as keywords")
-                 value :kotoba.error/subset-reject)
+        ;; operation tables) and `'name` (a quoted symbol, which is NOT an
+        ;; alias -- the author quoted it to keep it a symbol). Classified
+        ;; BEFORE the literal rule can read the bare symbol as an alias
+        ;; (measured 2026-09-11 on kotoba-native/string_index.cljk, whose
+        ;; `(def find-name 'kotoba$string-index-find)` got the alias
+        ;; sentence). Until 2026-09-12 this arm refused every such datum
+        ;; (`... spell the entries as keywords`; measurement 18: 12 of 225
+        ;; compiler sources). Now the four symbol kinds are held AS WRITTEN,
+        ;; quote and all -- see the section comment above `quote-form?` --
+        ;; and the rest are refused by their own name; a quoted list keeps
+        ;; the closedness sentence below, as `'(1 2)` does.
+        (and (not= value-form value) (holds-symbol? value))
+        (cond
+          (quoted-symbol-datum-kind value) {:name name :value value-form}
+          (seq? value)
+          (reject! "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data" value)
+          :else (reject-quoted-symbol-datum! value-form))
         (constant-literal? value) {:name name :value value}
         ;; a string past the constant's portable byte bound: say the bound
         ;; and the size, not "must be closed" about a value that is

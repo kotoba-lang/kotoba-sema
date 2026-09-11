@@ -79,6 +79,11 @@
             ;; analysis time; (def k 4096) and (def k (* 4 1024)) are one
             ;; constant; atom / delay / forward reference / fuel refused by name
             [kotoba.compiler.computed-constant-fold-test]
+            ;; `'sym` / `'#{a b}` / `'{a 1}` / `'[a b]`: quoted symbol data as
+            ;; an expression and as a module constant, one analysis with the
+            ;; `(symbol "...")` / typed-constructor spellings; mixed
+            ;; collections and quoted lists refused by name
+            [kotoba.compiler.quoted-symbol-constants-test]
             ;; the map callback by shape: named / inline / closure value run;
             ;; destructuring, several forms, a literal, partial / comp refused
             ;; by name; a parameter mapper requests its dispatcher
@@ -191,6 +196,7 @@
              'kotoba.compiler.typed-map-value-types-test
              'kotoba.compiler.keyword-map-record-literal-test
              'kotoba.compiler.computed-constant-fold-test
+             'kotoba.compiler.quoted-symbol-constants-test
              'kotoba.compiler.map-callback-shape-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test
