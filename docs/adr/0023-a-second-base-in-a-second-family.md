@@ -27,7 +27,7 @@ looked at.
 
 ## Evidence
 
-`test/kotoba/compiler/kernel_dequant_dot_test.clj`, 6 tests / 43 assertions,
+`test/kotoba/compiler/kernel_dequant_dot_test.cljk`, 6 tests / 43 assertions,
 every one of them per format: arity in both directions, reserved name, the
 `:i64` result, `[0 2]`, both parameters tainted, a computed base refused in
 either position, and a `kernel-subregion` narrowing admitted in either position

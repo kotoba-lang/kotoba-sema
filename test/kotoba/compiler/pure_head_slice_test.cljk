@@ -15,7 +15,7 @@
   that only checks `threw?` would keep passing after `rel` landed.
 
   These run on BOTH runtimes. The first version of this file was `.cljc` but
-  caught a bare `Exception` and was never registered in `run-tests.cljs`, so
+  caught a bare `Exception` and was never registered in `run-tests.cljk`, so
   its ClojureScript half had never executed -- and that is exactly where the
   application bug this slice fixes lived: `((lam [x] (+ x 1)) n)` raised
   `Cannot create property 'closure_uid_...' on bigint '1'` under nbb (a call

@@ -148,8 +148,8 @@ integer keys unusable on one of the two runtimes.
 
 ## What is pinned
 
-`test/kotoba/compiler/typed_map_key_types_test.cljc`, in both lists of
-`run-tests.cljs`. 21 tests / 50 assertions.
+`test/kotoba/compiler/typed_map_key_types_test.cljk`, in both lists of
+`run-tests.cljk`. 21 tests / 50 assertions.
 
 Before the change: **exit 1, 20 failures and 23 errors** on the JVM. The three
 that passed are the ones that had to: the two byte-identity controls, and the

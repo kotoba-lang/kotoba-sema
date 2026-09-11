@@ -3983,7 +3983,7 @@
       (if-let [[first-key first-type] (first typed)]
         ;; `=` rather than `distinct`: a value type may be a descriptor
         ;; vector, and hashing is not something both runtimes agree on for
-        ;; every literal shape (`run-tests.cljs` records the `desugar-case`
+        ;; every literal shape (`run-tests.cljk` records the `desugar-case`
         ;; bigint hashing defect that taught this).
         (if-let [[other-key other-type]
                  (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
@@ -6447,7 +6447,7 @@
 ;;
 ;; A program with no `atom` / `swap!` / `reset!` / `deref` skips this pass
 ;; entirely (`local-state-source?`), so its lowering is byte-for-byte what it
-;; was -- pinned by a golden in `test/kotoba/compiler/local_state_test.clj`.
+;; was -- pinned by a golden in `test/kotoba/compiler/local_state_test.cljk`.
 
 (def ^:dynamic *local-state-used*
   "Set once per analyze when an atom cell is elaborated, so `:named-operations`

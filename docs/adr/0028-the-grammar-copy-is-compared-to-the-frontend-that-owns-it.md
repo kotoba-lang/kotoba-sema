@@ -53,7 +53,7 @@ are the symptom.
 
 ## The decision
 
-`test/kotoba/compiler/guest_grammar_vendor_test.clj` asserts two things this
+`test/kotoba/compiler/guest_grammar_vendor_test.cljk` asserts two things this
 repository is uniquely able to assert:
 
 1. **`:admitted-builtins` names exactly the kernel heads the frontend

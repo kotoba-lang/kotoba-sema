@@ -158,8 +158,8 @@ this one produces the same `.wasm`: `5425eaca8fa79e0e…`, returning 4.
 
 ## What is pinned
 
-`test/kotoba/compiler/malformed_type_argument_test.cljc`, in both lists of
-`run-tests.cljs`. 13 tests / 49 assertions.
+`test/kotoba/compiler/malformed_type_argument_test.cljk`, in both lists of
+`run-tests.cljk`. 13 tests / 49 assertions.
 
 Before (the three tests that call `internal-failure!` cannot exist before it
 does, so they are excluded from the before-run): JVM **exit 1, 10 tests / 38
