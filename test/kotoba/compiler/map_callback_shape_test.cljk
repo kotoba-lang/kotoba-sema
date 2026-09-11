@@ -25,10 +25,12 @@
     and what is missing is a source model past vector-i64 for the item to
     have positions in. Refused BY NAME with that reason, so it moves when
     the source model does.
-  - `(fn [x] a b)` -- the profile's one-expression rule (guest-grammar
-    `:implicit-body-forms :refuses` holds `fn` and `defn`; explicit `do` is
-    the spelling). Refused by name, mirroring defn's sentence; widening it is
-    a grammar move for every fn/defn site at once, not this head's alone.
+  - `(fn [x] a b)` -- WAS the profile's one-expression rule (guest-grammar
+    `:implicit-body-forms :refuses` held `fn` and `defn`; explicit `do` was
+    the spelling), refused by name mirroring defn's sentence. 2026-09-12 the
+    grammar moved `fn` and `defn` to `:sequences` for every site at once, so
+    several forms are one `do` here too; `defn-body-sequences-test` pins the
+    answer, and the test below pins that this site follows.
   - a keyword / literal / `(partial ...)` / `(comp ...)` -- no value model
     (a map source is a vector-i64; partial and comp are not heads). Refused
     by name instead of falling through to the dispatcher.
@@ -134,10 +136,13 @@
       (is (= "map fn parameter destructures ({:keys [a]}): the item of a vector-i64 source is an i64 and has no positions to bind; take a symbol and index a typed value inside the body"
              message)))))
 
-(deftest several-body-forms-are-refused-as-defn-refuses-them
-  (let [{:keys [message]} (refusal "(defn f [xs] (map (fn [x] (+ x 0) (* x 2)) xs))"
-                                   "(vector-at (f [3 4]) 1)")]
-    (is (= "map fn must contain one result expression; explicit (do ...) is the spelling" message))))
+(deftest several-body-forms-are-sequenced-as-defn-sequences-them
+  ;; Until 2026-09-12: `map fn must contain one result expression; explicit
+  ;; (do ...) is the spelling`. Now one `do`, the LAST form the value.
+  (is (nil? (refusal "(defn f [xs] (map (fn [x] (+ x 0) (* x 2)) xs))"
+                     "(vector-at (f [3 4]) 1)")))
+  (is (= 8 (answer "(defn f [xs] (map (fn [x] (+ x 0) (* x 2)) xs))"
+                   "(vector-at (f [3 4]) 1)"))))
 
 (deftest the-kept-checks-each-say-why
   (testing "arity: the callback's parameter count IS the source count"
