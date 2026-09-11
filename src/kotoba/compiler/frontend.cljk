@@ -6745,13 +6745,21 @@
         (if-let [kw (capability-keyword-for-symbol op)]
           (elaborate-named-operation form op kw args)
           (if (and (symbol? op) (namespace op))
+            (if (= "clojure.core" (namespace op))
+              ;; `clojure.core/merge` is the same head as `merge`, spelled
+              ;; fully to dodge a local of the same name -- 17 of the
+              ;; compiler's dependency sources (coll.cljk) do this. The
+              ;; prefix names no module Kotoba has; strip it and let the
+              ;; bare head be admitted or refused on its own terms
+              ;; (measured 2026-09-11, adr-2609111900).
+              (desugar-expr (with-meta (cons (symbol (name op)) args) (meta form)))
             (do
               ;; Reader-tagged host literals arrive here first (desugar runs
               ;; before validation); a SELECTED one is refused by name.
               (refuse-reader-tagged-host-literal! form op)
               (reject! (str "named operation " (pr-str op)
                             " is not a registered capability")
-                       form))
+                       form)))
             (apply list op (map desugar-expr args)))))))))
 
 (defn- desugar-expr [form]
