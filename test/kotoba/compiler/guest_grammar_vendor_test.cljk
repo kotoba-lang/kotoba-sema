@@ -132,8 +132,17 @@
   SYMBOL at a def is named as quoted data (it was answered as an alias
   lookup) and a string past the portable byte bound is refused by the bound
   (both in `def-parts`, THIS commit). No head admitted or withdrawn; the
-  previous digest was `8450745f`."
-  "c308cc04f7cb7568d214917288f6f06a61539cb6ad6a68056dc6036ade8f0448")
+  previous digest was `8450745f`.
+
+  Advanced 2026-09-11 to `11fd920c` for the map callback (authority
+  kotoba-lang): `:sugar :map` gains `:callback` -- the admitted shapes by
+  name and eight refusals, one per cause, in place of the one sentence
+  `N-source map fn requires matching unique parameters and one expression`
+  (THIS commit splits it in the `map` desugar, refuses a literal / partial /
+  comp callback by name, and makes the stored-callback path REQUEST its
+  dispatcher). No head admitted or withdrawn; the previous digest was
+  `c308cc04`."
+  "11fd920ceabccedf5f4edc148b8167d6f182bc4a66475dbbe4ecb8bd88200388")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
