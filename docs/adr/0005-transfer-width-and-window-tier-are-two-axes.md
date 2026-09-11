@@ -40,7 +40,7 @@ and in different profile maps in `kotoba.kir`.
 
 ## Evidence
 
-`clojure -M:test` — 122 tests, 708 assertions, 0 failures (after merging
+`kbb -M:test` — 122 tests, 708 assertions, 0 failures (after merging
 `kotoba-lang/main`, which brought the sysops atomics and the UEFI boundary
 spellings into the same table).
 

@@ -67,7 +67,7 @@ overflow and rounding are decisions the source has to write down.
 ## Development
 
 ```sh
-clojure -M:test
+kbb -M:test
 ```
 
 ## Responsibility boundary

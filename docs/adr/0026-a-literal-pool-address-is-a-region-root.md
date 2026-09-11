@@ -63,7 +63,7 @@ base, and a base with no traceable root at all -- assert the *literal* refusal
 message and stay green in **both** directions, so the suite is not merely
 counting admissions.
 
-JVM `clojure -M:test -n kotoba.compiler.rodata-literal-test`: 7 tests, 53
+JVM `kbb -M:test -n kotoba.compiler.rodata-literal-test`: 7 tests, 53
 assertions. nbb `run-tests.cljk`: 102 tests, 309 assertions.
 
 ## Consequences

@@ -90,7 +90,7 @@ CLASSPATH, where it cannot be absent.
 ## Verification
 
 ```
-clojure -M:test -n kotoba.compiler.guest-grammar-vendor-test
+kbb -M:test -n kotoba.compiler.guest-grammar-vendor-test
   COMPARED 1   SCANNED 114 kernel heads (114 declared)
   2 tests, 8 assertions, 0 failures, exit 0
 ```
