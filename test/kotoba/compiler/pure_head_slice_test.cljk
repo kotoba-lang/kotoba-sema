@@ -341,3 +341,8 @@
   (testing "a composed transducer is refused by name"
     (is (= "into with a transducer admits only (map f) (filter f) (remove f) (keep f) (mapcat f) as the middle argument"
            (:message (refusal "(defn run [n :i64] :i64 (vector-count (into (vector-alloc 0) (comp (map n) (filter n)) [1 2])))"))))))
+
+(deftest a-clojure-core-qualified-head-is-the-bare-head
+  (is (= 3 (answer "(defn run [n :i64] :i64 (clojure.core/+ n 2))" [1])))
+  ;; and a bare head that is refused stays refused under the prefix
+  (is (some? (:code (refusal "(defn run [n :i64] :i64 (clojure.core/load-string n))")))))
