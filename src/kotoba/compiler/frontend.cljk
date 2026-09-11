@@ -6545,16 +6545,82 @@
                 _ (when (and top-level?
                              (not (contains? (get *function-arities* f-form) n-colls)))
                     (reject! "named map callback does not support the source arity" f-form))
+                ;; A stored callback is a closure VALUE: a parameter, a let
+                ;; binding, `(fn-ref f)`, `(invoke ...)`, a call that returns
+                ;; one. What is not a value of that kind is refused HERE, by
+                ;; what it is. Measured 2026-09-11 (adr-2609111900): a keyword
+                ;; `(map :a xs)` fell through to the dispatcher call and was
+                ;; answered `unknown operation: __kotoba_invoke$arity1 is not
+                ;; a builtin` -- a synthesized name the author never wrote,
+                ;; for a shape the language has no value model for (a map
+                ;; source is a vector-i64; its item is an i64, not a record).
+                ;; `(partial f a)` / `(comp f g)` were answered `unbound
+                ;; symbol has no value type: f` -- f IS a function of the
+                ;; module; it is the head that is not a head of this language.
+                _ (when stored?
+                    (let [kind (cond (keyword? f-form) "keyword"
+                                     (string? f-form) "string"
+                                     (kotoba-integer? f-form) "integer"
+                                     (boolean? f-form) "boolean"
+                                     (nil? f-form) "nil"
+                                     (vector? f-form) "vector"
+                                     (map? f-form) "map"
+                                     (set? f-form) "set")]
+                      (when kind
+                        (reject! (str "map callback must be a named function, an inline fn, "
+                                      "or a closure value; got a " kind
+                                      " literal -- a map source is a vector-i64 and its "
+                                      "item is an i64, so no keyword or literal can map it")
+                                 f-form)))
+                    (when (and (seq? f-form)
+                               (contains? '#{partial comp juxt complement} (first f-form))
+                               (not (contains? *function-arities* (first f-form)))
+                               (not (contains? *lexical-bindings* (first f-form))))
+                      (reject! (str "map callback (" (first f-form) " ...) is not admitted: "
+                                    (first f-form) " is not a head of this language; "
+                                    "write the callback as (fn [x] ...)")
+                               f-form)))
                 inline-parts
                 (when inline?
                   (let [[_ params & body] f-form]
-                    (when-not (and (vector? params)
-                                   (= n-colls (count params))
-                                   (every? symbol? params)
-                                   (= (count params) (count (distinct params)))
-                                   (= 1 (count body)))
-                      (reject! (str n-colls
-                                    "-source map fn requires matching unique parameters and one expression")
+                    ;; Each refusal names ITS cause. Until 2026-09-11 the five
+                    ;; conditions below shared one sentence (`N-source map fn
+                    ;; requires matching unique parameters and one
+                    ;; expression`), and the 7 compiler sources it answered
+                    ;; were all ONE site -- `(map (fn [[k v]] ...) x)` in
+                    ;; kotoba.artifact.core/edn-safe, reached through
+                    ;; `into`'s transducer rewrite -- which the sentence did
+                    ;; not say. `vector?` is checked before anything counts
+                    ;; PARAMS: a multi-arity `(fn ([x] ...))` puts a list
+                    ;; there. The one-expression rule is the profile's
+                    ;; (`lang/guest-grammar.edn :implicit-body-forms :refuses`
+                    ;; holds `fn` and `defn`; explicit `do` is the spelling),
+                    ;; so the sentence mirrors defn's. Destructuring is refused
+                    ;; by what it would need: `[k v]` reads positions off the
+                    ;; item, and the item of a vector-i64 source is an i64.
+                    (when-not (vector? params)
+                      (reject! (str "map fn requires a parameter vector; a multi-arity "
+                                    "(fn ([x] ...) ...) is not a map callback")
+                               f-form))
+                    (when-not (= n-colls (count params))
+                      (reject! (str n-colls "-source map fn requires " n-colls
+                                    " parameter" (when-not (= 1 n-colls) "s")
+                                    "; got " (count params))
+                               f-form))
+                    (when-not (every? symbol? params)
+                      (reject! (str "map fn parameter destructures ("
+                                    (pr-str (first (remove symbol? params)))
+                                    "): the item of a vector-i64 source is an i64 and "
+                                    "has no positions to bind; take a symbol and index "
+                                    "a typed value inside the body")
+                               f-form))
+                    (when-not (= (count params) (count (distinct params)))
+                      (reject! "map fn parameters must be unique" f-form))
+                    (when (empty? body)
+                      (reject! "map fn requires a body expression" f-form))
+                    (when-not (= 1 (count body))
+                      (reject! (str "map fn must contain one result expression; "
+                                    "explicit (do ...) is the spelling")
                                f-form))
                     [params (first body)]))
                 _ (when (and stored? (> n-colls 4))
@@ -6588,7 +6654,16 @@
                                     *abort-lexical-context* :fn]
                             (desugar-expr body))))
                   top-level? (apply list f-form items)
-                  :else (apply list (invoke-dispatcher-name n-colls)
+                  ;; REQUEST the dispatcher, as `(g x)` and `(invoke g x)`
+                  ;; do. Measured 2026-09-11 (adr-2609111900): `(defn f [g
+                  ;; xs] (map g xs))` in a module with no lambda of arity 1
+                  ;; was answered `unknown operation: __kotoba_invoke$arity1
+                  ;; is not a builtin` -- `lambda-dispatchers` builds only
+                  ;; the arities a local lambda or a request names, and this
+                  ;; site named without requesting. `(defn f [g x] (g x))`
+                  ;; in the same module compiled. A closure that arrives from
+                  ;; a caller is the same value either way.
+                  :else (apply list (request-invoke-dispatcher :i64 n-colls)
                                callback items))
                 exhausted (apply list 'or
                                  (map-indexed
