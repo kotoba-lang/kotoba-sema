@@ -322,3 +322,9 @@
   (is (= (list 'kotoba.reader/bigdec "1.5") (first (r/read-forms "1.5M"))))
   (is (= [one] (first (r/read-forms "[1 #?(:clj 0N)]")))))
 
+
+(deftest reader-evaluation-is-refused-as-a-dispatch-not-as-two-characters
+  (is (= "reader evaluation is forbidden" (refusal "(def x #=(+ 1 2))")))
+  ;; the two characters inside a string or a regex literal are just text
+  (is (= (list 'def 'x "#=") (first (r/read-forms "(def x \"#=\")"))))
+  (is (= (list 'kotoba.reader/regex "#=") (first (r/read-forms "#\"#=\"")))))

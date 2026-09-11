@@ -691,6 +691,11 @@
                        (let [[st form skipped?] (read-form st)]
                          (when skipped? (reject! "`#js` must precede a form" {}))
                          [st (located (list 'kotoba.reader/js form) start st) false]))
+          ;; `#=` -- reader evaluation. Refused HERE, as a dispatch, so the
+          ;; refusal is about the macro and not about two characters that
+          ;; happen to sit inside a string or a comment (the frontend used to
+          ;; grep the whole source for them).
+          (= ch2 \=) (reject! "reader evaluation is forbidden" {:next ch2})
           :else (reject! "unsupported reader dispatch" {:next ch2})))
 
       ;; `\c` character literal. Measured 2026-09-11 (adr-2609111900): the
