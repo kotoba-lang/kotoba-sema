@@ -17,6 +17,11 @@
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
+            ;; a closure PARAMETER carries any closure RESULT type: document /
+            ;; set / record / string through a `[:fn ...]` parameter RUN;
+            ;; callable and linear parameters refused by name; the all-i64
+            ;; contract program keeps its digests
+            [kotoba.compiler.typed-closure-parameters-test]
             ;; a defn / defn- / fn body of several forms is one `do`, as let's
             ;; is; the implicit and explicit spellings are one analysis; empty
             ;; bodies, loop, try and protocol methods keep their refusals
@@ -178,6 +183,7 @@
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.variadic-defn-test
+             'kotoba.compiler.typed-closure-parameters-test
              'kotoba.compiler.defn-body-sequences-test
              'kotoba.compiler.some-name-collision-test
              'kotoba.compiler.case-uniqueness-test

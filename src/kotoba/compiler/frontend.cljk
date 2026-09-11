@@ -1406,9 +1406,28 @@
          (reject! "callable type requires one to five unique [parameter-types result-type] clauses"
                   type :kotoba.error/callable-type))
        (doseq [[parameter-types result-type] clauses]
-         (when-not (every? #{:i64} parameter-types)
-           (reject! "callable parameter types currently require the i64 closure ABI"
-                    type :kotoba.error/callable-parameter-type))
+         ;; A parameter type is admitted exactly when it is admitted as a
+         ;; closure RESULT type -- one predicate, `closure-result-type?`, so
+         ;; the two sides cannot drift (2026-09-12, adr-2609111900;
+         ;; `lang/guest-grammar.edn` `:callable-type` `:parameter-types`).
+         ;; Until then the sentence here was `callable parameter types
+         ;; currently require the i64 closure ABI`, and that was
+         ;; IMPLEMENTATION STATE: a dispatcher is an ordinary KIR function
+         ;; with a typed signature, and the helper a lambda lowers to is
+         ;; another, so an argument of any admitted value type crosses a
+         ;; closure call exactly as it crosses a direct call. What the rule
+         ;; keeps out is what the result side keeps out: a callable (no
+         ;; closure-typed word exists) and a linear resource (no dispatcher
+         ;; may duplicate or drop it), by the same sentence shape.
+         (doseq [parameter-type parameter-types]
+           (when (or (callable-type? parameter-type)
+                     (linear-resource-type? parameter-type))
+             (reject! "callable parameter types cannot be callable or linear resources"
+                      type :kotoba.error/callable-parameter-type))
+           (validate-value-type! parameter-type (inc depth) nodes)
+           (when-not (closure-result-type? parameter-type {})
+             (reject! "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
+                      type :kotoba.error/callable-parameter-type)))
          (when (or (callable-type? result-type) (linear-resource-type? result-type))
            (reject! "callable results cannot be callable or linear resources"
                     type :kotoba.error/callable-result-type))
@@ -2504,7 +2523,7 @@
            ;; Populated from the once-validated merged graph in analyze.
            :schema-identities nil})))))
 
-(declare desugar-expr desugar-result-expr desugar-bool-expr desugar-do desugar-list thread-form form-free-symbols
+(declare desugar-expr desugar-result-expr desugar-expected-value desugar-bool-expr desugar-do desugar-list thread-form form-free-symbols
          nth-pair-second replace-recur valid-name?)
 
 ;; Closed namespace schema table used by descriptor-aware source elaboration.
@@ -2681,8 +2700,17 @@
   [form]
   (distinct (map second (abort-callee-sites form))))
 (def ^:dynamic *lexical-bindings* #{})
+(declare ^:dynamic *local-types* ^:dynamic *local-option-types*)
 (def ^:dynamic *lexical-callable-contracts* {})
 (def ^:dynamic *function-callable-result-contracts* {})
+;; `[source-name arity]` -> `{parameter-index callable-contract}` for every
+;; defn clause whose parameter vector names a `[:fn ...]` type. Read at an
+;; ordinary call so a `fn` written in that argument position is lifted under
+;; the contract, the way a `fn` in a contract-typed result position already
+;; is (2026-09-12): its parameters take the clause's types and it joins the
+;; dispatcher family of that signature. A lambda written anywhere else keeps
+;; i64 parameters.
+(def ^:dynamic *function-callable-param-contracts* {})
 (def ^:dynamic *expected-callable-contract* nil)
 (def ^:dynamic *contextual-closure-result-type* nil)
 (def ^:dynamic *required-closure-dispatchers* nil)
@@ -2782,21 +2810,53 @@
     (name result-type)
     (str "t_" (artifact/sha256 result-type))))
 
+(defn- i64-parameter-types?
+  "True when PARAMETER-TYPES names no type but `:i64` -- the closure ABI as it
+  was before typed parameters (2026-09-12), and the shape whose dispatcher
+  keeps its old name so an i64 program keeps its CID. `nil` (no contract at
+  the call) is this shape."
+  [parameter-types]
+  (every? #(= :i64 %) parameter-types))
+
+(defn- dispatcher-parameter-label
+  "The name segment a typed-parameter dispatcher family carries, or nil for
+  the all-`:i64` family. A digest, like a structured result's label: the
+  family is one function per distinct clause signature, and the signature is
+  what the name must be a function of."
+  [parameter-types]
+  (when-not (i64-parameter-types? parameter-types)
+    (str "p_" (artifact/sha256 (vec parameter-types)))))
+
+(defn- dispatcher-key
+  "The key a dispatcher family is requested and built under. `[result arity]`
+  for the all-`:i64` parameter shape -- every key that existed before typed
+  parameters is unchanged -- and `[result arity parameter-types]` otherwise."
+  [result-type arity parameter-types]
+  (if (i64-parameter-types? parameter-types)
+    [result-type arity]
+    [result-type arity (vec parameter-types)]))
+
 (defn- invoke-dispatcher-name
   ([arity] (invoke-dispatcher-name :i64 arity))
-  ([result-type arity]
+  ([result-type arity] (invoke-dispatcher-name result-type arity nil))
+  ([result-type arity parameter-types]
    (when-not (closure-result-type? result-type {})
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
    (symbol (str "__kotoba_invoke"
+                (when-let [label (dispatcher-parameter-label parameter-types)]
+                  (str "_" label))
                 (when-not (= :i64 result-type)
                   (str "_" (dispatcher-result-label result-type)))
                 "$arity" arity))))
 
-(defn- request-invoke-dispatcher [result-type arity]
-  (when *required-closure-dispatchers*
-    (vswap! *required-closure-dispatchers* conj [result-type arity]))
-  (invoke-dispatcher-name result-type arity))
+(defn- request-invoke-dispatcher
+  ([result-type arity] (request-invoke-dispatcher result-type arity nil))
+  ([result-type arity parameter-types]
+   (when *required-closure-dispatchers*
+     (vswap! *required-closure-dispatchers* conj
+             (dispatcher-key result-type arity parameter-types)))
+   (invoke-dispatcher-name result-type arity parameter-types)))
 
 (def ^:private non-shadowable-special-heads '#{let if do fn loop recur})
 
@@ -2827,16 +2887,23 @@
           [parameter-types contract-result]
           (when contract (callable-clause-for-arity contract (count args) form))
           result-type (or contract-result result-type)]
-      (when parameter-types
-        (doseq [[argument wanted] (map vector args parameter-types)]
-          ;; The admitted callable ABI is i64-only today. This explicit check
-          ;; keeps the contract useful if more physical argument types are
-          ;; introduced later without silently widening old descriptors.
-          (when-not (= :i64 wanted)
-            (reject! "callable argument type is outside the admitted closure ABI"
-                     argument :kotoba.error/callable-argument-type))))
-      (apply list (request-invoke-dispatcher result-type (count args)) closure
-             (map desugar-expr args)))))
+      ;; A contract's parameter types select the dispatcher family (one per
+      ;; distinct clause signature) and give each argument its expected type
+      ;; context, exactly as a typed result gives the tail expression one.
+      ;; An `:i64` parameter is desugared as it always was, so a program
+      ;; whose contracts are all-i64 lowers to the same HIR. The argument's
+      ;; TYPE is checked where every call's is -- against the dispatcher's
+      ;; signature by the ordinary checker (`expression type mismatch:
+      ;; expected document, got i64`) -- not by a second table here.
+      (apply list (request-invoke-dispatcher result-type (count args) parameter-types)
+             closure
+             (if parameter-types
+               (map (fn [argument wanted]
+                      (if (= :i64 wanted)
+                        (desugar-expr argument)
+                        (desugar-expected-value wanted argument)))
+                    args parameter-types)
+               (map desugar-expr args))))))
 
 (defn- desugar-result-expr
   "Desugar an expression in a context with a known closure result family.
@@ -3097,6 +3164,18 @@
           (into {} (map (fn [[parameter-types result-type]]
                           [(count parameter-types) result-type]))
                 (callable-clauses expected-contract)))
+        ;; The clause's PARAMETER types, by arity, when the contract names
+        ;; any that is not `:i64` (2026-09-12). They type the lambda's own
+        ;; parameters -- the helper's signature carries them, the body sees
+        ;; them as locals, and the lambda joins the dispatcher family of
+        ;; exactly that clause signature. An all-`:i64` clause leaves this
+        ;; nil and the lambda lowers as it did before typed parameters.
+        contract-params
+        (when expected-contract
+          (into {} (keep (fn [[parameter-types _]]
+                           (when-not (i64-parameter-types? parameter-types)
+                             [(count parameter-types) (vec parameter-types)])))
+                (callable-clauses expected-contract)))
         _ (when (and expected-contract
                      (not= (set arities) (set (keys contract-results))))
             (reject! "fn arities do not match the declared callable result contract"
@@ -3118,11 +3197,31 @@
     (when (and (vector? params-or-clause) (empty? tail))
       (reject! "single-arity fn value requires exactly one body" form))
     (let [lowered (mapv (fn [[params body]]
-                          (let [clause-result (get contract-results (count params))]
+                          (let [clause-result (get contract-results (count params))
+                                clause-params (get contract-params (count params))]
                           {:params params :contract-result clause-result
+                           :contract-params clause-params
                            :body (binding [*lexical-bindings*
                                            (into *lexical-bindings* params)
-                                           *abort-lexical-context* :fn]
+                                           *abort-lexical-context* :fn
+                                           ;; typed parameters are locals of
+                                           ;; their type inside the body (a
+                                           ;; record-field projection reads
+                                           ;; them); the i64 clause binds
+                                           ;; nothing new
+                                           *local-types*
+                                           (if clause-params
+                                             (merge *local-types*
+                                                    (zipmap params clause-params))
+                                             *local-types*)
+                                           *local-option-types*
+                                           (if clause-params
+                                             (into (or *local-option-types* {})
+                                                   (keep (fn [[p t]]
+                                                           (when (generic-option-type? t)
+                                                             [p t])))
+                                                   (map vector params clause-params))
+                                             *local-option-types*)]
                                    (if-let [result (or clause-result expected-result)]
                                      (desugar-result-expr result body)
                                      (desugar-expr body)))}))
@@ -3138,15 +3237,23 @@
           (reject! "fn captures plus parameters exceed ABI-supported arity" form)))
       (when *pending-lambdas*
         (swap! *pending-lambdas* into
-               (mapv (fn [{:keys [params body contract-result]}]
+               (mapv (fn [{:keys [params body contract-result contract-params]}]
                        (let [arity (count params)
                              helper-name (symbol (str "__kotoba_lambda_" id "_arity" arity))]
                          (cond-> {:id id :arity arity :captures captures
-                          :helper {:name helper-name :params (into captures params)
-                                   :result :i64 :result-inferred? true
-                                   :effects #{} :body body
-                                   :lazy-thunk? *lifting-lazy-thunk?*}}
-                           contract-result (assoc :contract-result contract-result))))
+                          :helper (cond-> {:name helper-name :params (into captures params)
+                                           :result :i64 :result-inferred? true
+                                           :effects #{} :body body
+                                           :lazy-thunk? *lifting-lazy-thunk?*}
+                                    ;; captures stay the i64 pair-chain words
+                                    ;; they are read out of; only the clause's
+                                    ;; own parameters carry the contract's types
+                                    contract-params
+                                    (assoc :param-types
+                                           (into (vec (repeat (count captures) :i64))
+                                                 contract-params)))}
+                           contract-result (assoc :contract-result contract-result)
+                           contract-params (assoc :parameter-types contract-params))))
                      lowered)))
       ;; Closure captures are always the internal i64 pair-chain ABI, even
       ;; when the lambda's result is a canonical `[:list T]` value.
@@ -3156,17 +3263,25 @@
 
 (defn- lambda-dispatchers [lambda-infos required-dispatchers]
   (let [requested (into #{}
-                        (mapcat (fn [{:keys [arity helper]}]
-                                  [[:i64 arity] [(:result helper) arity]]))
+                        (mapcat (fn [{:keys [arity helper parameter-types]}]
+                                  ;; A lambda with contract-typed parameters
+                                  ;; belongs to the family of exactly its
+                                  ;; clause signature and to no i64 family:
+                                  ;; an i64 dispatcher calling it would hand
+                                  ;; an i64 word to a typed parameter.
+                                  (if parameter-types
+                                    [[(:result helper) arity parameter-types]]
+                                    [[:i64 arity] [(:result helper) arity]])))
                         lambda-infos)
         requested (into requested required-dispatchers)]
     (mapv
-     (fn [[result-type arity]]
+     (fn [[result-type arity parameter-types]]
        (let [closure (symbol (str "__kotoba_closure_"
                                   (dispatcher-result-label result-type) "_" arity))
              args (mapv #(symbol (str "__kotoba_invoke_arg_" %)) (range arity))
              candidates (filter #(and (= arity (:arity %))
-                                      (= result-type (get-in % [:helper :result])))
+                                      (= result-type (get-in % [:helper :result]))
+                                      (= parameter-types (:parameter-types %)))
                                 lambda-infos)
              ;; A closure id belonging to a different result family is a
              ;; type error at the dynamic boundary.  Produce a result-typed
@@ -3193,9 +3308,15 @@
                              (apply list (:name helper) (concat capture-values args))
                              fallback)))
                    fallback (reverse candidates))]
-         {:name (invoke-dispatcher-name result-type arity) :params (into [closure] args)
-          :result result-type :effects #{} :body body}))
-     (sort-by (juxt (comp dispatcher-result-label first) second) requested))))
+         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types)
+                  :params (into [closure] args)
+                  :result result-type :effects #{} :body body}
+           ;; the typed family says its argument types; the i64 family is
+           ;; defaulted to all-i64 downstream exactly as before
+           parameter-types (assoc :param-types (into [:i64] parameter-types)))))
+     (sort-by (juxt (comp dispatcher-result-label first) second
+                    #(or (dispatcher-parameter-label (nth % 2 nil)) ""))
+              requested))))
 
 (def ^:private closure-apply-helper
   {:name '__kotoba_closure_apply
@@ -5332,7 +5453,7 @@
 (defn- symbol-literal-form [sym]
   (list 'symbol (str sym)))
 
-(declare desugar-expr*)
+(declare desugar-expr* desugar-ordinary-call)
 
 (defn- desugar-quoted-datum
   "`(quote datum)` as an expression. Symbol data lowers to the same forms
@@ -7123,7 +7244,37 @@
               (reject! (str "named operation " (pr-str op)
                             " is not a registered capability")
                        form)))
-            (apply list op (map desugar-expr args)))))))))
+            (desugar-ordinary-call op args))))))))
+
+(defn- desugar-ordinary-call
+  "`(op args...)` for a head that is neither sugar nor a capability: the
+  arguments desugared in order, each `fn` (or `fn-ref`) argument written in
+  a contract-typed parameter position of a module function lifted under
+  that contract (`*function-callable-param-contracts*`). Every other
+  argument, and every argument of a call with no such contract, desugars
+  exactly as before."
+  [op args]
+  (let [contracts (get *function-callable-param-contracts* [op (count args)])
+        ;; Only a contract that names a non-i64 parameter type reaches the
+        ;; argument: an all-i64 contract lowers its `fn` argument exactly as
+        ;; it did before typed parameters (result inferred from the body, a
+        ;; family mismatch trapping closed at the dispatcher), so an i64
+        ;; program keeps its HIR and its CIDs.
+        contracts (into {}
+                        (filter (fn [[_ contract]]
+                                  (some (fn [[parameter-types _]]
+                                          (not (i64-parameter-types? parameter-types)))
+                                        (callable-clauses contract))))
+                        contracts)]
+    (apply list op
+           (if (seq contracts)
+             (map-indexed (fn [index argument]
+                            (if-let [contract (get contracts index)]
+                              (binding [*expected-callable-contract* contract]
+                                (desugar-expr argument))
+                              (desugar-expr argument)))
+                          args)
+             (map desugar-expr args)))))
 
 (defn- desugar-expr [form]
   ;; The one chokepoint every desugared node passes through, and therefore the
@@ -15945,6 +16096,29 @@
                                             (count raw-params)))]
                           [[source-name arity] callable-result-contract]))))
               def-parts)
+        ;; The parameter side of the same table (typed closure parameters,
+        ;; 2026-09-12): which argument positions of which clause carry a
+        ;; `[:fn ...]` contract. Read by `desugar-ordinary-call`.
+        function-callable-param-contracts
+        (into {}
+              (keep (fn [{:keys [source-name raw-params]}]
+                      (when (vector? raw-params)
+                        (let [;; a parameter vector this refuses is refused
+                              ;; again, with the same sentence, where the
+                              ;; clause is parsed below; nothing is reported
+                              ;; from here so the first refusal a program
+                              ;; sees is the one it saw before this table
+                              parts (try (typed-param-parts raw-params constants)
+                                         (catch #?(:clj Exception :cljs :default) _ nil))
+                              contracts (into {}
+                                              (keep-indexed
+                                               (fn [index part]
+                                                 (when-let [contract (:callable-contract part)]
+                                                   [index contract])))
+                                              parts)]
+                          (when (seq contracts)
+                            [[source-name (count parts)] contracts])))))
+              def-parts)
         ;; ADR-2607150000: mapcat, not mapv -- a defn using `loop` may
         ;; expand into itself PLUS one or more synthesized loop-helper
         ;; functions (collected via *pending-loop-helpers*, bound fresh
@@ -15981,6 +16155,8 @@
                           *function-arities* function-arities
                           *function-callable-result-contracts*
                           function-callable-result-contracts
+                          *function-callable-param-contracts*
+                          function-callable-param-contracts
                           *synthetic-counter* (volatile! 0)
                           *used-capability-keywords* used-capabilities
                           *local-state-used* local-state-used]
@@ -16112,12 +16288,14 @@
               ;; lambda can infer the structured value returned by that nested
               ;; call instead of falling back to its provisional :i64.
               inference-dispatchers
-              (mapv (fn [[result-type arity]]
-                      {:name (invoke-dispatcher-name result-type arity)
+              (mapv (fn [[result-type arity parameter-types]]
+                      {:name (invoke-dispatcher-name result-type arity parameter-types)
                        :params (vec (cons '__kotoba_inference_closure
                                           (map #(symbol (str "__kotoba_inference_arg_" %))
                                                (range arity))))
-                       :param-types (vec (repeat (inc arity) :i64))
+                       :param-types (if parameter-types
+                                      (into [:i64] parameter-types)
+                                      (vec (repeat (inc arity) :i64)))
                        :result result-type
                        :result-inferred? false
                        ;; This body is never emitted or checked; only the
