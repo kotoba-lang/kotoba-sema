@@ -126,8 +126,14 @@
   row required, executed once on the reference interpreter at
   `def-fold-fuel`, the result spelled back by `spell-folded-value`; the
   stateful heads and the rest refused by name). No head admitted or
-  withdrawn; the previous digest was `48fb5241`."
-  "8450745f43ebf9ba3b56b5d63341205ed77a2671a388d79c6246031ce719e9d1")
+  withdrawn; the previous digest was `48fb5241`.
+
+  Advanced 2026-09-11 to `c308cc04`, the same wave's second step: a quoted
+  SYMBOL at a def is named as quoted data (it was answered as an alias
+  lookup) and a string past the portable byte bound is refused by the bound
+  (both in `def-parts`, THIS commit). No head admitted or withdrawn; the
+  previous digest was `8450745f`."
+  "c308cc04f7cb7568d214917288f6f06a61539cb6ad6a68056dc6036ade8f0448")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
