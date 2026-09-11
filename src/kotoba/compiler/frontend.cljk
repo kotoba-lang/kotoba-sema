@@ -1925,7 +1925,13 @@
              form :kotoba.error/host-regex-literal))
   (when (= op 'kotoba.reader/js)
     (reject! "#js literal is host interop; keep it inside a :cljs reader-conditional branch"
-             form :kotoba.error/host-js-literal)))
+             form :kotoba.error/host-js-literal))
+  (when (contains? #{'kotoba.reader/set 'kotoba.reader/bigint 'kotoba.reader/bigdec} op)
+    (reject! (str "host literal " (name op) " is not admitted (Kotoba admits keyword-set data and i64 / f64 literals); keep it inside a :clj / :cljs reader-conditional branch")
+             form :kotoba.error/host-literal))
+  (when (= op 'kotoba.reader/char)
+    (reject! "character literal \\c is host data; Kotoba text is UTF-8 bytes -- spell the byte as an integer (byte-at / string-byte-at) or use a one-character string"
+             form :kotoba.error/host-char-literal)))
 
 (defn compiler-rejection?
   "True for an error this frontend raised deliberately.

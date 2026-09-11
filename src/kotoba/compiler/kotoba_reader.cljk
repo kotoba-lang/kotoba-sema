@@ -334,6 +334,13 @@
               ;; malformed literal, not a variable name. Saying so here is the
               ;; difference between `unsupported numeric literal: 0377` and
               ;; `unbound or dynamic symbol is forbidden: 0377`.
+              ;; `0N` / `1.5M` -- host arbitrary-precision literals. Read as
+              ;; tagged forms (refused by name in admission if selected), so
+              ;; a :clj branch that spells one no longer refuses the file.
+              (when-let [m (re-matches #"([+-]?[0-9]+)N" token)]
+                (list 'kotoba.reader/bigint (second m)))
+              (when-let [m (re-matches #"([+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)M" token)]
+                (list 'kotoba.reader/bigdec (second m)))
               (when (numeric-looking? token)
                 (reject! (str "unsupported numeric literal: " token
                               " -- decimal, 0x hex and decimal f64 are the "
@@ -484,9 +491,14 @@
      :cljs (try
              (set forms)
              (catch :default _
-               (reject! (str "set literal of more than eight exact-integer "
-                             "elements cannot be read on this host")
-                        {:count (count forms)})))))
+               ;; A set of more than eight exact integers is HOST data in any
+               ;; case (Kotoba admits keyword-set data only), so it reads as
+               ;; the tagged form `(kotoba.reader/set [..])` and is refused by
+               ;; name in admission if a selected branch carries it -- the
+               ;; same treatment as #"..." / #js / \c. Measured 2026-09-11:
+               ;; two of the compiler's own sources (interrupt_abi, an ABI
+               ;; table) were refused whole for one such literal.
+               (list 'kotoba.reader/set (vec forms))))))
 
 (defn- read-form
   "Returns `[state form skip?]`. `skip?` is true for a `#?()` clause with no
@@ -679,6 +691,33 @@
                          (when skipped? (reject! "`#js` must precede a form" {}))
                          [st (located (list 'kotoba.reader/js form) start st) false]))
           :else (reject! "unsupported reader dispatch" {:next ch2})))
+
+      ;; `\c` character literal. Measured 2026-09-11 (adr-2609111900): the
+      ;; backslash was not a delimiter, so `\\` and `\space` read SILENTLY as
+      ;; the symbols `\\` / `\space`, and `\"` / `\(` -- the compiler'"'"'s own
+      ;; lexers are full of them -- started a string or a list and refused the
+      ;; file with an unrelated message. A char is HOST data (Kotoba text is
+      ;; UTF-8 bytes; the guest spells a byte as an integer), so it reads as
+      ;; the tagged form `(kotoba.reader/char "c")` and is refused by name in
+      ;; admission if a selected branch still carries it.
+      (= ch \\)
+      (let [st (advance st)
+            c (peek-ch st)
+            _ (when (nil? c) (reject! "unexpected end of input after `\\`" {}))
+            [st text] (if (or (delimiter-char? c) (whitespace-char? c) (= c \\) (= c \") (= c \;))
+                        [(advance st) (str c)]
+                        (read-token st))
+            value (case text
+                    "newline" "\n" "space" " " "tab" "\t" "formfeed" "\f"
+                    "backspace" "\b" "return" "\r"
+                    (cond
+                      (= 1 (count text)) text
+                      (re-matches #"u[0-9a-fA-F]{4}" text)
+                      (str (char #?(:clj (Integer/parseInt (subs text 1) 16) :cljs (js/parseInt (subs text 1) 16))))
+                      (re-matches #"o[0-7]{1,3}" text)
+                      (str (char #?(:clj (Integer/parseInt (subs text 1) 8) :cljs (js/parseInt (subs text 1) 8))))
+                      :else (reject! "unsupported character literal" {:literal (str "\\" text)})))]
+        [st (located (list 'kotoba.reader/char value) start st) false])
 
       (= ch \)) (reject! "unmatched `)`" {})
       (= ch \]) (reject! "unmatched `]`" {})
