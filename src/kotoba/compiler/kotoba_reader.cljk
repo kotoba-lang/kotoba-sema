@@ -382,6 +382,19 @@
           (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
           :else (recur (advance st) (conj acc ch)))))))
 
+(defn- read-regex-body
+  "Body of a `#\"...\"` literal, raw: Clojure's regex reader keeps every
+  backslash for the pattern engine and treats only `\\\"` as an escape."
+  [st]
+  (loop [st st acc []]
+    (let [ch (peek-ch st)]
+      (cond
+        (nil? ch) (reject! "unterminated regex literal" {})
+        (= ch \") [(advance st) (apply str acc)]
+        (and (= ch \\) (= (peek-ch2 st) \")) (recur (advance (advance st)) (conj acc \"))
+        (and (= ch \\) (some? (peek-ch2 st))) (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
+        :else (recur (advance st) (conj acc ch))))))
+
 (defn- splice?
   "The marker `#?@` leaves for the enclosing `read-delimited`: a map, because
   the reader's own values are the only currency read-form returns, and no
@@ -522,6 +535,19 @@
       (= ch \@) (let [[st inner _] (read-form (advance st))]
                   [st (located (list 'deref inner) start st) false])
 
+      ;; `'form` -> `(quote form)`. Measured 2026-09-11 (adr-2609111900): the
+      ;; quote character was not a delimiter, so `'#{a b}` fell through to
+      ;; `read-symbol-or-number`, which took `'` as a one-character symbol
+      ;; and left `#{a b}` to be read as a MAP -- "map literal must contain
+      ;; an even number of forms" on 32 of the compiler's own 178 sources,
+      ;; every one of them a quoted set of symbols. Worse, `'sym` read
+      ;; silently as the symbol named `'sym`. Whether `quote` is admitted is
+      ;; the frontend's decision; the reader's job is to hand over what was
+      ;; written.
+      (= ch \') (let [[st inner skipped?] (read-form (advance st))]
+                  (when skipped? (reject! "quote must precede a form" {}))
+                  [st (located (list 'quote inner) start st) false])
+
       ;; `^meta form`. Same defect shape as `@` above, measured 2026-09-11
       ;; at 8b288047: `^` is not a delimiter, so `^:private` fell through to
       ;; `read-symbol-or-number` and became the SYMBOL `^:private`, shifting
@@ -632,6 +658,26 @@
                                     "-Inf" (f64-form #?(:clj Double/NEGATIVE_INFINITY :cljs js/Number.NEGATIVE_INFINITY))
                                     (reject! "unsupported symbolic f64 literal" {:token token}))]
                         [st (located value start st) false])
+          ;; `#"..."` -- a HOST regex literal. It is READ, not admitted: the
+          ;; form `(kotoba.reader/regex "pattern")` survives so that a
+          ;; `:clj` / `:cljs` branch of a reader conditional can be read
+          ;; and discarded, and the frontend refuses it by name if it
+          ;; reaches admission (regex in guest source is a string pattern
+          ;; handed to kotoba.lang.bounded-regex). Measured 2026-09-11: 35 of
+          ;; the compiler'"'"'s own 178 sources were refused at the reader for
+          ;; this literal alone, most of them inside branches that would
+          ;; never have been selected. The pattern is taken raw, as Clojure
+          ;; does: only `\"` is an escape inside a regex literal.
+          (= ch2 \") (let [[st pat] (read-regex-body (advance (advance st)))]
+                       [st (located (list 'kotoba.reader/regex pat) start st) false])
+          ;; `#js {...}` / `#js [...]` -- host interop literal, same treatment:
+          ;; read as `(kotoba.reader/js <form>)`, refused by name in admission.
+          (= ch2 \j) (let [[st token] (read-token (advance st))]
+                       (when-not (= token "js")
+                         (reject! "unsupported reader dispatch" {:next ch2 :token token}))
+                       (let [[st form skipped?] (read-form st)]
+                         (when skipped? (reject! "`#js` must precede a form" {}))
+                         [st (located (list 'kotoba.reader/js form) start st) false]))
           :else (reject! "unsupported reader dispatch" {:next ch2})))
 
       (= ch \)) (reject! "unmatched `)`" {})

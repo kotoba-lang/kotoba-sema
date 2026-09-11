@@ -1910,6 +1910,23 @@
                        operation (assoc :operation operation)
                        (map? data) (merge data)))))))
 
+
+(defn- refuse-reader-tagged-host-literal!
+  "Reader-tagged host literals. `kotoba.compiler.kotoba-reader` reads `#\"...\"`
+  as `(kotoba.reader/regex \"pat\")` and `#js X` as `(kotoba.reader/js X)` so
+  that a discarded :clj / :cljs reader-conditional branch can contain them
+  (measured 2026-09-11: 35 of the compiler's own 178 sources were refused at
+  the reader for a regex literal, most inside branches never selected). If
+  one is SELECTED and reaches admission it is refused here by NAME, with the
+  admitted alternative in the message."
+  [form op]
+  (when (= op 'kotoba.reader/regex)
+    (reject! "host regex literal #\"...\" is not admitted; pass the pattern as a string to kotoba.lang.bounded-regex"
+             form :kotoba.error/host-regex-literal))
+  (when (= op 'kotoba.reader/js)
+    (reject! "#js literal is host interop; keep it inside a :cljs reader-conditional branch"
+             form :kotoba.error/host-js-literal)))
+
 (defn compiler-rejection?
   "True for an error this frontend raised deliberately.
 
@@ -6430,9 +6447,13 @@
         (if-let [kw (capability-keyword-for-symbol op)]
           (elaborate-named-operation form op kw args)
           (if (and (symbol? op) (namespace op))
-            (reject! (str "named operation " (pr-str op)
-                          " is not a registered capability")
-                     form)
+            (do
+              ;; Reader-tagged host literals arrive here first (desugar runs
+              ;; before validation); a SELECTED one is refused by name.
+              (refuse-reader-tagged-host-literal! form op)
+              (reject! (str "named operation " (pr-str op)
+                            " is not a registered capability")
+                       form))
             (apply list op (map desugar-expr args)))))))))
 
 (defn- desugar-expr [form]
@@ -7136,6 +7157,7 @@
                                         form locals functions))
     (seq? form)
     (let [[op & args] form]
+      (refuse-reader-tagged-host-literal! form op)
       (when-not (simple-symbol? op) (reject! "computed or namespaced calls are forbidden" form))
       (when (or (contains? forbidden-heads op) (re-find #"[.]" (name op)))
         (reject! "dynamic loading, interop, mutation, and metaprogramming are forbidden"

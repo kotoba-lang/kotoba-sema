@@ -297,3 +297,20 @@
 (deftest app-with-no-operator-is-refused-where-the-operator-is-missing
   (is (= :kotoba.error/pure-app-operator
          (:code (refusal "(defn run [n :i64] :i64 (app))")))))
+
+;; Reader-tagged host literals (2026-09-11, adr-2609111900 iteration 2). The
+;; reader reads `#"..."` and `#js` so a discarded :clj / :cljs branch can hold
+;; them; if one is SELECTED and reaches admission it is refused by name.
+(deftest host-regex-literal-is-refused-by-name-when-selected
+  (is (= :kotoba.error/host-regex-literal
+         (:code (refusal "(defn run [n :i64] :i64 (if (kotoba.reader/regex \"x\") n 0))"))))
+  (is (= :kotoba.error/host-regex-literal
+         (:code (refusal "(defn run [n :i64] :i64 (if #?(:kotoba #\"x\") n 0))")))))
+
+(deftest host-js-literal-is-refused-by-name-when-selected
+  (is (= :kotoba.error/host-js-literal
+         (:code (refusal "(defn run [n :i64] :i64 (if #?(:kotoba #js {:a 1}) n 0))")))))
+
+(deftest host-literals-in-a-discarded-branch-do-not-refuse
+  (is (= 2 (answer (str "(defn run [n :i64] :i64 #?(:clj (re-find #\"x\" n) :cljs #js [n] :kotoba (+ n 1)))")
+                   [1]))))
