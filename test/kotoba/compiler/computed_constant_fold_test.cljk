@@ -204,6 +204,18 @@
     (is (= :kotoba.error/subset-reject code))
     (is (str/starts-with? message "constant value is quoted data holding symbols: "))
     (is (str/includes? message "a symbol is not an admitted constant kind")))
+  ;; a quoted SYMBOL is the same refusal, not an alias lookup: the author
+  ;; quoted it to keep it a symbol (measured 2026-09-11 on
+  ;; kotoba-native/string_index.cljk: `(def find-name 'kotoba$string-index-
+  ;; find)` was answered `constant alias must name a declared constant`)
+  (let [{:keys [message]} (refusal "(def find-name 'kotoba$string-index-find)")]
+    (is (str/starts-with? message "constant value is quoted data holding symbols: (quote kotoba$string-index-find)")))
+  ;; a string past the portable byte bound names the bound and the size
+  ;; (measured on kotoba/abi/wit_data.cljk, a 4 KiB+ .wit file as a def:
+  ;; the closedness sentence, about a value that is closed)
+  (let [{:keys [message code]} (refusal (str "(def big \"" (apply str (repeat 4100 "x")) "\")"))]
+    (is (= :kotoba.error/subset-reject code))
+    (is (= "constant string exceeds the portable string byte limit: 4100 bytes, at most 4096 -- a longer string is a value a function builds, or a file a capability reads" message)))
   ;; a quoted literal is that literal
   (is (= 2 (answer-i64 "(def s '#{:a :b})" "(count s)")))
   (is (= 4096 (answer-i64 "(def k 4096)" "k"))))

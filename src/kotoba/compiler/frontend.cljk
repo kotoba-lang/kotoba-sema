@@ -13908,21 +13908,35 @@
                   (second value-form)
                   :else value-form)]
       (cond
+        ;; quoted data holding a symbol: `'#{if let}` (the compiler's own
+        ;; tables, 5 of its sources) and `'name` (a quoted symbol, which is
+        ;; NOT an alias -- the author quoted it to keep it a symbol). Named
+        ;; as such, BEFORE the literal rule can read the bare symbol as an
+        ;; alias: a symbol is not a constant kind, and neither the closedness
+        ;; sentence nor `constant alias must name a declared constant` says
+        ;; so (measured 2026-09-11 on kotoba-native/string_index.cljk, whose
+        ;; `(def find-name 'kotoba$string-index-find)` got the alias sentence)
+        (and (not= value-form value) (some symbol? (tree-seq coll? seq value)))
+        (reject! (str "constant value is quoted data holding symbols: " (pr-str value-form)
+                      " -- a symbol is not an admitted constant kind (integer/string/keyword/boolean/nil/vector/map/keyword-set); spell the entries as keywords")
+                 value :kotoba.error/subset-reject)
         (constant-literal? value) {:name name :value value}
+        ;; a string past the constant's portable byte bound: say the bound
+        ;; and the size, not "must be closed" about a value that is
+        ;; (measured 2026-09-11 on kotoba/abi/wit_data.cljk, a .wit file
+        ;; held in a def)
+        (string? value)
+        (reject! (str "constant string exceeds the portable string byte limit: "
+                      (value/utf8-byte-count! value) " bytes, at most " value/string-literal-byte-limit
+                      " -- a longer string is a value a function builds, or a file a capability reads")
+                 value :kotoba.error/subset-reject)
+        ;; quoted data that is not a literal (a quoted list is not a call)
+        (not= value-form value)
+        (reject! "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data" value)
         ;; a call form, or a collection literal holding one: computed at
         ;; analysis time, on the reference interpreter, once (see the
         ;; section comment above). A bare symbol never reaches here -- it is
         ;; a constant alias, and `constant-literal?` admits it.
-        ;; quoted data that is not a literal: a quoted list is not a call,
-        ;; and a quoted symbol set (`'#{if let}`, the compiler's own tables)
-        ;; is named as such -- a symbol is not a constant kind, and the
-        ;; closedness sentence would not say so
-        (not= value-form value)
-        (if (some symbol? (tree-seq coll? seq value))
-          (reject! (str "constant value is quoted data holding symbols: " (pr-str value-form)
-                        " -- a symbol is not an admitted constant kind (integer/string/keyword/boolean/nil/vector/map/keyword-set); spell the entries as keywords")
-                   value :kotoba.error/subset-reject)
-          (reject! "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data" value))
         (or (and (seq? value) (symbol? (first value)))
             (vector? value) (map? value) (set? value))
         {:name name :fold-form value}
