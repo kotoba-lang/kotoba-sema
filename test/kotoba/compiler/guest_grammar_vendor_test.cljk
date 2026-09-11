@@ -75,8 +75,15 @@
 
   Advanced 2026-09-07 to `e333abac` for amu-h7: `:admitted-builtins` gains
   `kernel-undefined-opcode-handler-address`, the fifty-fifth privileged head
-  (kotoba-lang#PR carries the authority; amu and kotoba resync after)."
-  "515bbc7de84a3340ef3b250e4ee411739d3acebf32ba31450540f146768bb841")
+  (kotoba-lang#PR carries the authority; amu and kotoba resync after).
+
+  Advanced 2026-09-11 to `10ff0062` for module type parameters (root ADR
+  adr-2609113100; authority kotoba-lang 9c2bb949): `:core-form-shapes` gains
+  `:ns` and `:require-spec` -- the `(:params [sym ...])` module clause and the
+  `:require [ns :as a :with {sym type}]` binding -- and `:admission-limits`
+  gains `:max-template-parameters 8`. No head admitted or withdrawn; the
+  previous digest was `515bbc7d`."
+  "10ff0062271d3a557deab865510c948125a84aba7d760298bcaf345cd0370a6b")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
