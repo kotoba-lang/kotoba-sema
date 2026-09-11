@@ -14384,6 +14384,17 @@
               (let [item-type (second type)
                     items (second value)]
                 (cond
+                  ;; An EMPTY set has no literal that carries its type: `#{}`
+                  ;; is refused by the literal rule (non-empty keyword-set),
+                  ;; so the canonical constructor is its spelling -- exactly
+                  ;; what `(typed-set-new [:set :keyword])` in a def already
+                  ;; admits. Measured 2026-09-12 (selfhost measurement 20):
+                  ;; `(def ^:dynamic *linear-returning* #{})` in this
+                  ;; repository's own affine.cljk was refused `evaluates to a
+                  ;; [:set :keyword] that is outside the constant bounds` --
+                  ;; a bounds sentence for a value of zero items -- and every
+                  ;; module requiring it (10) stopped there.
+                  (empty? items) (list 'typed-set-new type)
                   (= :keyword item-type) (set items)
                   ;; the symbol set's literal is the quoted set, as the
                   ;; keyword set's is the bare one (2026-09-12)
