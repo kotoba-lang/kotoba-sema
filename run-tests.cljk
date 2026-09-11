@@ -23,6 +23,9 @@
             ;; `(:export ...)` clause, validated by the same loop; unknown
             ;; keys, double declarations and a map out of position refused
             [kotoba.compiler.namespace-attr-map-test]
+            ;; `:import` / `:require-macros` / `:refer-clojure` / `:use` are
+            ;; refused BY NAME; `:require` keeps the generic sentence amu refines
+            [kotoba.compiler.namespace-refused-clause-test]
             ;; `^meta` reads (it was read as a SYMBOL and shifted the form),
             ;; `^:private` on a defn is defn-, and the export refusal proves it
             [kotoba.compiler.reader-metadata-test]
@@ -137,6 +140,7 @@
 
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
              'kotoba.compiler.namespace-attr-map-test
+             'kotoba.compiler.namespace-refused-clause-test
              'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
