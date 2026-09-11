@@ -14,6 +14,9 @@
   (:require [cljs.test :as t]
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
+            ;; `[fixed ... & rest]` defn: specialized per used arity by the
+            ;; fn profile's lowering; the exported / value / bound shapes refused
+            [kotoba.compiler.variadic-defn-test]
             [kotoba.compiler.case-uniqueness-test]
             ;; the first test that reaches infer-closure-refinements
             [kotoba.compiler.closure-refinement-test]
@@ -160,6 +163,7 @@
              'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
+             'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test
              'kotoba.compiler.boot-scratch-test

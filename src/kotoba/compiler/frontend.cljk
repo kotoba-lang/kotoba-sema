@@ -2993,6 +2993,33 @@
 (defn- nth-pair-second [expr n]
   (nth (iterate (fn [value] (list 'pair-second value)) expr) n))
 
+(defn- specialize-variadic-clause
+  "One monomorphic `[params body]` for a `[fixed ... & rest]` clause at ARITY.
+
+  This is THE lowering of a variadic clause, and there is one of it: the `fn`
+  profile has specialized `(fn [a & r] ...)` this way since closures were
+  admitted (`lang/surface-status.edn` `:first-class-closure-values`: \"[fixed ... &
+  rest] specialized through closure arity 4; rest is a pair-chain\"), and a
+  variadic `defn` (2026-09-12) reuses it rather than lowering `&` a second
+  way. The surplus arguments become ordinary positional parameters named
+  under the reserved prefix, and REST is bound to the pair-chain `(list ...)`
+  of exactly those parameters -- so at arity `(count fixed)` it is `(list)`,
+  the empty chain, and `first` / `second` / `rest` / `empty?` / `cons` and
+  `apply`'s trailing argument all read it as they read any other list value.
+
+  PREFIX keeps the two callers' synthetic names apart in a linked source,
+  where a lambda's clause and a defn's clause can sit side by side; the
+  names themselves are never user-writable (`reject-reserved-source-symbols!`).
+
+  MIN-ARITY is the number of fixed PARAMETERS, which is `(count fixed)` for a
+  lambda and fewer for a defn whose fixed items carry `[name :type]`
+  annotations; the caller that knows the difference says so."
+  [{:keys [fixed rest-name body min-arity]} arity prefix]
+  (let [extras (mapv #(symbol (str prefix %))
+                     (range (- arity (or min-arity (count fixed)))))]
+    [(into (vec fixed) extras)
+     (list 'let [rest-name (apply list 'list extras)] body)]))
+
 (defn- lift-lambda [form]
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
@@ -3039,11 +3066,8 @@
         clauses (mapv (fn [arity]
                         (if-let [{:keys [params body]} (get fixed-by-arity arity)]
                           [params body]
-                          (let [{:keys [fixed rest-name body]} variadic
-                                extras (mapv #(symbol (str "__kotoba_lambda_rest_arg_" %))
-                                             (range (- arity (count fixed))))]
-                            [(into (vec fixed) extras)
-                             (list 'let [rest-name (apply list 'list extras)] body)])))
+                          (specialize-variadic-clause variadic arity
+                                                      "__kotoba_lambda_rest_arg_")))
                       arities)]
     (when-not (and (seq clauses)
                    (every? (fn [[params body]]
@@ -13475,7 +13499,7 @@
       (callable-type? result) (assoc :callable-result-contract result)
       effects-ceiling (assoc :effects-ceiling effects-ceiling))))
 
-(declare typed-param-parts)
+(declare typed-param-parts binding-symbols)
 
 (defn- multi-arity-declaration?
   [declaration]
@@ -13485,11 +13509,137 @@
 (defn- abi-arity-name [source-name arity]
   (symbol (str (name source-name) "$arity$" arity)))
 
+(defn- variadic-params? [raw-params]
+  (and (vector? raw-params) (boolean (some #(= '& %) raw-params))))
+
+(defn- declaration-clauses
+  "The `(params ...)` clauses a defn form declares, single-arity written as
+  one clause. Defensive on purpose: this runs BEFORE `expand-defn-parts`
+  has refused the malformed shapes, so a form it cannot read yields no
+  clauses rather than a host error, and the refusal that names the shape
+  still comes from the one place that owns it."
+  [form]
+  (let [declaration (drop 2 form)
+        declaration (if (string? (first declaration)) (rest declaration) declaration)]
+    (cond
+      (vector? (first declaration)) [(apply list declaration)]
+      (every? #(and (seq? %) (vector? (first %))) declaration) (vec declaration)
+      :else [])))
+
+(defn- variadic-source-names
+  "The names of the defns that declare a `[fixed ... & rest]` clause."
+  [defs]
+  (into #{}
+        (keep (fn [[_ source-name :as form]]
+                (when (and (symbol? source-name)
+                           (some #(variadic-params? (first %)) (declaration-clauses form)))
+                  source-name)))
+        defs))
+
+(defn- variadic-call-arities
+  "Every arity at which a variadic function of this module is CALLED, read
+  off the source bodies before any of them is desugared -- the closed-module
+  fact that lets a variadic defn be specialized only where it is used.
+
+  Head position is the only admitted position. A variadic defn has no
+  single interface, so it cannot be a VALUE: `(fn-ref f)`, `(apply f xs)`, a
+  callback `(map f xs)`, a bare `f` in a vector -- each is refused here by
+  name. The `fn` profile is not reused for those because it never had them:
+  a closure's arities are fixed at the lambda, and `fn-ref` of a named
+  function lifts one clause per arity in `*function-arities*`, which for a
+  variadic name would be the arities of the calls it happened to see. A
+  refusal is the honest answer until an interface for the value exists.
+
+  Refused here rather than at the use site so the message can say what the
+  name IS. A local that shadows a variadic name is refused the same way; the
+  message says so, because a rename is the fix.
+
+  Returns `{source-name #{arity ...}}` over VARIADIC-NAMES only."
+  [defs variadic-names]
+  (let [found (volatile! {})
+        walk (fn walk [form]
+               (cond
+                 (seq? form)
+                 (let [[op & args] form]
+                   (when-not (= 'quote op)
+                     (when (contains? variadic-names op)
+                       (when (> (count args) max-parameters)
+                         (reject! (str "variadic function " op " is called with "
+                                       (count args) " arguments; a variadic defn is "
+                                       "specialized through arity " max-parameters
+                                       " (the ABI bound), so a longer call has no "
+                                       "clause to reach")
+                                  form :kotoba.error/call-arity
+                                  {:function op :supplied (count args)}))
+                       (vswap! found update op (fnil conj #{}) (count args)))
+                     (when (seq? op) (walk op))
+                     (run! walk args)))
+                 (symbol? form)
+                 (when (contains? variadic-names form)
+                   (reject! (str "variadic function " form " is used as a value; "
+                                 "a variadic defn is specialized per call site and has "
+                                 "no single interface, so it is admitted only by direct "
+                                 "call `(" form " ...)` -- not through fn-ref, apply, a "
+                                 "callback position, or a bare reference. If this `"
+                                 form "` is a local binding, it shadows the function: "
+                                 "rename one of them")
+                            form :kotoba.error/subset-reject
+                            {:function form}))
+                 (coll? form) (run! walk form)
+                 :else nil))]
+    (doseq [form defs
+            clause (declaration-clauses form)]
+      (run! walk (rest clause)))
+    @found))
+
+(defn- variadic-clause-parts
+  "Read `[fixed ... & rest]` for a defn clause: the fixed items (which may
+  carry `[name :type]` annotations and destructuring patterns, exactly as a
+  fixed-arity defn's may), the rest name, and the number of fixed
+  PARAMETERS. Every malformed spelling is refused by name."
+  [raw-params constants form]
+  (let [amp-index (first (keep-indexed #(when (= '& %2) %1) raw-params))]
+    (when-not (= amp-index (- (count raw-params) 2))
+      (reject! "variadic defn requires [fixed ... & rest]: `&` must be followed by exactly one rest name and nothing else"
+               raw-params))
+    (let [fixed (subvec raw-params 0 amp-index)
+          rest-name (peek raw-params)
+          fixed-parts (typed-param-parts fixed constants)
+          min-arity (count fixed-parts)]
+      ;; `&` is a simple symbol to `valid-name?`; measured before this line
+      ;; existed, `(defn- f [a & &] a)` was admitted with a rest named `&`.
+      (when-not (and (valid-name? rest-name) (not= '& rest-name))
+        (reject! "variadic defn requires [fixed ... & rest]: the rest name must be a simple symbol"
+                 raw-params))
+      (when (contains? (set (mapcat #(binding-symbols (:pattern %)) fixed-parts)) rest-name)
+        (reject! (str "variadic rest name " rest-name " shadows a fixed parameter of the same clause")
+                 raw-params))
+      (when (> min-arity max-parameters)
+        (reject! "function parameters exceed ABI-supported arity" raw-params
+                 :kotoba.error/max-parameters))
+      {:fixed fixed :rest-name rest-name :min-arity min-arity})))
+
 (defn- expand-defn-parts
   "Return one or more monomorphic clauses for a source defn. Multi-arity is
   syntax-only: every call is resolved before HIR and no backend performs
-  argument-count dispatch (ADR 0017)."
-  [form constants]
+  argument-count dispatch (ADR 0017).
+
+  A `[fixed ... & rest]` clause is multi-arity syntax too (2026-09-12). In a
+  closed module every call of the function is known, so the clause is
+  specialized -- by the `fn` profile's own lowering, `specialize-variadic-
+  clause` -- once per arity a call site uses, from the fixed count through
+  `max-parameters`, plus the smallest arity no fixed clause holds, so the
+  body is analyzed even when nothing calls it. An arity nothing calls is not
+  emitted. CALL-ARITIES is this name's set of called arities
+  (`variadic-call-arities`).
+
+  Until 2026-09-12 the single-arity path READ `&` AS A PARAMETER: measured at
+  6f49a83, `(defn f [a & r] r)` compiled as a three-parameter function whose
+  second parameter was named `&`, so `(f 1 2 3)` answered 3 and `(f 1 2)` was
+  refused `f takes 3 arguments`. It accepted the source and answered the
+  wrong thing; the multi-arity path refused the same clause by name. Both
+  paths now go through this one."
+  [form constants call-arities]
   (let [[op source-name & declaration0] form
         ;; The name is checked HERE, before anything reads it, because the
         ;; very next line calls `(name source-name)` and `name` is defined on
@@ -13538,25 +13688,64 @@
       (reject! "function docstring exceeds admission limit" docstring))
     (when (re-find #"\$arity\$" (name source-name))
       (reject! "function name uses reserved multi-arity ABI marker" source-name))
-    (if-not (multi-arity-declaration? declaration)
+    (cond
+      (and (not (multi-arity-declaration? declaration))
+           (not (variadic-params? (first declaration))))
       [(assoc (defn-parts form constants) :source-name source-name :public? public?)]
-      (do
+
+      :else
+      (let [;; A single variadic clause is the multi-arity declaration of
+            ;; one clause, and takes the same path.
+            declaration (if (multi-arity-declaration? declaration)
+                          declaration
+                          [(apply list declaration)])]
         (when (> (count declaration) max-arity-clauses)
           (reject! "multi-arity clause count exceeds admission limit" form))
-        (let [clauses
-              (mapv (fn [clause]
-                      (let [raw (defn-parts (list* op source-name clause) constants)
-                            param-parts (typed-param-parts (:raw-params raw) constants)
-                            arity (count param-parts)]
-                        (when (some #{'&} (:raw-params raw))
-                          (reject! "variadic parameters are outside the multi-arity profile" (:raw-params raw)))
-                        (assoc raw :source-name source-name :logical-arity arity
-                               :public? public?)))
-                    declaration)
+        (let [raws (mapv (fn [clause]
+                           (defn-parts (list* op source-name clause) constants))
+                         declaration)
+              fixed-raws (remove #(variadic-params? (:raw-params %)) raws)
+              variadic-raws (filter #(variadic-params? (:raw-params %)) raws)
+              _ (when (> (count variadic-raws) 1)
+                  (reject! "defn admits at most one variadic clause" form))
+              fixed-clauses
+              (mapv (fn [raw]
+                      (assoc raw :source-name source-name
+                             :logical-arity (count (typed-param-parts (:raw-params raw) constants))
+                             :public? public?))
+                    fixed-raws)
+              fixed-arities (set (map :logical-arity fixed-clauses))
+              variadic-clauses
+              (when-let [raw (first variadic-raws)]
+                (let [{:keys [min-arity] :as parts}
+                      (variadic-clause-parts (:raw-params raw) constants form)
+                      ;; The body is a one-form seq; a clause with more or
+                      ;; fewer keeps its shape so `function must contain one
+                      ;; result expression` still names it downstream.
+                      body (:body raw)
+                      used (set (filter #(<= min-arity % max-parameters) call-arities))
+                      always (first (remove fixed-arities (range min-arity (inc max-parameters))))
+                      arities (sort (remove fixed-arities (cond-> used always (conj always))))]
+                  (mapv (fn [arity]
+                          (let [[params body*]
+                                (specialize-variadic-clause
+                                 (assoc parts :body (first body)) arity "__kotoba_rest_arg_")]
+                            (assoc raw :raw-params params
+                                   :body (if (= 1 (count body)) [body*] body)
+                                   :source-name source-name :logical-arity arity
+                                   :public? public? :variadic? true)))
+                        arities)))
+              clauses (into fixed-clauses variadic-clauses)
               arities (mapv :logical-arity clauses)]
           (when-not (= (count arities) (count (distinct arities)))
             (reject! "duplicate multi-arity clause" form))
-          (mapv #(assoc % :name (abi-arity-name source-name (:logical-arity %))) clauses))))))
+          (if (and (= 1 (count clauses)) (:variadic? (first clauses)))
+            ;; One specialization of a variadic clause is one ordinary
+            ;; function: the plain name, as the linker writes a one-clause
+            ;; export, so its interface and CID are those of the fixed-arity
+            ;; defn an author would have written by hand.
+            [(dissoc (first clauses) :variadic?)]
+            (mapv #(assoc % :name (abi-arity-name source-name (:logical-arity %))) clauses)))))))
 
 (defn- resolve-overloaded-calls
   "Resolve a call to an overloaded source name to the clause's ABI name.
@@ -15294,10 +15483,32 @@
                         raw-constants)
         _ (when-not (= (count source-names) (count (distinct source-names)))
             (reject! "duplicate function name" defs))
+        variadic-names (variadic-source-names defs)
+        call-arities (if (seq variadic-names)
+                       (guarding-definition 'defn nil
+                                            #(variadic-call-arities defs variadic-names))
+                       {})
+        ;; An export is an interface another module links against, and a
+        ;; variadic defn has none: it is specialized at THIS module's call
+        ;; sites, and a module that imported it could only call the arities
+        ;; this one happened to use. amu's `:interface` carries fixed
+        ;; clauses and nothing variadic, so there is no contract to follow;
+        ;; refused by name until one exists. An implicit export (no
+        ;; `(:export ...)` clause, single-file mode) is not this case: every
+        ;; call site is in the module.
+        _ (when-let [exported (seq (filter variadic-names (:exports namespace-info)))]
+            (reject! (str "variadic function " (first exported) " cannot be exported: "
+                          "an export must have a fixed interface, and a [fixed ... & rest] "
+                          "defn is specialized per call site of this module. Export a "
+                          "fixed-arity defn that calls it, or give the clause a fixed "
+                          "parameter vector")
+                     (first exported) :kotoba.error/subset-reject
+                     {:function (first exported)}))
         def-parts (vec (mapcat (fn [form]
                                  (guarding-definition
                                   (first form) form
-                                  #(expand-defn-parts form constants)))
+                                  #(expand-defn-parts form constants
+                                                      (get call-arities (second form) #{}))))
                                defs))
         function-arities
         (reduce (fn [out {:keys [source-name logical-arity raw-params]}]
