@@ -46,7 +46,7 @@ said they would be -- in the backend, not here.
 
 ## Evidence
 
-`clojure -M:test`: 105 tests, 380 assertions, 0 failures.
+`kbb -M:test`: 105 tests, 380 assertions, 0 failures.
 
 Two deliberate breaks:
 

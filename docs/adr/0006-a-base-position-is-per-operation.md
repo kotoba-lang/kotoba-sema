@@ -73,7 +73,7 @@ for.
 
 ## Verification
 
-`clojure -M:test`: 133 tests / 746 assertions, 0 failures (was 125 / 721).
+`kbb -M:test`: 133 tests / 746 assertions, 0 failures (was 125 / 721).
 
 The fix was shown to discriminate. Reverting `kernel-base-uses` to
 `(base! (first args) env)` turns six assertions red across four tests, and

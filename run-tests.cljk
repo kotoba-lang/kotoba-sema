@@ -1,4 +1,4 @@
-;; nbb --classpath "src:test:$(clojure -Spath -M:test)" run-tests.cljk
+;; kbb --backend sci --classpath "src:test:$(kbb -Spath -M:test)" run-tests.cljk
 ;;
 ;; The portable side of this suite. Not most of it: kotoba.compiler.frontend is
 ;; `.cljc` and claims two runtimes, but `test/kotoba/sema_test.cljk` is `.clj`

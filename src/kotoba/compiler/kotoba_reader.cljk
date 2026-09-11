@@ -470,7 +470,7 @@
 
   `(catch :default ...)` is not a JVM catch clause -- Clojure reads `:default`
   as a class name and refuses to compile the file. This is a `.cljc`, so the
-  first version of this function broke `clojure -M:test` for the whole
+  first version of this function broke `kbb -M:test` for the whole
   repository, and it went in green because the run that reported green never
   compiled this namespace on the JVM.
 
