@@ -314,3 +314,15 @@
 (deftest host-literals-in-a-discarded-branch-do-not-refuse
   (is (= 2 (answer (str "(defn run [n :i64] :i64 #?(:clj (re-find #\"x\" n) :cljs #js [n] :kotoba (+ n 1)))")
                    [1]))))
+
+(deftest host-char-literal-is-refused-by-name-when-selected
+  (is (= :kotoba.error/host-char-literal
+         (:code (refusal "(defn run [n :i64] :i64 (if #?(:kotoba \\a) n 0))")))))
+
+(deftest host-precision-literals-are-refused-by-name-when-selected
+  (is (= :kotoba.error/host-literal
+         (:code (refusal "(defn run [n :i64] :i64 (if #?(:kotoba 0N) n 0))")))))
+
+(deftest large-integer-set-is-refused-by-name-not-as-an-internal-error
+  (let [r (refusal "(defn run [n :i64] :i64 (if #?(:kotoba #{1 2 3 4 5 6 7 8 9}) n 0))")]
+    (is (= :kotoba.error/host-literal (:code r)) (pr-str r))))
