@@ -17,6 +17,8 @@
             [kotoba.compiler.case-uniqueness-test]
             ;; the first test that reaches infer-closure-refinements
             [kotoba.compiler.closure-refinement-test]
+            ;; a protocol may carry documentation, and the signature check still fires
+            [kotoba.compiler.protocol-docstring-test]
             ;; boot-scratch: the writable region and a function's address
             [kotoba.compiler.boot-scratch-test]
             ;; fwstore: writing to pages the firmware allocated
@@ -123,7 +125,8 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.compiler.call-arity-test
+(t/run-tests 'kotoba.compiler.protocol-docstring-test
+             'kotoba.compiler.call-arity-test
              'kotoba.compiler.case-uniqueness-test
              'kotoba.compiler.closure-refinement-test
              'kotoba.compiler.boot-scratch-test
