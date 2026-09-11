@@ -13757,8 +13757,61 @@
   sentence, never in `:kotoba.error/code`."
   '#{defprotocol definterface})
 
+(defn- protocol-documentation-stripped
+  "A protocol declaration's method forms, with Clojure's two DOCUMENTATION
+  positions removed: a leading string after the protocol name, and a trailing
+  string after a method's parameter vector.
+
+  Both are documentation and neither reaches dispatch. Nothing about the
+  bounded closed-world profile depends on their absence -- `ns` and `defn`
+  both admit a docstring under `max-*-docstring-chars`, and a protocol was
+  the one declaration head that did not.
+
+  Measured 2026-09-11 at 90baa17, through `amu check --jvm-free`:
+
+      (defprotocol IP (-scan [this pattern]))                  exit 0
+      (defprotocol IP \"the one operation\" (-scan [this p]))   exit 65
+      (defprotocol IP (-scan [this pattern] \"method doc\"))     exit 65
+
+  with `defprotocol requires unique bounded (method [this ...]) signatures`
+  for both -- a message about SIGNATURES, raised by a string that is not one.
+  A reader given that sentence looks at the parameter vectors.
+
+  The cost was not cosmetic. The four `:kotoba.error/protocol-declaration`
+  findings in the Q9 wave-1 corpus all came from ONE declaration --
+  `datom.source/IPatternSource`, whose docstring states the three invariants
+  every implementation must satisfy -- and the only way past it was to delete
+  that text. A migration that requires deleting the contract to compile is
+  narrowing the component, which is what ADR-q9 forbids.
+
+  Stripping is deliberately narrow. A trailing string is removed only from a
+  method form that has MORE than the two elements a signature needs, so a
+  malformed `(m \"doc\")` still arrives malformed rather than being quietly
+  rewritten into `(m)`, and a non-string trailing element -- `(m [this] 42)`
+  -- is not touched at all."
+  [tail]
+  (mapv (fn [m]
+          (if (and (seq? m) (> (count m) 2) (string? (last m)))
+            (butlast m)
+            m))
+        tail))
+
 (defn- protocol-form->info [form]
-  (let [[head protocol-name & methods] form]
+  (let [[head protocol-name & tail0] form
+        [protocol-doc tail] (if (string? (first tail0))
+                              [(first tail0) (rest tail0)]
+                              [nil tail0])
+        method-docs (keep (fn [m] (when (and (seq? m) (> (count m) 2) (string? (last m)))
+                                    (last m)))
+                          tail)
+        methods (protocol-documentation-stripped tail)]
+    ;; Bounded like every other docstring in the profile. An unbounded one
+    ;; would be the one place a program could carry arbitrary bytes into a
+    ;; declaration, and the limit is the same one `defn` applies.
+    (doseq [doc (cons protocol-doc method-docs)]
+      (when (and doc (> (count doc) max-function-docstring-chars))
+        (reject! (str head " docstring exceeds admission limit")
+                 form :kotoba.error/protocol-declaration)))
     (when-not (and (valid-name? protocol-name)
                    (seq methods)
                    (every? #(and (seq? %)
