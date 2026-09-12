@@ -86,6 +86,11 @@
             ;; `(symbol "...")` / typed-constructor spellings; mixed
             ;; collections and quoted lists refused by name
             [kotoba.compiler.quoted-symbol-constants-test]
+            ;; a forbidden head forbids the bare CALL, not the spelling: a
+            ;; module may define and export `read-string`; a bare call with
+            ;; no definition keeps its refusal; builtin / special heads stay
+            ;; undefinable
+            [kotoba.compiler.reserved-name-vs-export-test]
             ;; the map callback by shape: named / inline / closure value run;
             ;; destructuring, several forms, a literal, partial / comp refused
             ;; by name; a parameter mapper requests its dispatcher
@@ -200,6 +205,7 @@
              'kotoba.compiler.keyword-map-record-literal-test
              'kotoba.compiler.computed-constant-fold-test
              'kotoba.compiler.quoted-symbol-constants-test
+             'kotoba.compiler.reserved-name-vs-export-test
              'kotoba.compiler.map-callback-shape-test
              'kotoba.compiler.loop-accumulator-type-test
              'kotoba.compiler.set-operations-test

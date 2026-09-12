@@ -1,5 +1,5 @@
 (ns kotoba.compiler.frontend
-  {:kotoba/export [*abort-error-types* *abort-lexical-context* *abort-throw-types* *contextual-closure-result-type* *expected-callable-contract* *function-arities* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *lifting-lazy-thunk?* *local-option-types* *local-state-ids* *local-state-used* *local-types* *loop-counter* *loop-helper-names* *loop-helper-recorder* *loop-helper-shapes* *loop-known-types* *loop-result-type* *numeric-resolution-final* *pending-lambdas* *pending-loop-helpers* *pure-definition-names* *record-protocol-dispatch* *required-closure-dispatchers* *schemas* *synthetic-counter* *used-capability-keywords* *uses-apply?* *uses-lazy?* alloc-region-bytes alloc-region-maximum-pages analyze arithmetic bytes-operations canonical-list-operations canonical-typed-map-operations capability-catalog capability-id->name capability-registry collection-count-operations compact-graph-operations comparisons compiler-rejection? dataspace-assert-type dataspace-observe-type dataspace-request-type dataspace-result-type dataspace-retract-type decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations forbidden-heads generic-option-operations grammar-declared-heads heap-operations heterogeneous-vector-operations i32-operations i64-operations image-scratch-bytes image-symbol-operations internal-failure! interrupt-entry-prefix interrupt-entry-signature interrupt-entry-vector interrupt-entry-vector-limit kernel-base-argument-positions kernel-base-positions kernel-memory-operations kernel-privileged-operations kernel-region-report kgraph-operations lazy-sequence-operations lint list-operations logical-operations map-operations map-presence-operations map-projection-operations max-arity-clauses max-bindings max-desugar-expansions max-desugar-template-nodes max-desugar-template-parameters max-desugar-templates max-expression-nodes max-function-docstring-chars max-functions max-heterogeneous-vector-items max-list-items max-lowered-nodes max-match-arms max-match-pattern-keys max-namespace-capabilities max-namespace-docstring-chars max-parameters max-reader-depth max-record-fields max-symbol-chars max-type-depth max-type-nodes max-typed-map-entries max-typed-set-items max-variant-cases namespace-attr-map->clauses namespace-attr-map-keys namespace-refused-clauses parametric-result-operations predicate-operations protocol-declaration-heads pure-product-disallowed-heads read-forms record-operations reserved-function-names rodata-literal-content? rodata-literal-encodings rodata-literal-operations sequencing-operations set-operations slice-value-operations source-operation-registry string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations validate-expr value-types variant-operations vector-end-operations xml-operations]}
+  {:kotoba/export [*abort-error-types* *abort-lexical-context* *abort-throw-types* *contextual-closure-result-type* *expected-callable-contract* *function-arities* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *lifting-lazy-thunk?* *local-option-types* *local-state-ids* *local-state-used* *local-types* *loop-counter* *loop-helper-names* *loop-helper-recorder* *loop-helper-shapes* *loop-known-types* *loop-result-type* *numeric-resolution-final* *pending-lambdas* *pending-loop-helpers* *pure-definition-names* *record-protocol-dispatch* *required-closure-dispatchers* *schemas* *synthetic-counter* *used-capability-keywords* *uses-apply?* *uses-lazy?* alloc-region-bytes alloc-region-maximum-pages analyze arithmetic bytes-operations canonical-list-operations canonical-typed-map-operations capability-catalog capability-id->name capability-registry collection-count-operations compact-graph-operations comparisons compiler-rejection? dataspace-assert-type dataspace-observe-type dataspace-request-type dataspace-result-type dataspace-retract-type decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations forbidden-heads generic-option-operations grammar-declared-heads heap-operations heterogeneous-vector-operations i32-operations i64-operations image-scratch-bytes image-symbol-operations internal-failure! interrupt-entry-prefix interrupt-entry-signature interrupt-entry-vector interrupt-entry-vector-limit kernel-base-argument-positions kernel-base-positions kernel-memory-operations kernel-privileged-operations kernel-region-report kgraph-operations lazy-sequence-operations lint list-operations logical-operations map-operations map-presence-operations map-projection-operations max-arity-clauses max-bindings max-desugar-expansions max-desugar-template-nodes max-desugar-template-parameters max-desugar-templates max-expression-nodes max-function-docstring-chars max-functions max-heterogeneous-vector-items max-list-items max-lowered-nodes max-match-arms max-match-pattern-keys max-namespace-capabilities max-namespace-docstring-chars max-parameters max-reader-depth max-record-fields max-symbol-chars max-type-depth max-type-nodes max-typed-map-entries max-typed-set-items max-variant-cases namespace-attr-map->clauses namespace-attr-map-keys namespace-refused-clauses parametric-result-operations predicate-operations protocol-declaration-heads pure-product-disallowed-heads read-forms record-operations reserved-function-names rodata-literal-content? shadow-guarded-heads rodata-literal-encodings rodata-literal-operations sequencing-operations set-operations slice-value-operations source-operation-registry string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations validate-expr value-types variant-operations vector-end-operations xml-operations]}
   ;; `clojure.set` is required on both runtimes, so `:require` is never
   ;; empty -- an empty `(:require)` (what results if EVERY item inside it
   ;; were individually `#?()`-conditional and none matched) fails ns-form
@@ -1221,8 +1221,16 @@
    [:f32 :i64] '[f32-to-i64-checked f32-to-i64-truncating]
    [:f32 :f64] '[f32-to-f64-exact]
    [:f64 :f32] '[f64-to-f32-rounded]})
-(def reserved-function-names
-  (set/union forbidden-heads arithmetic comparisons float-division-heads
+(def shadow-guarded-heads
+  "Every head a program may not DEFINE a function under, because the head is
+  dispatched on by name before signatures are consulted and a definition would
+  shadow it SILENTLY: the builtin and sugar heads, the elaborated local-state
+  heads, and the structural heads. `forbidden-heads` is NOT in this set (see
+  `reserved-function-names`): a forbidden head is refused in bare CALL
+  position by `validate-expr`, which is a different rule from refusing a
+  module to define and export a function of that spelling (2026-09-12,
+  adr-2609111900, kotoba-lang `lang/guest-grammar.edn` `:forbidden-heads`)."
+  (set/union arithmetic comparisons float-division-heads
              (set (keys heap-operations))
              (set (keys kgraph-operations))
              (set (keys kernel-memory-operations))
@@ -1271,9 +1279,31 @@
              ;; local-state slice 1: these four are no longer in
              ;; forbidden-heads, so they have to be reserved here or a program
              ;; could define `(defn swap! ...)` and shadow the head silently.
-             '#{atom swap! reset! deref}
+             ;; `ref` for the same reason since 2026-09-12: the pure-core
+             ;; rewrite reads `(ref name)` by head BEFORE any definition is
+             ;; consulted (`rewrite-pure-app-form`), so a module function of
+             ;; that name could never be called -- it stays a name a program
+             ;; may not define, even though the literal `forbidden-heads`
+             ;; below still spells it.
+             '#{atom swap! reset! deref ref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
                 hetero-vector typed-set record match-result match-variant match-option}))
+(def reserved-function-names
+  "`shadow-guarded-heads` plus `forbidden-heads`: the compiler's closed
+  vocabulary, what `internal-failure!` may spell into an error code and what a
+  `defdesugar` template may not be named. It is no longer the set a `defn`
+  name is refused against -- that is `shadow-guarded-heads`. Measured
+  2026-09-12 (kotoba-lang bc7f5e4d): 11 of the compiler's 225 modules call
+  `(edn/read-string s)`, and the guest twin that would answer them,
+  `(ns clojure.edn (:export [read-string]))`, was refused `reserved function
+  name` because `read-string` is a forbidden head -- a name that forbids
+  `clojure.core/read-string`, the eval-capable HOST reader, in bare call
+  position. Defining a function of that spelling evaluates nothing, and a
+  qualified call `edn/read-string` to a module export is a different name
+  from the bare head (the project route rewrites it to an import stub before
+  this frontend sees it). kotoba-lang/edn's own
+  `src/kotoba/lang/canonical_document.kotoba` was refused the same way."
+  (set/union forbidden-heads shadow-guarded-heads))
 (def max-functions 1024)
 (def max-arity-clauses 8)
 (def max-expression-nodes 50000)
@@ -7828,7 +7858,15 @@
     (let [[op & args] form]
       (refuse-reader-tagged-host-literal! form op)
       (when-not (simple-symbol? op) (reject! "computed or namespaced calls are forbidden" form))
-      (when (or (contains? forbidden-heads op) (re-find #"[.]" (name op)))
+      ;; A forbidden head is refused in bare call position ONLY when this
+      ;; module defines no function of that name: `(read-string s)` next to
+      ;; `(defn read-string [s :string] ...)` is ordinary definition
+      ;; resolution (the `contains? functions op` arm below), and the same
+      ;; call in a module without that definition keeps this refusal. The
+      ;; definition check is `shadow-guarded-heads`, which a forbidden head
+      ;; is not in, so both halves are one rule (2026-09-12).
+      (when (or (and (contains? forbidden-heads op) (not (contains? functions op)))
+                (re-find #"[.]" (name op)))
         (reject! "dynamic loading, interop, mutation, and metaprogramming are forbidden"
                  form :kotoba.error/ambient-forbidden))
       (cond
@@ -15997,7 +16035,12 @@
                                   result-inferred? callable-result-contract]}]
                        (let [source-name (or source-name name)]
                          (when-not (valid-name? name) (reject! "invalid function name" name))
-                         (when (contains? reserved-function-names name)
+                         ;; `shadow-guarded-heads`, not `reserved-function-names`:
+                         ;; a name that is ONLY a forbidden head (`read-string`,
+                         ;; `load`) may be defined -- the refusal that head
+                         ;; carries is for a bare CALL with no such definition
+                         ;; in scope (`validate-expr`), not for the spelling.
+                         (when (contains? shadow-guarded-heads name)
                            (reject! "reserved function name" name))
                          (when-not (vector? raw-params)
                            (reject! "function parameters must be a vector" raw-params))

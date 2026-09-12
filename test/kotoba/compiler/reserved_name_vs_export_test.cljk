@@ -1,0 +1,135 @@
+(ns kotoba.compiler.reserved-name-vs-export-test
+  "A `:forbidden-heads` entry forbids the BARE HEAD in call position -- it does
+  not forbid a module from defining and exporting a function of that spelling
+  (2026-09-12, adr-2609111900, the selfhost ceiling loop; kotoba-lang
+  `lang/guest-grammar.edn` `:forbidden-heads` carries the same sentence).
+
+  The wall, measured 2026-09-12 (kotoba-lang bc7f5e4d): 11 of the compiler's
+  225 modules require `clojure.edn` and call `(edn/read-string s)` -- 33
+  sites, all one string argument. The guest twin that would answer them,
+  `(ns clojure.edn (:export [read-string]))` with `(defn read-string [s
+  :string] :document ...)`, was refused `reserved function name`
+  (`:kotoba.error/subset-reject`): `read-string` is a forbidden head (it names
+  `clojure.core/read-string`, the eval-capable HOST reader), and
+  `reserved-function-names` was that set unioned with every builtin head,
+  compared by bare symbol. kotoba-lang/edn's own
+  `src/kotoba/lang/canonical_document.kotoba` was refused the same way.
+
+  CLASSIFICATION, written before the change: IMPLEMENTATION STATE. The
+  forbidden head's reason is the HOST function a bare call would reach;
+  a module definition of that spelling evaluates nothing, and a qualified
+  call `edn/read-string` to a module export is a different name from the
+  bare head (amu's project route rewrites it to `kotoba_import__N` before
+  this frontend sees it). The builtin / sugar heads and the non-shadowable
+  special heads are a different set for a different reason -- the rewrite
+  dispatches on them by name before signatures are consulted, so a
+  definition would shadow silently -- and that set (`shadow-guarded-heads`)
+  keeps its refusal, unwidened.
+
+  Measured at 736c5893 BEFORE the change, the unmodified frontend on the
+  classpath (the same probes):
+
+      (ns m.a (:export [read-string])) (defn read-string [s :string] :string s)
+                                                     reserved function name
+      (defn read-string ...) (defn main [] :string (read-string \"a\"))
+                                                     reserved function name
+      (defn main [] :string (read-string \"a\")), no definition
+          dynamic loading, interop, mutation, and metaprogramming are forbidden
+      (defn if [] :i64 0)                            reserved function name
+      (defn count [x :i64] :i64 0)                   reserved function name
+
+  Pinned here, both directions:
+
+  1. positive: a module defining and exporting `read-string` analyses, and
+     its `:exports` names it; a bare `(read-string \"a\")` inside the defining
+     module resolves to that function -- the KIR interpreter answers \"a\"
+     (single-arity, `defn-`, and a multi-arity clause set);
+  2. negative: a bare `(read-string \"a\")` in a module with NO such
+     definition keeps the forbidden-head sentence and code; `(defn if ...)`
+     (a non-shadowable special head) and `(defn count ...)` (a builtin head)
+     are still refused `reserved function name`; `(defn ref ...)` too, since
+     the pure-core rewrite reads `(ref name)` by head before any definition
+     is consulted; `(def read-string 1)` keeps `reserved constant name` and
+     `(let [read-string 1] ...)` keeps `invalid local binding` -- neither was
+     widened."
+  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.compiler.frontend :as frontend]
+            [kotoba.kir :as kir]))
+
+(defn- refusal [src]
+  (try (do (sema/analyze src) nil)
+       (catch #?(:clj Throwable :cljs :default) e
+         [(ex-message e) (:kotoba.error/code (ex-data e))])))
+
+(defn- run [src f]
+  (kir/execute (kir/lower (sema/analyze src)) f [] {}))
+
+(def ^:private forbidden-sentence
+  "dynamic loading, interop, mutation, and metaprogramming are forbidden")
+
+(deftest a-module-may-define-and-export-a-function-spelled-as-a-forbidden-head
+  (let [hir (sema/analyze (str "(ns m.a (:export [read-string]))\n"
+                               "(defn read-string [s :string] :string s)\n"))]
+    (is (= '[read-string] (:exports hir)))
+    (is (= '[read-string] (mapv :name (:functions hir))))))
+
+(deftest a-bare-call-inside-the-defining-module-resolves-to-that-function
+  (testing "single arity, exported"
+    (is (= "a" (run (str "(ns m.c (:export [main]))\n"
+                         "(defn read-string [s :string] :string s)\n"
+                         "(defn main [] :string (read-string \"a\"))\n")
+                    'main))))
+  (testing "private (defn-)"
+    (is (= "a" (run (str "(ns m.j (:export [main]))\n"
+                         "(defn- read-string [s :string] :string s)\n"
+                         "(defn main [] :string (read-string \"a\"))\n")
+                    'main))))
+  (testing "multi-arity: the overload resolution names the clause, not the head"
+    (is (= "b" (run (str "(ns m.m (:export [main]))\n"
+                         "(defn read-string ([s :string] :string s)"
+                         " ([s :string n :i64] :string s))\n"
+                         "(defn main [] :string (read-string \"b\"))\n")
+                    'main)))))
+
+(deftest a-bare-call-without-a-definition-keeps-the-forbidden-head-refusal
+  (is (= [forbidden-sentence :kotoba.error/ambient-forbidden]
+         (refusal "(ns m.b)\n(defn main [] :string (read-string \"a\"))\n")))
+  (testing "another forbidden head, same sentence"
+    (is (= [forbidden-sentence :kotoba.error/ambient-forbidden]
+           (refusal "(ns m.b2)\n(defn main [] :i64 (load \"x\"))\n")))))
+
+(deftest builtin-and-special-heads-are-still-not-definable
+  (testing "a non-shadowable special head"
+    (is (= ["reserved function name" :kotoba.error/subset-reject]
+           (refusal "(ns m.d)\n(defn if [] :i64 0)\n"))))
+  (testing "a builtin head"
+    (is (= ["reserved function name" :kotoba.error/subset-reject]
+           (refusal "(ns m.e)\n(defn count [x :i64] :i64 0)\n"))))
+  (testing "an elaborated head the pure-core rewrite reads before definitions"
+    (is (= ["reserved function name" :kotoba.error/subset-reject]
+           (refusal "(ns m.l)\n(defn ref [x :i64] :i64 0)\n")))))
+
+(deftest the-constant-and-local-binding-refusals-are-not-widened
+  (is (= ["reserved constant name" :kotoba.error/subset-reject]
+         (refusal "(ns m.g)\n(def read-string 1)\n")))
+  (is (= ["invalid local binding" :kotoba.error/subset-reject]
+         (refusal "(ns m.h)\n(defn main [] :i64 (let [read-string 1] read-string))\n"))))
+
+(deftest the-two-sets-are-one-rule
+  ;; `shadow-guarded-heads` is what a `defn` name is refused against;
+  ;; `reserved-function-names` is that plus `forbidden-heads`. A forbidden
+  ;; head that is ALSO shadow-guarded (`ref`) is refused as a definition;
+  ;; one that is only forbidden (`read-string`) is not. Resolved at run time
+  ;; rather than referred, so that against a frontend WITHOUT the set this
+  ;; test goes red instead of the namespace failing to load (the negative
+  ;; control of 2026-09-12 shadowed 736c5893's frontend onto the classpath).
+  (let [guarded (some-> (resolve 'kotoba.compiler.frontend/shadow-guarded-heads) deref)]
+    (is (set? guarded) "shadow-guarded-heads is defined")
+    (is (contains? frontend/forbidden-heads 'read-string))
+    (is (not (contains? (or guarded #{'read-string}) 'read-string)))
+    (is (contains? frontend/reserved-function-names 'read-string))
+    (is (contains? (or guarded #{}) 'ref))
+    (is (contains? (or guarded #{}) 'count))
+    (is (contains? (or guarded #{}) 'if))))
