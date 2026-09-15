@@ -14,6 +14,7 @@
   (:require [cljs.test :as t]
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
+            [kotoba.compiler.arena-scope-test]
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
@@ -182,6 +183,7 @@
              'kotoba.compiler.reader-metadata-test
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
+             'kotoba.compiler.arena-scope-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
              'kotoba.compiler.defn-body-sequences-test

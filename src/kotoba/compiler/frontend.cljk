@@ -1,5 +1,5 @@
 (ns kotoba.compiler.frontend
-  {:kotoba/export [*abort-error-types* *abort-lexical-context* *abort-throw-types* *contextual-closure-result-type* *expected-callable-contract* *function-arities* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *lifting-lazy-thunk?* *local-option-types* *local-state-ids* *local-state-used* *local-types* *loop-counter* *loop-helper-names* *loop-helper-recorder* *loop-helper-shapes* *loop-known-types* *loop-result-type* *numeric-resolution-final* *pending-lambdas* *pending-loop-helpers* *pure-definition-names* *record-protocol-dispatch* *required-closure-dispatchers* *schemas* *synthetic-counter* *used-capability-keywords* *uses-apply?* *uses-lazy?* alloc-region-bytes alloc-region-maximum-pages analyze arithmetic bytes-operations canonical-list-operations canonical-typed-map-operations capability-catalog capability-id->name capability-registry collection-count-operations compact-graph-operations comparisons compiler-rejection? dataspace-assert-type dataspace-observe-type dataspace-request-type dataspace-result-type dataspace-retract-type decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations forbidden-heads generic-option-operations grammar-declared-heads heap-operations heterogeneous-vector-operations i32-operations i64-operations image-scratch-bytes image-symbol-operations internal-failure! interrupt-entry-prefix interrupt-entry-signature interrupt-entry-vector interrupt-entry-vector-limit kernel-base-argument-positions kernel-base-positions kernel-memory-operations kernel-privileged-operations kernel-region-report kgraph-operations lazy-sequence-operations lint list-operations logical-operations map-operations map-presence-operations map-projection-operations max-arity-clauses max-bindings max-desugar-expansions max-desugar-template-nodes max-desugar-template-parameters max-desugar-templates max-expression-nodes max-function-docstring-chars max-functions max-heterogeneous-vector-items max-list-items max-lowered-nodes max-match-arms max-match-pattern-keys max-namespace-capabilities max-namespace-docstring-chars max-parameters max-reader-depth max-record-fields max-symbol-chars max-type-depth max-type-nodes max-typed-map-entries max-typed-set-items max-variant-cases namespace-attr-map->clauses namespace-attr-map-keys namespace-refused-clauses parametric-result-operations predicate-operations protocol-declaration-heads pure-product-disallowed-heads read-forms record-operations reserved-function-names rodata-literal-content? rodata-literal-encodings rodata-literal-operations sequencing-operations set-operations slice-value-operations source-operation-registry string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations validate-expr value-types variant-operations vector-end-operations xml-operations]}
+  {:kotoba/export [*abort-error-types* *abort-lexical-context* *abort-throw-types* *contextual-closure-result-type* *expected-callable-contract* *function-arities* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *lifting-lazy-thunk?* *local-option-types* *local-state-ids* *local-state-used* *local-types* *loop-counter* *loop-helper-names* *loop-helper-recorder* *loop-helper-shapes* *loop-known-types* *loop-result-type* *numeric-resolution-final* *pending-lambdas* *pending-loop-helpers* *pure-definition-names* *record-protocol-dispatch* *required-closure-dispatchers* *schemas* *synthetic-counter* *used-capability-keywords* *uses-apply?* *uses-lazy?* alloc-region-bytes alloc-region-maximum-pages analyze arithmetic bytes-operations canonical-list-operations canonical-typed-map-operations capability-catalog capability-id->name capability-registry collection-count-operations compact-graph-operations comparisons compiler-rejection? dataspace-assert-type dataspace-observe-type dataspace-request-type dataspace-result-type dataspace-retract-type decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations forbidden-heads generic-option-operations grammar-declared-heads heap-operations heterogeneous-vector-operations i32-operations i64-operations image-scratch-bytes image-symbol-operations internal-failure! interrupt-entry-prefix interrupt-entry-signature interrupt-entry-vector interrupt-entry-vector-limit kernel-base-argument-positions kernel-base-positions kernel-memory-operations kernel-privileged-operations kernel-region-report kgraph-operations lazy-sequence-operations lint list-operations logical-operations map-operations map-presence-operations map-projection-operations max-arity-clauses max-bindings max-desugar-expansions max-desugar-template-nodes max-desugar-template-parameters max-desugar-templates max-expression-nodes max-function-docstring-chars max-functions max-heterogeneous-vector-items max-list-items max-lowered-nodes max-match-arms max-match-pattern-keys max-namespace-capabilities max-namespace-docstring-chars max-parameters max-reader-depth max-record-fields max-symbol-chars max-type-depth max-type-nodes max-typed-map-entries max-typed-set-items max-variant-cases namespace-attr-map->clauses namespace-attr-map-keys namespace-refused-clauses parametric-result-operations predicate-operations protocol-declaration-heads pure-product-disallowed-heads read-forms record-operations region-operations reserved-function-names rodata-literal-content? rodata-literal-encodings rodata-literal-operations sequencing-operations set-operations slice-value-operations source-operation-registry string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations validate-expr value-types variant-operations vector-end-operations xml-operations]}
   ;; `clojure.set` is required on both runtimes, so `:require` is never
   ;; empty -- an empty `(:require)` (what results if EVERY item inside it
   ;; were individually `#?()`-conditional and none matched) fails ns-form
@@ -1149,6 +1149,12 @@
     document-i64-value 1 document-f64-value 1})
 (def document-variadic-operations '#{document-vector document-list document-set document-map})
 (def sequencing-operations '#{do})
+;; `(arena-scope body)` -- superproject ADR-2609160044, context ABI v6. On
+;; native every handle and byte allocated while BODY runs is released
+;; afterwards; the reference interpreter answers the body's value. The
+;; body's type is held to :i64 / :bool / :f64 in `infer-call-type-impl`,
+;; which is what makes the release safe: no handle can be the result.
+(def region-operations '{arena-scope 1})
 (def lazy-sequence-operations
   '#{lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop})
 (def string-operations '{string-byte-length 1 string-length 1 string-from-i64 1
@@ -1261,6 +1267,7 @@
              (set (keys compact-graph-operations))
              (set (keys document-fixed-operations)) document-variadic-operations
              (set (keys string-operations))
+             (set (keys region-operations))
              (set (keys xml-operations))
              (set (keys decimal-operations))
              (set (keys f64-operations))
@@ -7931,6 +7938,7 @@
                                      heap-operations
                                      kgraph-operations
                                      string-operations
+                                     region-operations
                                      xml-operations
                                      decimal-operations
                                      f64-operations
@@ -8101,6 +8109,11 @@
         (contains? xml-operations op)
         (do (when-not (= (get xml-operations op) (count args))
               (reject-operation-arity! "XML operation" op (get xml-operations op) (count args) form))
+            (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
+
+        (contains? region-operations op)
+        (do (when-not (= (get region-operations op) (count args))
+              (reject-operation-arity! "region operation" op (get region-operations op) (count args) form))
             (doseq [arg args] (validate-expr arg locals functions (inc depth) budget)))
 
         (contains? decimal-operations op)
@@ -9217,6 +9230,21 @@
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
           :i64)
+
+      ;; The region's whole safety argument is this one clause: a scalar
+      ;; cannot carry a handle out of the region, and every mutable structure
+      ;; the body could reach holds numbers. So the body's type is the
+      ;; scope's type, and only a scalar is admitted -- by name, so that a
+      ;; string body is refused for the reason it is dangerous rather than
+      ;; falling out of a type mismatch somewhere downstream.
+      (= op 'arena-scope)
+      (let [type (first types)]
+        (when-not (contains? #{:i64 :bool :f64} type)
+          (reject! (str "arena-scope body must be :i64, :bool or :f64, got "
+                        (pr-str type)
+                        ": a handle would escape the region it is released with")
+                   (cons op args) :kotoba.error/arena-scope-body-not-scalar))
+        type)
 
       (= op 'string-code-point-at)
       (do (require-expression-type! (first types) :string (first args))

@@ -21,7 +21,12 @@
          ;; `typed-map-keys` / `typed-map-vals`. Without this pin `peek`,
          ;; `pop`, `keys` and `vals` trap `:unknown-function` at execution
          ;; even though they are admitted.
-         :git/sha "b021a0d179fb983e8ad7da702252cfa764cd2fc2"}}
+         ;; Advanced 2026-09-16, b021a0d1 -> 1863a8de (osaho main, forward only), to
+         ;; the `arena-scope` head (its #90, superproject ADR-2609160044): the
+         ;; interpreter this frontend's tests execute through must know the
+         ;; head it admits. Carries osaho's string value bound 4096 -> 65536
+         ;; (22789c7), which computed_constant_fold_test now measures.
+         :git/sha "1863a8def653b77ba5628acb1f216d3dc975a6dd"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner

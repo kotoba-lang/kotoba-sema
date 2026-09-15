@@ -224,9 +224,13 @@
   ;; a string past the portable byte bound names the bound and the size
   ;; (measured on kotoba/abi/wit_data.cljk, a 4 KiB+ .wit file as a def:
   ;; the closedness sentence, about a value that is closed)
-  (let [{:keys [message code]} (refusal (str "(def big \"" (apply str (repeat 4100 "x")) "\")"))]
+  ;; The bound is osaho's string VALUE bound, 65536 since its 22789c7
+  ;; (4096 -> 65536); this test carried 4096 / 4100 while this repository
+  ;; pinned an osaho from before that, and advancing the pin (2026-09-16,
+  ;; for `arena-scope`) is what made the size follow the authority.
+  (let [{:keys [message code]} (refusal (str "(def big \"" (apply str (repeat 65540 "x")) "\")"))]
     (is (= :kotoba.error/subset-reject code))
-    (is (= "constant string exceeds the portable string byte limit: 4100 bytes, at most 4096 -- a longer string is a value a function builds, or a file a capability reads" message)))
+    (is (= "constant string exceeds the portable string byte limit: 65540 bytes, at most 65536 -- a longer string is a value a function builds, or a file a capability reads" message)))
   ;; a quoted literal is that literal
   (is (= 2 (answer-i64 "(def s '#{:a :b})" "(count s)")))
   (is (= 4096 (answer-i64 "(def k 4096)" "k"))))
