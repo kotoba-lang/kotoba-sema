@@ -137,6 +137,45 @@
     (is (= [:i64 :document] (:param-types (function-named hir 'apply-doc)))
         "the closure parameter itself is still one i64 word")))
 
+;; --- every name the compiler writes is a name the compiler admits -----------
+
+(def ^:private pt-type "[:record :demo/st [[:count :i64] [:phase :keyword]]]")
+
+(def ^:private record-to-record-source
+  ;; A node over a record STATE: typed parameter AND structured result.
+  (str "(defn run [node [:fn [[" pt-type "] " pt-type "]] s " pt-type "] " pt-type " (node s))\n"
+       "(defn main [] :i64 (record-get " pt-type " (run (fn [s] (record-new " pt-type
+       " (+ 1 (record-get " pt-type " s :count)) :end)) (record-new " pt-type " 0 :go)) :count))\n"))
+
+(deftest a-typed-parameter-with-a-structured-result-is-one-digest-not-two
+  ;; Until 2026-09-15 this family was named `p_<64>_t_<64>`: 156 characters,
+  ;; over `max-symbol-chars` (128), so the linked source amu writes for a
+  ;; project was refused by `valid-name?` with `invalid function name` at a
+  ;; span the author never wrote. Single-module analysis never validated the
+  ;; synthesized name, so the same program was admitted here and refused
+  ;; linked. The bound is asserted on EVERY function name the analysis
+  ;; emits, not only the dispatcher, and the program still runs.
+  (let [hir (sema/analyze record-to-record-source)
+        names (map (comp str :name) (:functions hir))
+        dispatcher (some #(when (re-find #"^__kotoba_invoke_pt_[0-9a-f]{64}\$arity1$" %) %) names)]
+    (is (some? dispatcher) "typed parameters + structured result: one signature digest")
+    (is (= 90 (count dispatcher)))
+    (is (empty? (filter #(> (count %) 128) names))
+        (str "names over max-symbol-chars: " (pr-str (filter #(> (count %) 128) names))))
+    (is (= 1 (w (answer record-to-record-source))))))
+
+(deftest the-two-older-families-keep-their-names
+  ;; typed parameters + keyword result stays `p_<64>_<keyword>`; i64
+  ;; parameters + structured result stays `t_<64>` -- a program that had a
+  ;; name at cac05453 keeps it.
+  (let [names (fn [source] (set (map (comp str :name) (:functions (sema/analyze source)))))
+        p-names (names apply-doc-source)
+        t-names (names (str "(defn make [] [:fn [[:i64] " pt-type "]] (fn [x] (record-new " pt-type " x :go)))\n"
+                            "(defn main [] :i64 (let [g (make)] (record-get " pt-type " (g 3) :count)))\n"))]
+    (is (some #(re-find #"^__kotoba_invoke_p_[0-9a-f]{64}_document\$arity1$" %) p-names))
+    (is (some #(re-find #"^__kotoba_invoke_t_[0-9a-f]{64}\$arity1$" %) t-names))
+    (is (not-any? #(re-find #"_pt_" %) (concat p-names t-names)))))
+
 ;; --- the control: an all-i64 contract program is untouched -----------------
 
 (def ^:private i64-contract-source

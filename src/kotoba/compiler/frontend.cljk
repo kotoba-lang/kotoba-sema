@@ -2843,12 +2843,30 @@
    (when-not (closure-result-type? result-type {})
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
-   (symbol (str "__kotoba_invoke"
-                (when-let [label (dispatcher-parameter-label parameter-types)]
-                  (str "_" label))
-                (when-not (= :i64 result-type)
-                  (str "_" (dispatcher-result-label result-type)))
-                "$arity" arity))))
+   (let [parameter-label (dispatcher-parameter-label parameter-types)
+         structured-result? (not (keyword? result-type))]
+     (symbol (str "__kotoba_invoke"
+                  (if (and parameter-label structured-result?)
+                    ;; Typed parameters AND a structured result: ONE digest of
+                    ;; the whole clause signature. Two 64-hex digests side by
+                    ;; side (`p_<64>_t_<64>`) made a 156-character name, and
+                    ;; `max-symbol-chars` is 128 -- a name this compiler wrote
+                    ;; was refused by this compiler's own `valid-name?` the
+                    ;; moment it travelled as TEXT (the project linker, amu
+                    ;; `--source-path`, re-reads the linked source), as
+                    ;; `invalid function name` pointing at a span the author
+                    ;; never wrote (2026-09-15, `[:fn [[<record>] <record>]]`
+                    ;; through a template module). A single-module analysis
+                    ;; never validated the synthesized name, so the same
+                    ;; program was admitted there and refused linked. The two
+                    ;; families that already had names keep them: all-i64
+                    ;; parameters (`t_<64>`, or bare) and typed parameters with
+                    ;; a keyword result (`p_<64>_<keyword>`).
+                    (str "_pt_" (artifact/sha256 [(vec parameter-types) result-type]))
+                    (str (when parameter-label (str "_" parameter-label))
+                         (when-not (= :i64 result-type)
+                           (str "_" (dispatcher-result-label result-type)))))
+                  "$arity" arity)))))
 
 (defn- request-invoke-dispatcher
   ([result-type arity] (request-invoke-dispatcher result-type arity nil))
