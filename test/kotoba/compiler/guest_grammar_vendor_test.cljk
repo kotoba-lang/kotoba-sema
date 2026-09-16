@@ -210,8 +210,13 @@
   `arena-scope` (root ADR-2609160044, context ABI v6) and the four ABI v7
   text heads `string-compare` / `string-fold-ascii` / `string-find-blank` /
   `string-skip-blank`, each declared with its contract. Five heads
-  admitted, none withdrawn; this frontend's tables carry the same five."
-  "3e1e65d6836ff1a828fba9554a7089b66314c98de5af8ef9e041804cf83b8a0c")
+  admitted, none withdrawn; this frontend's tables carry the same five.
+
+  Advanced 2026-09-16 again to `72648a8c` (kotoba-lang #694): `:predicates`
+  gains the two ABI v8 line heads `string-index-of-from` /
+  `string-compare-lines`. Two heads admitted, none withdrawn; this
+  frontend's tables carry the same two."
+  "9e0eca1ef9b0a4bb4459c29e1cc5b95014bdf563e032313e19fd42d8e91530d0")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

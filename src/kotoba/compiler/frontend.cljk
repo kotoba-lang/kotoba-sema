@@ -1055,6 +1055,8 @@
     string-fold-ascii #{0}
     string-find-blank #{0}
     string-skip-blank #{0}
+    string-index-of-from #{0 1}
+    string-compare-lines #{0 2}
     string-fold-case #{0}
     string-upper #{0}
     string-code-point-at #{0}
@@ -1173,6 +1175,10 @@
                          ;; ASCII-only fold, and the blank scan pair.
                          string-compare 2 string-fold-ascii 1
                          string-find-blank 2 string-skip-blank 2
+                         ;; ABI v8 line heads (2026-09-16): an absolute search
+                         ;; from an offset, and byte order of two lines named
+                         ;; by their start offsets.
+                         string-index-of-from 3 string-compare-lines 4
                          string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
@@ -9252,6 +9258,20 @@
       (contains? '#{string-find-blank string-skip-blank} op)
       (do (require-expression-type! (first types) :string (first args))
           (require-expression-type! (second types) :i64 (second args))
+          :i64)
+
+      ;; ABI v8 line heads.
+      (= op 'string-index-of-from)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          :i64)
+
+      (= op 'string-compare-lines)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          (require-expression-type! (nth types 2) :string (nth args 2))
+          (require-expression-type! (nth types 3) :i64 (nth args 3))
           :i64)
 
       ;; The region's whole safety argument is this one clause: a scalar
