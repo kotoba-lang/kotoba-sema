@@ -1057,6 +1057,8 @@
     string-skip-blank #{0}
     string-index-of-from #{0 1}
     string-compare-lines #{0 2}
+    string-find-byte #{0}
+    string-append-range #{0 1}
     string-fold-case #{0}
     string-upper #{0}
     string-code-point-at #{0}
@@ -1179,6 +1181,9 @@
                          ;; from an offset, and byte order of two lines named
                          ;; by their start offsets.
                          string-index-of-from 3 string-compare-lines 4
+                         ;; ABI v10 range heads (2026-09-16): no view taken,
+                         ;; none minted.
+                         string-find-byte 3 string-append-range 4
                          string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
@@ -9273,6 +9278,20 @@
           (require-expression-type! (nth types 2) :string (nth args 2))
           (require-expression-type! (nth types 3) :i64 (nth args 3))
           :i64)
+
+      ;; ABI v10 range heads.
+      (= op 'string-find-byte)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          :i64)
+
+      (= op 'string-append-range)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          (require-expression-type! (nth types 3) :i64 (nth args 3))
+          :string)
 
       ;; The region's whole safety argument is this one clause: a scalar
       ;; cannot carry a handle out of the region, and every mutable structure

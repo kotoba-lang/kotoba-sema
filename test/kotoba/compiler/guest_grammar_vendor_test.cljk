@@ -215,8 +215,12 @@
   Advanced 2026-09-16 again to `72648a8c` (kotoba-lang #694): `:predicates`
   gains the two ABI v8 line heads `string-index-of-from` /
   `string-compare-lines`. Two heads admitted, none withdrawn; this
-  frontend's tables carry the same two."
-  "9e0eca1ef9b0a4bb4459c29e1cc5b95014bdf563e032313e19fd42d8e91530d0")
+  frontend's tables carry the same two.
+
+  Advanced 2026-09-16 again to `8a2913b8` (kotoba-lang #696): the two ABI v10
+  range heads `string-find-byte` / `string-append-range`. Two heads
+  admitted, none withdrawn; this frontend's tables carry the same two."
+  "8a2913b89054b6637b9399ca87aaaa235684d8864bc018aebd155f5c3c2c7f87")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
