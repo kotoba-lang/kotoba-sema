@@ -1051,6 +1051,10 @@
     string-contains? #{0 1}
     string-split-count #{0 1}
     string-index-of #{0 1}
+    string-compare #{0 1}
+    string-fold-ascii #{0}
+    string-find-blank #{0}
+    string-skip-blank #{0}
     string-fold-case #{0}
     string-upper #{0}
     string-code-point-at #{0}
@@ -1165,6 +1169,10 @@
                          string=? 2 string-concat 2 string-substring 3
                          string-replace-all 3 string-contains? 2 string-split-count 2
                          string-index-of 2
+                         ;; ABI v7 text heads (2026-09-16): byte order, an
+                         ;; ASCII-only fold, and the blank scan pair.
+                         string-compare 2 string-fold-ascii 1
+                         string-find-blank 2 string-skip-blank 2
                          string-fold-case 1 string-upper 1
                          string-code-point-at 2
                          keyword-from-string 1 keyword-name 1 symbol 1})
@@ -9229,6 +9237,21 @@
       (= op 'string-split-count)
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
+          :i64)
+
+      ;; ABI v7 text heads.
+      (= op 'string-compare)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          :i64)
+
+      (= op 'string-fold-ascii)
+      (do (require-expression-type! (first types) :string (first args))
+          :string)
+
+      (contains? '#{string-find-blank string-skip-blank} op)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
           :i64)
 
       ;; The region's whole safety argument is this one clause: a scalar
