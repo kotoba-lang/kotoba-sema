@@ -26,7 +26,7 @@
          ;; interpreter this frontend's tests execute through must know the
          ;; head it admits. Carries osaho's string value bound 4096 -> 65536
          ;; (22789c7), which computed_constant_fold_test now measures.
-         :git/sha "7dfafd78aa38819555b294c749e54f67b57799bf"}}
+         :git/sha "85ed11be624d72f1974dbff8a175941662b6a6d6"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner
