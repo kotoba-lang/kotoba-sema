@@ -148,7 +148,16 @@
     ;; a form of :env/read -- /bin/pwd -L validates $PWD against the real
     ;; directory rather than trusting it, so a grant to read environment
     ;; variables cannot answer this question.
-    :sys/cwd 40})
+    :sys/cwd 40
+    ;; io/read (kotoba-lang #697): a command's STANDARD INPUT, wire 41. The
+    ;; empty request answers everything to EOF; a decimal request answers at
+    ;; most that many bytes not yet answered, the empty string at EOF. Its own
+    ;; capability -- not a form of :fs/app-data (no path, no scope) and not
+    ;; of :cli/args (argv is bounded and known at start; stdin is not).
+    ;; Measured 2026-09-16: head/tail/cut/tr/sort/uniq are invoked as a
+    ;; LATER pipeline segment 94-99% of the time in agent tool use, and a
+    ;; later segment reads standard input.
+    :io/read 41})
 
 (defn- load-capability-catalog []
   #?(:clj
