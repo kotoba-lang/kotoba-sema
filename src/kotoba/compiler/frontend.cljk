@@ -5627,7 +5627,11 @@
     ;; value's inferred type (ADR 0189/0190). Keeping it a desugar means no new
     ;; head reaches validation, inference or any backend.
     (and (keyword? (first form)) (= 2 (count form)))
-    (list 'record-get (desugar-expr (second form)) (first form))
+    ;; Keyword accessors desugar to `get` with a 0 default, which the type-
+    ;; directed `get` rewrite resolves per receiver (typed-map-get /
+    ;; record-get / map-get) -- identical lowering to the hand-written
+    ;; `(get m :k 0)` form. See lang-cosientist iter 14-21.
+    (list 'get (desugar-expr (second form)) (first form) 0)
     :else
     (let [[op & args] form]
       (cond
@@ -10962,7 +10966,7 @@
 
             (record-type? descriptor)
             (do
-              (when-not (and (= 2 (count rewritten-args)) (keyword? key))
+              (when-not (and (<= 2 (count rewritten-args) 3) (keyword? key))
                 (reject! "record get requires a value and one keyword field"
                          form :kotoba.error/record-projection-unresolved))
               (list 'record-get descriptor value key))
