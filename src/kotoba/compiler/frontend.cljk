@@ -157,7 +157,15 @@
     ;; Measured 2026-09-16: head/tail/cut/tr/sort/uniq are invoked as a
     ;; LATER pipeline segment 94-99% of the time in agent tool use, and a
     ;; later segment reads standard input.
-    :io/read 41})
+    :io/read 41
+    ;; gpu/compute (kotoba-lang 26f1bb3, root ADR-2609182400 C): a compute
+    ;; dispatch on the host GPU, wire 42. One ASCII request line (INFO /
+    ;; ALLOC / MAP / WRITE / READ / PIPELINE / BEGIN / DISPATCH / SUBMIT /
+    ;; FREE), decimal or hex answer; the native loader brokers it to the
+    ;; supervisor's Vulkan mechanism. Its own capability -- not a form of
+    ;; :fs/app-data though MAP/PIPELINE name a path: the grant is "run compute
+    ;; and read back", and a file grant must not carry that.
+    :gpu/compute 42})
 
 (defn- load-capability-catalog []
   #?(:clj
