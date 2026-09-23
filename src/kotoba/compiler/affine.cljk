@@ -1,6 +1,6 @@
 (ns kotoba.compiler.affine
-  "Is this vector binding used LINEARLY — at most once on every path, with a
-  consuming update as its last use?
+  "Is this vector binding used LINEARLY — read any number of times, then
+  consumed at most once, and never mentioned again, on every path?
 
   ## Why the question is worth asking
 
@@ -40,17 +40,49 @@
             v (vector-assoc v 1 y)]
         (vector-at v 0))
 
-  Also admitted, as ONE use rather than two: a read and a write fused into a
-  single compound expression at the SAME index --
-  `(vector-assoc! v k (+ (vector-at v k) delta))`, `v[k] += delta` and the
-  only expression Kotoba has for it (`fused-rmw?` below; superproject
-  ADR-2609010500 is the program that needed this admitted and could not be
-  written without it).
+  ## The question is ORDER, not count
 
-  A binding that is READ after being consumed, referenced twice on one path,
-  returned, passed to a function, or captured is refused. Escape analysis for
-  literals already exists next door in `kotoba.native.vector-region`; this is
-  the same posture applied to the update path rather than to construction.
+  What makes an in-place store observable is a read that runs AFTER it
+  through a name that still means the old value. A read that runs BEFORE the
+  store returns a scalar (`vector-at` of a vector-i64 is an i64) and holds
+  nothing afterwards, so any number of them are indistinguishable from the
+  copy. So the analysis walks each path in EVALUATION order with three
+  states -- live, spent, refused -- rather than counting occurrences:
+
+  - reads while live: admitted, any number of them, at any index
+  - one consuming use (an update, a proved linear-returning call, or -- where
+    the caller opted in -- the return): live -> spent
+  - anything after spent that mentions the handle: refused
+  - the handle anywhere that is not a vector operation: refused (an escape)
+
+  This admits what a struct of arrays has to do -- read several fields, then
+  write -- which the count could not: `(let [h (vector-at v k) ...]
+  (vector-assoc! v j h))` is two occurrences and one path, and was refused
+  for a reason that was never about safety. It is also what made the fused
+  `v[k] += delta` (superproject ADR-2609010500) need its own rule; under
+  order it is simply a read inside the update's own arguments, which are
+  evaluated before the update runs.
+
+  Evaluation order is only ASSUMED where the language fixes it: `let`
+  initialisers and bodies, `do`, the bodies of `when`/`when-not`/`when-let`
+  (sequences, not alternatives -- counting them as alternatives admitted a
+  read after a store, measured below), a test before its arms. The arguments
+  of an ordinary call have no order this analysis relies on: when more than
+  one of them mentions the handle they must all be pure reads. A body that
+  runs later than it is written (`fn`, `delay`, ...) may not mention the
+  handle at all, and one that runs repeatedly (`loop`, `dotimes`, ...) may
+  only read it.
+
+  Measured 2026-09-23 before this rewrite, amu 34bba745 aarch64-macos under
+  kexe_loader: `(when (= c 1) (vector-assoc! v 0 5) (vector-at v 0))` was
+  ADMITTED and answered 5; the same program as `(if (= c 1) (do ...) 0)` was
+  refused, and with the copying `vector-assoc` it answered 0. `when` was in
+  the set of branching heads, so its two body forms were counted as two
+  alternatives and the maximum was 1.
+
+  Escape analysis for literals already exists next door in
+  `kotoba.native.vector-region`; this is the same posture applied to the
+  update path rather than to construction.
 
   ## Why it lives in the frontend
 
@@ -109,75 +141,13 @@
   '#{vector-count vector-f64-count vector-at vector-f64-at
      vector-get vector-f64-get nth})
 
-(def ^:private branching
-  "Heads whose arms are alternatives, not a sequence.
-
-  Only one arm runs, so uses in different arms are uses on DIFFERENT PATHS and
-  the count is the maximum rather than the sum. Getting this wrong is not a
-  small conservatism: the shape Kotoba programs actually use to thread a
-  vector is tail recursion, base case reading and step case consuming --
-
-      (defn go [v :vector-i64 i :i64 n :i64] :i64
-        (if (>= i n)
-          (vector-at v 0)
-          (go (vector-assoc v 0 i) (+ i 1) n)))
-
-  -- and summing the arms calls that two uses, which refuses the one shape
-  that matters."
-  '#{if cond case when when-not if-let when-let})
 
 (defn- let-form?
   "A `let` with its binding vector present."
   [form]
   (and (seq? form) (= 'let (first form)) (vector? (second form))))
 
-;; `sym-uses` and `fused-rmw?` are mutually recursive: a fused call is
-;; recognised by asking `sym-uses` how many times `target` appears inside its
-;; own update expression, and `sym-uses` has to recognise a fused call before
-;; it falls through to counting the read and the write separately.
-(declare fused-rmw?)
 
-(defn- sym-uses
-  "How many times `target` can be used on the WORST SINGLE PATH through
-  `form`.
-
-  Counted rather than detected, because `at most once` is the question and
-  `appears at all` is a different one — a binding used twice on one path
-  cannot be consumed by either use."
-  [form target]
-  (cond
-    (= form target) 1
-    ;; `(vector-assoc! v k (+ (vector-at v k) delta))` -- v[k] += delta, the
-    ;; shape a struct-of-arrays hot path needs and the only one Kotoba has no
-    ;; OTHER expression for (superproject ADR-2609010500: `slab/add!` in
-    ;; `torihiki.book` is exactly this, at two call sites). Read then write,
-    ;; nothing between them, is ONE use of the handle, not two -- see
-    ;; `fused-rmw?` for why counting it as one does not weaken what this file
-    ;; exists to refuse.
-    (fused-rmw? form target) 1
-    ;; A `let` BINDER is not a use. Without this clause the binding vector
-    ;; `[v (vector-alloc 4) ...]` counts `v` once on its own, so every
-    ;; let-bound handle reached two uses and the gate refused every linear
-    ;; program that could be written -- measured 2026-09-01 by compiling one
-    ;; that should have passed. Initialisers all run; the body is one path.
-    ;; An inner `let` that shadows `target` still counts, which over-counts
-    ;; a name that is no longer reachable -- the safe direction.
-    (let-form? form)
-    (+ (reduce + 0 (map #(sym-uses (second %) target)
-                        (partition 2 (second form))))
-       (reduce + 0 (map #(sym-uses % target) (drop 2 form))))
-    (and (seq? form) (contains? branching (first form)) (< 2 (count form)))
-    ;; The test runs on every path; the arms are alternatives. This does not
-    ;; separate `cond`/`case` tests from their arms, which over-counts a test
-    ;; and never under-counts an arm -- the safe direction.
-    (+ (sym-uses (second form) target)
-       (reduce max 0 (map #(sym-uses % target) (drop 2 form))))
-    (seq? form) (reduce + 0 (map #(sym-uses % target) form))
-    (vector? form) (reduce + 0 (map #(sym-uses % target) form))
-    (map? form) (reduce + 0 (map #(+ (sym-uses (key %) target)
-                                     (sym-uses (val %) target)) form))
-    (set? form) (reduce + 0 (map #(sym-uses % target) form))
-    :else 0))
 
 (def ^:dynamic *linear-returning*
   "The `[name parameter-index]` pairs this module has proved LINEAR-RETURNING:
@@ -219,113 +189,192 @@
        (contains? reading (first form))
        (= target (second form))))
 
-(defn- fused-read-in-value
-  "The reading call on `target` at `idx` that `value` fuses with a write, if
-  `value` mentions `target` nowhere else.
+;; ── the walk, in evaluation order ────────────────────────────────────────────
+;;
+;; States: `:live` (only read so far), `:spent` (consumed, or handed back in
+;; tail position), `::refused`. A state only moves forward. See the ns
+;; docstring for why this replaced a use COUNT.
 
-  `(some reading-call-at-idx? (rest value))` alone would admit
-  `(+ (vector-at v k) (vector-count v))` -- two different reads of `v`, one of
-  them at an unrelated index -- because it only asks whether a qualifying
-  read is PRESENT, not whether it is the ONLY mention. The `sym-uses` count
-  closes that: it counts every occurrence of `target` anywhere in `value`,
-  nested or not, so requiring it to equal 1 means the one occurrence the
-  `some` below finds is the only one there is."
-  [value target idx]
-  (and (seq? value)
-       (= 1 (sym-uses value target))
-       (boolean
-        (some #(and (reading-call? % target) (= idx (nth % 2 ::none)))
-              (rest value)))))
+(def ^:private deferred
+  "Heads whose body runs later than it is written, or not at all, or more
+  than once, at a time this analysis cannot place: a closure can be called
+  after the store. Any mention of the handle inside one is refused."
+  '#{fn fn* letfn delay lazy-seq for reify})
 
-(defn- fused-rmw?
-  "True when `form` is `(op! v idx (f (read v idx) & rest))` -- `v` read and
-  written at the SAME index inside ONE compound expression, with no other
-  mention of `v` in the update.
+(def ^:private repeating
+  "Heads whose body runs zero or more times in place. Reads inside are fine
+  -- they all happen here, before anything that follows -- but a consuming use
+  would be repeated against a handle the first iteration already spent."
+  '#{loop doseq dotimes while})
 
-  This is the fused read-modify-write shape a struct-of-arrays hot path
-  needs and Kotoba has no other expression for: `vector-assoc!` and
-  `vector-at` are two separate calls, and counting them separately is two
-  uses of the handle even though the second call only ever sees the value
-  the first one is about to replace.
-
-  Safe for the reason a bare `vector-assoc!` is safe: `v` is read exactly
-  once -- the value about to be overwritten, and (by `fused-read-in-value`'s
-  count) nothing else -- and written exactly once, with no syntax between
-  the read and the write through which another reference could reach the
-  old value. The index is required to be the SAME source form (not merely
-  the same runtime value) read and written, which `linear?` can decide
-  without evaluating anything: Kotoba expressions are pure, so one source
-  form written twice is one value computed twice, not two different reads.
-  A mismatched index (`(vector-assoc! v k1 (+ (vector-at v k2) d))`) does not
-  match this predicate and falls through to being counted as two uses, which
-  is correct -- a fused write at one index proves nothing about what a read
-  at a DIFFERENT index might alias.
-
-  Requiring `idx` itself to have zero uses of `target` rules out the
-  degenerate `(vector-assoc! v v (+ (vector-at v v) d))`, where the index
-  argument is the handle: `fused-read-in-value` alone would not catch this,
-  because the extra occurrence lives in the outer form's index position, not
-  inside `value`."
+(defn- occurs?
+  "Does `target` appear anywhere in `form`, binders included. Over-reporting
+  is the safe direction: it only ever sends a form down a stricter path."
   [form target]
-  (and (seq? form)
-       (contains? consuming (first form))
-       (= target (second form))
-       (= 4 (count form))
-       (let [idx (nth form 2) value (nth form 3)]
-         (and (zero? (sym-uses idx target))
-              (fused-read-in-value value target idx)))))
-
-(defn- position-ok?
-  "`target` may appear only as the FIRST argument of a vector operation.
-
-  Anywhere else — an argument to something that is not a vector operation, a
-  return value, an element being stored — is an escape: the handle reaches
-  code this analysis cannot see, and code it cannot see may hold it."
-  ([form target] (position-ok? form target false))
-  ([form target tail?]
   (cond
-    ;; A bare `target` is an escape UNLESS it is the value this body hands
-    ;; back and the caller has been made to treat the call as consuming --
-    ;; see `*linear-returning*`. `tail?` is false for every caller that does
-    ;; not opt in, which is the behaviour this predicate always had.
-    (= form target) tail?
-    ;; A fused read-modify-write is one vector-operation-position use, not an
-    ;; escape into its own update expression -- see `fused-rmw?`, which has
-    ;; already checked that the update mentions `target` nowhere else.
-    (fused-rmw? form target) true
-    ;; Same reason as `sym-uses`: a binder is not an occurrence. A bare `v`
-    ;; standing in the binding vector would otherwise read as an escape, so
-    ;; this refused let-bound handles for a second, independent reason.
+    (= form target) true
+    (map? form) (boolean (some #(or (occurs? (key %) target)
+                                    (occurs? (val %) target)) form))
+    (coll? form) (boolean (some #(occurs? % target) form))
+    :else false))
+
+(defn- join
+  "The state after alternatives: refused if any arm refused, spent if any arm
+  may have spent it (a later read would be a read after a store on THAT path)."
+  [states]
+  (cond (some #(= ::refused %) states) ::refused
+        (some #(= :spent %) states) :spent
+        :else :live))
+
+(declare walk)
+
+(defn- walk-seq
+  "Forms evaluated one after another; only the last inherits `tail?`."
+  [forms target tail? state]
+  (let [v (vec forms) last-i (dec (count v))]
+    (reduce (fn [s i]
+              (if (= s ::refused)
+                (reduced s)
+                (walk (nth v i) target (and tail? (= i last-i)) s)))
+            state
+            (range (count v)))))
+
+(defn- walk-unordered
+  "Arguments whose relative order this analysis does not rely on. One that
+  mentions the handle is walked; several may only READ it -- if any of them
+  changed the state, some order would put a read of this handle after it."
+  [args target state]
+  (let [touching (filter #(occurs? % target) args)]
+    (case (count touching)
+      0 state
+      1 (walk (first touching) target false state)
+      (let [results (map #(walk % target false state) touching)]
+        (if (every? #(= state %) results) state ::refused)))))
+
+(defn- handle-position
+  "Where the handle sits in a consuming call: 1 for the vector operations,
+  the proved parameter's slot for a linear-returning call."
+  [form target]
+  (if (and (contains? consuming (first form)) (= target (second form)))
+    1
+    (some (fn [[name index]]
+            (when (and (= name (first form))
+                       (= target (nth form (inc index) ::none)))
+              (inc index)))
+          *linear-returning*)))
+
+(defn- without-index [xs i]
+  (concat (take i xs) (drop (inc i) xs)))
+
+(defn- walk
+  "The state after evaluating `form` from `state`, for the handle `target`.
+
+  `tail?` is true only where the caller has opted in to the handle being
+  handed back (`linear-returning?`); a bare handle anywhere else is an
+  escape."
+  [form target tail? state]
+  (cond
+    (= state ::refused) state
+    (not (occurs? form target)) state
+
+    (= form target) (if (and tail? (= state :live)) :spent ::refused)
+
+    (not (seq? form))
+    ;; vector / map / set literal: its elements, in no order relied on
+    (walk-unordered (if (map? form) (mapcat identity form) (seq form))
+                    target state)
+
     (let-form? form)
-    ;; Initialisers are never tail; the body's LAST form is, when the let is.
-    (and (every? #(position-ok? (second %) target false)
-                 (partition 2 (second form)))
-         (let [body (vec (drop 2 form))]
-           (and (every? #(position-ok? % target false) (butlast body))
-                (or (empty? body) (position-ok? (peek body) target tail?)))))
-    ;; The arms of a branch inherit the position the branch is in; the test
-    ;; does not. `do` is the same shape with no test.
-    (and (seq? form) (contains? branching (first form)) (< 2 (count form)))
-    (and (position-ok? (second form) target false)
-         (every? #(position-ok? % target tail?) (drop 2 form)))
-    (and (seq? form) (= 'do (first form)) (seq (rest form)))
-    (let [body (vec (rest form))]
-      (and (every? #(position-ok? % target false) (butlast body))
-           (position-ok? (peek body) target tail?)))
-    (seq? form)
-    (if (or (consuming-call? form target) (reading-call? form target))
-      ;; The first argument is the vector; every other argument must not
-      ;; mention it. `(vector-assoc v 0 v)` stores the handle into itself.
-      ;; For a linear-returning call the vector is at its own index, so ask
-      ;; the count question of every argument that is not the one matched.
-      (every? #(zero? (sym-uses % target))
-              (remove #(= % target) (drop 1 form)))
-      (every? #(position-ok? % target false) form))
-    (vector? form) (every? #(position-ok? % target false) form)
-    (map? form) (every? #(and (position-ok? (key %) target false)
-                              (position-ok? (val %) target false)) form)
-    (set? form) (every? #(position-ok? % target false) form)
-    :else true)))
+    (let [pairs (vec (partition 2 (second form)))
+          i (first (keep-indexed #(when (= target (first %2)) %1) pairs))]
+      (if (nil? i)
+        (->> state
+             (walk-seq (map second pairs) target false)
+             (walk-seq (drop 2 form) target tail?))
+        ;; This `let` BINDS `target`. Initialisers up to and including its
+        ;; own refer to whatever the name meant before -- if they mention it
+        ;; at all, that is a shadowing this analysis will not disentangle,
+        ;; so refuse. From the binding on it is a fresh handle: walk what
+        ;; follows from :live. The state handed back is the inner one, so a
+        ;; later mention of an outer handle of the same name is judged as if
+        ;; it were this one -- over-refusal, the safe direction.
+        (if (some #(occurs? % target) (map second (take (inc i) pairs)))
+          ::refused
+          (->> :live
+               (walk-seq (map second (drop (inc i) pairs)) target false)
+               (walk-seq (drop 2 form) target tail?)))))
+
+    (= 'do (first form))
+    (walk-seq (rest form) target tail? state)
+
+    (contains? '#{if if-not} (first form))
+    (let [s (walk (second form) target false state)
+          arms (drop 2 form)]
+      (join (cond-> (mapv #(walk % target tail? s) arms)
+              (< (count arms) 2) (conj s))))
+
+    (contains? '#{when when-not} (first form))
+    (let [s (walk (second form) target false state)]
+      (join [s (walk-seq (drop 2 form) target tail? s)]))
+
+    (contains? '#{if-let when-let} (first form))
+    (let [[_ bindings & more] form
+          s (if (vector? bindings)
+              (if (some #(= target %) (take-nth 2 bindings))
+                ::refused
+                (walk-seq (take-nth 2 (rest bindings)) target false state))
+              ::refused)]
+      (if (= 'if-let (first form))
+        (join (cond-> (mapv #(walk % target tail? s) more)
+                (< (count more) 2) (conj s)))
+        (join [s (walk-seq more target tail? s)])))
+
+    (= 'cond (first form))
+    ;; Every test is walked before every arm. Tests only run until one
+    ;; matches, so this over-approximates the reads and consumes a path
+    ;; performs before its arm -- the safe direction.
+    (let [clauses (partition 2 (rest form))
+          s (walk-seq (map first clauses) target false state)]
+      (join (into [s] (map #(walk (second %) target tail? s) clauses))))
+
+    (= 'case (first form))
+    (let [s (walk (second form) target false state)
+          clauses (drop 2 form)
+          arms (concat (map second (partition 2 clauses))
+                       (when (odd? (count clauses)) [(last clauses)]))
+          keys* (map first (partition 2 clauses))]
+      (if (some #(occurs? % target) keys*)
+        ::refused
+        (join (into [s] (map #(walk % target tail? s) arms)))))
+
+    (contains? deferred (first form)) ::refused
+
+    (contains? repeating (first form))
+    (let [s (walk-seq (rest form) target false state)]
+      (if (= s state) state ::refused))
+
+    (handle-position form target)
+    ;; An update: its other arguments -- index, value -- are evaluated before
+    ;; it runs, so reads of this handle among them see the old value, as a
+    ;; copy would. Anything in them that consumes it makes this a second
+    ;; consume and is refused by the state check.
+    (let [s (walk-unordered (without-index form (handle-position form target))
+                            target state)]
+      (if (= s :live) :spent ::refused))
+
+    (reading-call? form target)
+    (let [s (walk-unordered (drop 2 form) target state)]
+      (if (= s :live) :live ::refused))
+
+    :else
+    ;; Any other call: the handle passed bare is an escape (refused by the
+    ;; bare-symbol clause, not being in tail position); reads of it in the
+    ;; arguments are scalars.
+    (walk-unordered form target state)))
+
+(defn- ordered-ok?
+  [form target tail?]
+  (not= ::refused (walk form target tail? :live)))
 
 (defn- owned-binding?
   "True unless `target` is bound from something that may still hold it.
@@ -366,8 +415,7 @@
   that returns its handle is fine if no caller keeps one, and a caller that
   drops its handle is fine if the callee does not stash it."
   [form target]
-  (and (<= (sym-uses form target) 1)
-       (position-ok? form target true)
+  (and (ordered-ok? form target true)
        (owned-binding? form target)))
 
 (defn linear?
@@ -376,15 +424,15 @@
   Three conditions, and each of them is a way a wrong `true` would corrupt a
   live value:
 
-  1. **at most one use** — two uses on one path means the second sees what the
-     first consumed
+  1. **at most one consuming use per path** — a second one would see what the
+     first stored
   2. **every use is in vector-operation position** — anywhere else the handle
      escapes to code this cannot see
-  3. **a consumed binding is not read afterwards** — enforced by 1, and stated
-     because it is the property that matters"
+  3. **nothing reads it after it is consumed** — the property that matters,
+     decided in evaluation order by `walk`; reads BEFORE the consuming use
+     are admitted, as many as the path makes"
   [form target]
-  (and (<= (sym-uses form target) 1)
-       (position-ok? form target)
+  (and (ordered-ok? form target false)
        (owned-binding? form target)))
 
 (defn- binding-pairs [bindings] (partition 2 bindings))
@@ -427,22 +475,20 @@
              body (drop 2 form)
              bound (set (map first pairs))]
          (and (every? bound names)
-              ;; Every name in the thread is used at most once across all the
-              ;; initialisers, only in vector-operation position, and linearly
-              ;; in the body. A name read after the update that consumed it is
-              ;; exactly what makes an in-place store visible to somebody who
-              ;; did not ask for it.
+              ;; Every name in the thread, walked in evaluation order through
+              ;; the initialisers after its own and then the body: reads while
+              ;; live, one consume, nothing after. A name read after the update
+              ;; that consumed it is exactly what makes an in-place store
+              ;; visible to somebody who did not ask for it.
               (every? (fn [n]
-                        (and (<= (reduce + 0 (map #(sym-uses (second %) n) pairs)) 1)
-                             (every? #(position-ok? (second %) n) pairs)))
+                        (let [after (drop-while #(not= n (first %)) pairs)
+                              later (map second (rest after))]
+                          (ordered-ok? (cons 'do (concat later body)) n false)))
                       names)
-              ;; Every name but the last is consumed by some later initialiser,
-              ;; and is then DEAD -- zero uses in the body. `linear?` is not
-              ;; enough here: one read of a consumed name is still one use, and
-              ;; it is precisely the read that would see the in-place store.
+              ;; Every name but the last is consumed by some later initialiser
+              ;; -- otherwise it is not a thread, just several vectors.
               (every? (fn [n]
-                        (and (some (fn [pair] (consuming-call? (second pair) n)) pairs)
-                             (every? #(zero? (sym-uses % n)) body)))
+                        (some (fn [pair] (consuming-call? (second pair) n)) pairs))
                       (butlast names))
               ;; The last name is the live one and may be read, linearly.
               (let [live (last names)]

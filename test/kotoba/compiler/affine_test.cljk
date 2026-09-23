@@ -47,31 +47,120 @@
           (go (vector-assoc v 0 i) (+ i 1) n))
        'v)))
 
-(deftest two-uses-in-one-arm-is-still-not-linear
-  ;; The maximum over arms must not hide a sum inside one of them.
-  (is (not (aff/linear-parameter?
-            '(if (>= i n)
-               (+ (vector-at v 0) (vector-at v 1))
-               (go (vector-assoc v 0 i) (+ i 1) n))
-            'v))))
+(deftest two-reads-in-one-arm-are-reads
+  ;; Two reads and no store: nothing an in-place store could be visible to.
+  ;; Refused under the old use COUNT, which was never the safety property.
+  (is (aff/linear-parameter?
+       '(if (>= i n)
+          (+ (vector-at v 0) (vector-at v 1))
+          (go (vector-assoc v 0 i) (+ i 1) n))
+       'v))
+  (testing "a store of a store's RESULT consumes v once -- the outer one
+            writes the fresh value the inner one returned"
+    (is (aff/linear-parameter?
+         '(if (>= i n)
+            (vector-at v 0)
+            (go (vector-assoc (vector-assoc v 0 i) 1 i) (+ i 1) n))
+         'v)))
+  (testing "but two stores of v itself on one path are two"
+    (is (not (aff/linear-parameter?
+              '(if (>= i n)
+                 (vector-at v 0)
+                 (do (vector-assoc! v 0 i) (go (vector-assoc! v 1 i) (+ i 1) n)))
+              'v)))))
 
-(deftest a-use-in-the-test-counts-on-every-path
-  ;; The condition runs whichever arm is taken, so a use there plus a use in
-  ;; an arm is two uses on one path.
-  (is (not (aff/linear-parameter?
-            '(if (> (vector-at v 0) n)
-               0
-               (go (vector-assoc v 0 i) (+ i 1) n))
-            'v))))
+(deftest a-read-in-the-test-runs-before-the-arm
+  ;; The test is evaluated before either arm, so a read there sees the value
+  ;; the arm is about to replace -- exactly what a copy would have shown it.
+  (is (aff/linear-parameter?
+       '(if (> (vector-at v 0) n)
+          0
+          (go (vector-assoc v 0 i) (+ i 1) n))
+       'v))
+  (testing "a STORE in the test is seen by a read in the arm, and is refused"
+    (is (not (aff/linear-parameter?
+              '(if (> (vector-at (vector-assoc! v 0 9) 0) n)
+                 (vector-at v 0)
+                 0)
+              'v)))))
 
 ;; ── the refusals, one per way a live value could be corrupted ───────────────
 
-(deftest two-uses-on-one-path-are-not-linear
-  ;; The second use sees what the first consumed.
-  (testing "both in the same initialiser"
-    (is (not (aff/linear? '(vector-assoc v 0 (vector-at v 1)) 'v))))
-  (testing "both in the body"
-    (is (not (aff/linear? '(+ (vector-at v 0) (vector-at v 1)) 'v)))))
+(deftest reads-before-the-store-are-admitted
+  ;; The store's own arguments are evaluated before it runs, so a read among
+  ;; them -- at any index -- sees the old value, as a copy would.
+  (testing "a read inside the store's value, at another index"
+    (is (aff/linear? '(vector-assoc! v 0 (vector-at v 1)) 'v)))
+  (testing "reads only"
+    (is (aff/linear? '(+ (vector-at v 0) (vector-at v 1)) 'v)))
+  (testing "several reads bound first, then one store -- what a struct of
+            arrays has to write, and could not"
+    (is (aff/linear? '(let [h (vector-at v 3)
+                            t (vector-at v 4)]
+                        (vector-assoc! v (+ h 1) t))
+                     'v))))
+
+(deftest a-read-after-the-store-is-refused-in-every-order
+  ;; The property the gate exists for. Each shape is one way a read can run
+  ;; after the store through the name that still means the old value.
+  (testing "sequenced by do"
+    (is (not (aff/linear? '(do (vector-assoc! v 0 5) (vector-at v 0)) 'v))))
+  (testing "sequenced by let"
+    (is (not (aff/linear? '(let [w (vector-assoc! v 0 5)] (vector-at v 0)) 'v))))
+  (testing "sibling arguments of one call, whose order is not relied on"
+    (is (not (aff/linear? '(+ (vector-at (vector-assoc! v 0 5) 0) (vector-at v 0)) 'v))))
+  (testing "a store inside the index of a read"
+    (is (not (aff/linear? '(vector-at v (vector-at (vector-assoc! v 0 5) 0)) 'v))))
+  (testing "a store inside the arguments of another store"
+    (is (not (aff/linear? '(vector-assoc! v (vector-at (vector-assoc! v 0 5) 0) 1) 'v)))))
+
+(deftest when-bodies-are-sequences-not-alternatives
+  ;; Measured 2026-09-23 on amu 34bba745, aarch64-macos under kexe_loader:
+  ;;
+  ;;   (defn peek0 [v :vector-i64 c :i64] :i64
+  ;;     (when (= c 1) (vector-assoc! v 0 5) (vector-at v 0)))
+  ;;
+  ;; was admitted and answered 5 for c = 1. With the copying `vector-assoc`
+  ;; it answers 0, and so must any in-place lowering. `when` sat in the set
+  ;; of branching heads, so its two body forms were counted as ALTERNATIVES
+  ;; and the maximum over them was one use.
+  (is (not (aff/linear? '(when (= c 1) (vector-assoc! v 0 5) (vector-at v 0)) 'v)))
+  (is (not (aff/linear? '(when-not (= c 0) (vector-assoc! v 0 5) (vector-at v 0)) 'v)))
+  (is (not (aff/linear? '(when-let [x (f c)] (vector-assoc! v 0 x) (vector-at v 0)) 'v)))
+  (testing "and a store in a one-armed branch is still a store after it"
+    (is (not (aff/linear? '(do (if (= c 1) (vector-assoc! v 0 5)) (vector-at v 0)) 'v)))
+    (is (not (aff/linear? '(do (when (= c 1) (vector-assoc! v 0 5)) (vector-at v 0)) 'v))))
+  (testing "reads then a store inside when is fine"
+    (is (aff/linear? '(when (= c 1) (vector-at v 1) (vector-assoc! v 0 5)) 'v))))
+
+(deftest cond-tests-are-walked-before-any-arm
+  (is (aff/linear? '(cond (> (vector-at v 0) 1) (vector-assoc! v 0 1)
+                          (> (vector-at v 1) 1) (vector-assoc! v 1 1)
+                          :else 0)
+                   'v))
+  (is (not (aff/linear? '(cond (> (vector-at (vector-assoc! v 0 9) 0) 1) 0
+                               (> (vector-at v 1) 1) 1
+                               :else 2)
+                        'v))))
+
+(deftest a-body-that-runs-later-may-not-mention-the-handle
+  ;; A closure can be called after the store; its read would see it.
+  (is (not (aff/linear? '(let [f (fn [] (vector-at v 0))
+                               w (vector-assoc! v 0 5)]
+                           (f))
+                        'v)))
+  (testing "even a store alone, since the closure may run twice"
+    (is (not (aff/linear? '(let [f (fn [] (vector-assoc! v 0 5))] (f)) 'v)))))
+
+(deftest a-loop-may-read-but-not-store
+  (is (aff/linear? '(let [s (loop [k 0 acc 0]
+                              (if (= k 4) acc (recur (+ k 1) (+ acc (vector-at v k)))))]
+                      (vector-assoc! v 0 s))
+                   'v))
+  (is (not (aff/linear? '(loop [k 0]
+                           (if (= k 4) 0 (do (vector-assoc! v k k) (recur (+ k 1)))))
+                        'v))
+      "each iteration would store through a handle the first one spent"))
 
 (deftest a-bare-reference-is-not-linear
   ;; Returning the handle, or handing it to something that is not a vector
@@ -105,12 +194,20 @@
                (some-function b))
             '[a b]))))
 
-(deftest a-name-used-twice-in-one-initialiser-refuses
-  (is (not (aff/linear-let-thread?
-            '(let [a (vector-new 1 2)
-                   b (vector-assoc a (vector-at a 0) 1)]
-               (vector-count b))
-            '[a b]))))
+(deftest a-read-in-the-consuming-initialiser-is-before-the-store
+  ;; The index is evaluated before the update runs.
+  (is (aff/linear-let-thread?
+       '(let [a (vector-new 1 2)
+              b (vector-assoc a (vector-at a 0) 1)]
+          (vector-count b))
+       '[a b]))
+  (testing "a name read in a LATER initialiser than the one that consumed it"
+    (is (not (aff/linear-let-thread?
+              '(let [a (vector-new 1 2)
+                     b (vector-assoc a 0 1)
+                     x (vector-at a 1)]
+                 (vector-count b))
+              '[a b])))))
 
 ;; ── the analysis says nothing about unrelated names ─────────────────────────
 
@@ -204,18 +301,16 @@
             (go (vector-assoc! v i (+ (vector-at v i) delta)) (+ i 1) n delta))
          'v))))
 
-(deftest a-fused-write-at-one-index-does-not-license-a-read-at-another
-  ;; A fused write at k1 proves nothing about a read at a DIFFERENT index --
-  ;; admitting this would mean an in-place store at k1 could be visible
-  ;; through whatever the mismatched read at k2 feeds.
-  (is (not (aff/linear? '(vector-assoc! v k1 (+ (vector-at v k2) delta)) 'v))))
-
-(deftest a-second-mention-of-the-handle-inside-the-update-is-not-fused
-  ;; `fused-read-in-value` requires the qualifying read to be the ONLY
-  ;; mention of `v` in the value expression. `(some reading-call-at-idx? ...)`
-  ;; alone would have missed this: it only asks whether a qualifying read is
-  ;; PRESENT, not whether anything else also mentions `v`.
-  (is (not (aff/linear? '(vector-assoc! v k (+ (vector-at v k) (vector-count v))) 'v))))
+(deftest a-read-at-another-index-inside-the-update-is-before-it
+  ;; This was refused on the argument that a store at k1 "could be visible
+  ;; through whatever the read at k2 feeds". It cannot: the read is an
+  ;; argument of the store, evaluated before it, and yields an i64 that holds
+  ;; nothing afterwards. The same program with the copying `vector-assoc`
+  ;; computes the same value.
+  (is (aff/linear? '(vector-assoc! v k1 (+ (vector-at v k2) delta)) 'v))
+  (is (aff/linear? '(vector-assoc! v k (+ (vector-at v k) (vector-count v))) 'v))
+  (testing "the handle itself as a stored value is still an escape"
+    (is (not (aff/linear? '(vector-assoc! v k (+ (vector-at v k) (keep v))) 'v)))))
 
 (deftest a-handle-read-after-a-fused-write-consumed-it-is-still-refused
   (is (not (aff/linear? '(do (vector-assoc! v k (+ (vector-at v k) delta))
@@ -355,15 +450,22 @@
           :body ['(let [t (vector-alloc 4)] (stash t))]}]))))
 
 (deftest returning-is-not-a-licence-to-use-it-twice
-  (is (empty?
-       (aff/module-linear-returning
-        [{:name 'twice :params '[t]
-          :body ['(if (< (vector-at t 0) 0)
-                    (vector-assoc! t 0 1)
-                    t)]}
-         {:name 'caller :params []
-          :body ['(let [t (vector-alloc 4)] (twice t))]}]))
-      "the read in the test and the return are two uses on one path"))
+  (testing "a read in the test, then a store or the return: one consume per path"
+    (is (= #{'[twice 0]}
+           (aff/module-linear-returning
+            [{:name 'twice :params '[t]
+              :body ['(if (< (vector-at t 0) 0)
+                        (vector-assoc! t 0 1)
+                        t)]}
+             {:name 'caller :params []
+              :body ['(let [t (vector-alloc 4)] (vector-at (twice t) 0))]}]))))
+  (testing "a store and then the return is a second use of a spent handle"
+    (is (empty?
+         (aff/module-linear-returning
+          [{:name 'twice :params '[t]
+            :body ['(do (vector-assoc! t 0 1) t)]}
+           {:name 'caller :params []
+            :body ['(let [t (vector-alloc 4)] (vector-at (twice t) 0))]}])))))
 
 (deftest linear-returning-is-off-unless-a-module-proves-it
   ;; `linear?` is what the frontend has always called, and a call to a user
