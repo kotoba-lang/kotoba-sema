@@ -609,12 +609,19 @@
                        (go (vector-assoc! v i (+ (vector-at v i) delta)) (+ i 1) n delta)))
                    (defn main [] 0)")]
       (is (hir/valid? result))))
-  (testing "still refused: a fused write at k1 does not license a read at k2"
-    (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"requires a linear handle"
+  (testing "admitted: a read at k2 inside the write at k1 runs before the write
+            (the gate decides in evaluation order since 2026-09-23)"
+    (is (hir/valid?
          (sema/analyze
           "(defn add! [v :vector-i64 k1 :i64 k2 :i64 delta :i64] :vector-i64
              (vector-assoc! v k1 (+ (vector-at v k2) delta)))
+           (defn main [] 0)"))))
+  (testing "refused: a read after the write, inside when -- once admitted"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"requires a linear handle"
+         (sema/analyze
+          "(defn peek0 [v :vector-i64 c :i64] :i64
+             (when (= c 1) (vector-assoc! v 0 5) (vector-at v 0)))
            (defn main [] 0)"))))
   (testing "still refused: the handle read again after the fused write consumed it"
     (is (thrown-with-msg?
