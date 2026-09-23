@@ -13934,11 +13934,17 @@
           ceiling)))
 
 (defn- in-place-targets
-  "Names written through `vector-assoc!` anywhere in `form`."
+  "Names written through `vector-assoc!` or `vector-f64-assoc!` anywhere in
+  `form`. Read threads expanded (`affine/expand-threads`): inside `->` the
+  written handle is the threaded value, not the step's first argument.
+
+  The f64 sibling was missing: a `vector-f64-assoc!` was never a target, so
+  its handle was never checked at all."
   [form]
   (cond
     (seq? form)
-    (into (if (and (= 'vector-assoc! (first form)) (symbol? (second form)))
+    (into (if (and (contains? '#{vector-assoc! vector-f64-assoc!} (first form))
+                   (symbol? (second form)))
             #{(second form)}
             #{})
           (mapcat in-place-targets form))
@@ -14018,8 +14024,19 @@
   make here, so this pass widens what qualifies and leaves the old path
   exactly as it was."
   [all-functions]
-  (let [functions (filter #(and (symbol? (:name %)) (coll? (:body %)))
-                          all-functions)
+  (let [functions (->> all-functions
+                       (filter #(and (symbol? (:name %)) (coll? (:body %))))
+                       ;; Threads expanded before anything is counted: a
+                       ;; `vector-assoc!` inside `->` writes the threaded
+                       ;; value, and reading the source as written checked
+                       ;; the wrong name (see `affine/expand-threads`).
+                       (map #(update % :body (fn [body] (map affine/expand-threads body)))))
+        _ (doseq [{:keys [name body]} functions]
+            (when-let [form (some affine/unanalysable-thread body)]
+              (reject! (str "vector-assoc! inside " (first form) " in " name
+                            " cannot be checked for linearity; write the"
+                            " writes as nested calls or a let")
+                       form)))
         ;; An exported function's callers are not in this module, so no call
         ;; site can be checked and the answer has to be no. Excluded by
         ;; removing it from the input rather than by filtering the result:
