@@ -2,7 +2,14 @@
   "A wrong `true` here silently mutates a value somebody still holds, so most
   of these assert refusals."
   (:require [clojure.test :refer [deftest is testing]]
-            [kotoba.compiler.affine :as aff]))
+            [kotoba.compiler.affine :as aff]
+            [kotoba.sema :as sema]))
+
+(defn- analyze-refusal
+  "nil when `sema/analyze` admits `source`, else the refusal's message."
+  [source]
+  (try (sema/analyze source) nil
+       (catch #?(:clj Throwable :cljs :default) e (ex-message e))))
 
 ;; ── the shape a struct of arrays writes ─────────────────────────────────────
 
@@ -474,3 +481,73 @@
   ;; `*linear-returning*`, and empty is the default.
   (is (not (aff/linear? '(do (if (>= j 16) t (inner x y i 0 t))) 't)))
   (is (aff/linear-returning? '(do (if (>= j 16) t (vector-assoc! t 0 1))) 't)))
+
+;; ── threads are expanded before anything is counted ─────────────────────────
+;;
+;; Measured 2026-09-23 (amu, kotoba-sema 3fdaefb6, aarch64-macos, kexe_loader):
+;; `(let [w (-> v (vector-assoc! 0 5))] (+ (vector-at w 0) (vector-at v 0)))`
+;; was admitted and answered 10; `vector-assoc` answers 5. The gate read the
+;; source as written, so the threaded handle `v` was never a target, and the
+;; literal 0 in the step was taken for one.
+
+(deftest threads-expand-to-what-they-mean
+  (is (= '(vector-assoc! (vector-assoc! v 0 5) 1 6)
+         (aff/expand-threads '(-> v (vector-assoc! 0 5) (vector-assoc! 1 6)))))
+  (is (= '(f 1 (g 2 v))
+         (aff/expand-threads '(->> v (g 2) (f 1)))))
+  (testing "as-> the way the frontend's desugar-as-thread writes it"
+    (is (= '(let [x (let [x v] (vector-assoc! x 0 1))] (vector-at x 0))
+           (aff/expand-threads '(as-> v x (vector-assoc! x 0 1) (vector-at x 0))))))
+  (testing "a form with no thread is returned as is, not rebuilt"
+    (let [form '(typed-map-count [:map :i64 :i64] {0 0 1 1})]
+      (is (identical? form (aff/expand-threads form)))))
+  (testing "nested, and inside other forms"
+    (is (= '(let [w (vector-assoc! v 0 5)] w)
+           (aff/expand-threads '(let [w (-> v (vector-assoc! 0 5))] w))))))
+
+(deftest a-read-after-a-threaded-store-is-refused
+  (is (not (aff/linear? (aff/expand-threads
+                         '(let [w (-> v (vector-assoc! 0 5))]
+                            (+ (vector-at w 0) (vector-at v 0))))
+                        'v)))
+  (testing "end to end, through the frontend"
+    (is (re-find #"requires a linear handle"
+                 (str (analyze-refusal
+                       "(defn peek0 [v :vector-i64] :i64
+                          (let [w (-> v (vector-assoc! 0 5))]
+                            (+ (vector-at w 0) (vector-at v 0))))
+                        (defn main [] 0)")))))
+  (testing "and the threaded store with nothing after it is admitted"
+    (is (nil? (analyze-refusal
+               "(defn put [v :vector-i64 k :i64 x :i64] :vector-i64
+                  (let [old (vector-at v k)]
+                    (-> v (vector-assoc! k (+ old x)) (vector-assoc! 0 old))))
+                (defn main [] 0)")))))
+
+(deftest a-local-in-a-threaded-step-is-not-taken-for-a-handle
+  ;; `(vector-assoc! slot 5)` inside `->` writes the threaded value at index
+  ;; `slot`; `slot` read elsewhere was refused as a handle used twice.
+  (is (nil? (analyze-refusal
+             "(defn put [v :vector-i64 slot :i64] :vector-i64
+                (let [old (vector-at v slot)]
+                  (-> v (vector-assoc! slot (+ old 1)) (vector-assoc! (+ slot 1) slot))))
+              (defn main [] 0)"))))
+
+(deftest a-store-inside-cond-thread-is-refused-not-guessed
+  (is (some? (aff/unanalysable-thread '(cond-> v c (vector-assoc! 0 5)))))
+  (is (nil? (aff/unanalysable-thread '(cond-> x c (+ 1)))))
+  (is (re-find #"cannot be checked for linearity"
+               (str (analyze-refusal
+                     "(defn f [v :vector-i64 c :i64] :vector-i64
+                        (cond-> v (= c 1) (vector-assoc! 0 5)))
+                      (defn main [] 0)")))))
+
+(deftest the-f64-store-is-checked-too
+  ;; `in-place-targets` listed only `vector-assoc!`, so a `vector-f64-assoc!`
+  ;; handle was never a target and nothing about it was checked.
+  (is (re-find #"requires a linear handle"
+               (str (analyze-refusal
+                     "(defn f [v :vector-f64] :f64
+                        (let [w (vector-f64-assoc! v 0 1.5)]
+                          (vector-f64-at v 0)))
+                      (defn main [] 0)")))))
