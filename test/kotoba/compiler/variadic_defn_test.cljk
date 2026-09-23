@@ -148,16 +148,26 @@
   (is (= "variadic rest name a shadows a fixed parameter of the same clause"
          (:message (refusal "(defn- f [a & a] a)\n(defn main [] :i64 (f 1))")))))
 
+;; The bound is 64 (was 5 until 2026-09-23, the native register count; past
+;; the fifth argument the native backends now pass on the stack). These build
+;; their sources from the count so the boundary itself is what is asserted.
+
+(defn- names [prefix n] (apply str (interpose " " (map #(str prefix %) (range n)))))
+
 (deftest more-fixed-parameters-than-the-bound
   (is (= {:message "function parameters exceed ABI-supported arity"
           :code :kotoba.error/max-parameters}
-         (select-keys (refusal "(defn- f [a b c d e g & r] a)\n(defn main [] :i64 (f 1))")
-                      [:message :code]))))
+         (select-keys (refusal (str "(defn- f [" (names "a" 65) " & r] a0)\n"
+                                    "(defn main [] :i64 (f 1))"))
+                      [:message :code])))
+  (testing "sixty-four fixed parameters and a rest are admitted"
+    (is (nil? (refusal (str "(defn- f [" (names "a" 64) " & r] a0)\n"
+                            "(defn main [] :i64 (f " (names "" 64) "))"))))))
 
 (deftest a-call-past-the-bound
-  (is (= {:message "variadic function f is called with 6 arguments; a variadic defn is specialized through arity 5 (the ABI bound), so a longer call has no clause to reach"
-          :code :kotoba.error/call-arity :function 'f :supplied 6}
-         (refusal "(defn- f [a & r] a)\n(defn main [] :i64 (f 1 2 3 4 5 6))"))))
+  (is (= {:message "variadic function f is called with 65 arguments; a variadic defn is specialized through arity 64 (the ABI bound), so a longer call has no clause to reach"
+          :code :kotoba.error/call-arity :function 'f :supplied 65}
+         (refusal (str "(defn- f [a & r] a)\n(defn main [] :i64 (f " (names "" 65) "))")))))
 
 (deftest a-call-below-the-fixed-count-is-the-multi-arity-refusal
   (is (= {:message "no matching multi-arity clause" :code :kotoba.error/call-arity
