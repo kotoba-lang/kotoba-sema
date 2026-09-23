@@ -4090,23 +4090,27 @@
   ;; bottom, so then/else share one type and 1-step threads admit. Uses the
   ;; admitted plain ops `option-some?` / `option-value` (not the -of family,
   ;; which previously desugared into a then/else type mismatch on every input).
-  (letfn [(lower [option-form steps]
-            (let [tmp (if *loop-counter*
-                        (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
-                        (synthetic "some-thread"))
-                  option-type (or (resolve-option-type option-form) [:option :i64])
-                  payload-type (when (and (vector? option-type) (= :option (first option-type)))
-                                 (second option-type))
-                  payload (list 'option-value tmp (option-payload-fallback payload-type))
-                  threaded (thread-form payload (first steps) last?)
-                  then-expr (if (= 1 (count steps))
-                              (desugar-expr threaded)
-                              (lower threaded (rest steps)))]
-              (list 'let [tmp (desugar-expr option-form)]
-                    (list 'if (list 'option-some? tmp)
-                          then-expr
-                          (option-payload-fallback payload-type)))))]
-    (lower (first args) (rest args))))
+  (let [initial (first args)
+        steps (rest args)
+        tmp (if *loop-counter*
+              (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
+              (synthetic "some-thread"))
+        option-type (or (resolve-option-type initial) [:option :i64])
+        payload-type (when (and (vector? option-type) (= :option (first option-type)))
+                       (second option-type))
+        payload (list 'option-value tmp (option-payload-fallback payload-type))
+        ;; Linear chain: all steps are threaded directly onto the payload
+        ;; (single option-some? check). Mirrors desugar-thread's reduce over
+        ;; thread-form, so 2-step (some->> opt f g) desugars to
+        ;; (let [tmp ..] (if (option-some? tmp) (g (f (option-value tmp 0))) bottom)).
+        ;; A step whose result is itself an option is not modeled by this
+        ;; chain and is not silently admitted (coverage limit, iter 27).
+        threaded (reduce #(thread-form %1 %2 last?) payload steps)
+        then-expr (desugar-expr threaded)]
+    (list 'let [tmp (desugar-expr initial)]
+          (list 'if (list 'option-some? tmp)
+                then-expr
+                (option-payload-fallback payload-type)))))
 
 (defn- desugar-binding-if [args form when?]
   (let [[binding & bodies] args]
