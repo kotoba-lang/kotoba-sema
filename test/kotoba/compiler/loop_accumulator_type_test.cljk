@@ -192,29 +192,41 @@
                   "with an expression of type i64")
              (rejection source))))))
 
+(defn- loop-source
+  "A loop of n bindings b0..b(n-1), counting b0 to 3 and answering the last."
+  [n]
+  (let [bs (map #(str "b" %) (range n))]
+    (str "(ns p)(defn main [] :i64 (loop [" (apply str (interpose " " (mapcat (fn [b] [b "0"]) bs)))
+         "] (if (< b0 3) (recur (+ b0 1) " (apply str (interpose " " (rest bs))) ") "
+         (last bs) ")))")))
+
 (deftest the-parameter-ceiling-is-named-not-implied
-  (testing "five bindings and nothing captured is the most a loop can carry"
-    (let [source (str "(ns p)(defn main [] :i64"
-                      " (loop [a 0 b 0 c 0 d 0 e 0] (if (< a 3) (recur (+ a 1) b c d e) e)))")]
+  ;; 64 since 2026-09-23 (5 before: the native register count, which stack
+  ;; arguments made no longer the language's bound).
+  (testing "sixty-four bindings and nothing captured is the most a loop can carry"
+    (let [source (loop-source 64)]
       (is (nil? (rejection source)))
       (is (= 0 (run source)))))
-  (testing "six is refused, and the refusal does the arithmetic"
-    (let [source (str "(ns p)(defn main [] :i64"
-                      " (loop [a 0 b 0 c 0 d 0 e 0 f 0] (if (< a 3) (recur (+ a 1) b c d e f) f)))")]
+  (testing "sixty-five is refused, and the refusal does the arithmetic"
+    (let [source (loop-source 65)]
       (is (= (str "loop bindings plus captured outer variables exceed this compiler's "
-                  "ABI-supported arity: 6 bindings plus 0 captured outer variables is 6, "
-                  "and the limit is 5")
+                  "ABI-supported arity: 65 bindings plus 0 captured outer variables is 65, "
+                  "and the limit is 64")
              (rejection source)))
       (is (= :kotoba.error/loop-parameter-ceiling (rejection-code source)))))
   (testing "a captured outer variable costs a binding, and the refusal says which"
-    ;; The ceiling on BINDINGS is 5 minus however many outer variables the body
-    ;; mentions -- not a constant, and not anything the author wrote down.
-    (let [source (str "(ns p)(defn g [n :i64 m :i64] :i64"
-                      " (loop [a 0 b 0 c 0 d 0] (if (< a n) (recur (+ a 1) b c (+ d m)) d)))"
+    ;; The ceiling on BINDINGS is 64 minus however many outer variables the
+    ;; body mentions -- not a constant, and not anything the author wrote down.
+    (let [bs (map #(str "b" %) (range 63))
+          source (str "(ns p)(defn g [n :i64 m :i64] :i64"
+                      " (loop [" (apply str (interpose " " (mapcat (fn [b] [b "0"]) bs)))
+                      "] (if (< b0 n) (recur (+ b0 1) "
+                      (apply str (interpose " " (butlast (rest bs))))
+                      " (+ b62 m)) b62)))"
                       "(defn main [] :i64 (g 1 2))")]
       (is (= (str "loop bindings plus captured outer variables exceed this compiler's "
-                  "ABI-supported arity: 4 bindings plus 2 captured outer variables is 6, "
-                  "and the limit is 5; the captured variables are m, n")
+                  "ABI-supported arity: 63 bindings plus 2 captured outer variables is 65, "
+                  "and the limit is 64; the captured variables are m, n")
              (rejection source))))))
 
 (deftest a-loop-with-no-exit-keeps-the-type-it-had
