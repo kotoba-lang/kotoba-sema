@@ -5686,6 +5686,13 @@
     ;; head reaches validation, inference or any backend.
     (and (keyword? (first form)) (= 2 (count form)))
     (list 'record-get (desugar-expr (second form)) (first form))
+    ;; `(:field m default)` is Clojure's `(get m :field default)`, and that is
+    ;; what it desugars to: `get` already selects the primitive from the
+    ;; receiver's type (typed map -> typed-map-get + option-value-of, bounded
+    ;; map -> map-get with that default) and refuses a record receiver by
+    ;; name, since a closed record field is never absent.
+    (and (keyword? (first form)) (= 3 (count form)))
+    (desugar-expr (list 'get (second form) (first form) (nth form 2)))
     :else
     (let [[op & args] form]
       (cond
@@ -10968,15 +10975,30 @@
               descriptor (if (schema-ref-type? value-type)
                            (get schemas (second value-type))
                            value-type)]
-          (when-not (record-type? descriptor)
-            (reject! (str "record-get without a type descriptor requires a record "
-                          "value; got " (pr-str value-type)
-                          (when (schema-ref-type? value-type)
-                            (str " (no :record schema declared for "
-                                 (second value-type) " in this namespace)")))
-                     form
-                     :kotoba.error/record-projection-unresolved))
-          (list 'record-get descriptor value (second args)))
+          (cond
+            ;; `(:field m)` is Clojure's `(get m :field)`, and on the two map
+            ;; types it means exactly what the `get` arm below makes of it: a
+            ;; canonical typed map answers `typed-map-get` (an option), the
+            ;; bounded keyword->i64 map answers `map-get` with get's default
+            ;; 0. Until 2026-09-25 both were refused here with "requires a
+            ;; record value", so `(get m :k)` compiled and `(:k m)` did not.
+            (canonical-typed-map-type? value-type)
+            (list 'typed-map-get value-type value (second args))
+
+            (= :map value-type)
+            (list 'map-get value (second args) 0)
+
+            :else
+            (do
+              (when-not (record-type? descriptor)
+                (reject! (str "record-get without a type descriptor requires a record "
+                              "value; got " (pr-str value-type)
+                              (when (schema-ref-type? value-type)
+                                (str " (no :record schema declared for "
+                                     (second value-type) " in this namespace)")))
+                         form
+                         :kotoba.error/record-projection-unresolved))
+              (list 'record-get descriptor value (second args)))))
 
         (= op '__kotoba_destructure_get)
         (let [rewritten-args
