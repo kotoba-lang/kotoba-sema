@@ -31,7 +31,7 @@
      Nothing else in this file would notice if the keyword literal quietly
      started lowering to a typed map -- every keyword case would still answer
      the same number."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]

@@ -62,7 +62,7 @@
      for character. Captured on sema df383ba0 on BOTH runtimes before the
      change; `norm` exists because `pr-str` writes a `.kotoba` integer as `42`
      on the JVM and `42n` under nbb."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]

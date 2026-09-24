@@ -12,7 +12,7 @@
   three-clause limit; (3) what stays refused is refused BY NAME: `:rename`
   (it does change name resolution), an option nobody declared, a non-symbol
   entry, an odd option list, and a second `:refer-clojure`."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

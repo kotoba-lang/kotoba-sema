@@ -19,7 +19,7 @@
 
   A module may define `map-indexed` itself; the into/mapv \"do not steal a
   module's own name\" rule (`mapv-alias-shadowing-test`) applies here too."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

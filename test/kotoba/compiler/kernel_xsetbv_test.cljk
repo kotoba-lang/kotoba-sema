@@ -24,7 +24,7 @@
     0 6)` and `(kernel-xsetbv 0 4)` have the same shape and the second faults.
 
   Both live in kotoba-native `docs/avx2-guard-sequence.md`."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]))

@@ -5,7 +5,7 @@
   answered `some requires one i64 operand` for a call they wrote as a
   predicate search. The two-argument spelling now says which `some` it hit;
   the one-operand constructor and the zero-argument slip keep their sentences."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

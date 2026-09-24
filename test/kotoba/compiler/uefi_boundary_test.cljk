@@ -7,7 +7,7 @@
   safe to use on a given target -- the frontend admits privileged operations
   target-independently, and amu owns the gate that refuses `kernel-load-ptr`
   outside `:x86_64-aiueos-uefi-v1`."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :as frontend]

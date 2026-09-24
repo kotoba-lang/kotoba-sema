@@ -16,7 +16,7 @@
   anywhere but its one position is refused as such. The values go through
   the SAME clause loop as the explicit spelling -- the equality test below is
   the assertion that there is one validation path, not two."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

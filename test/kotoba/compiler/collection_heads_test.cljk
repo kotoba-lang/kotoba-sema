@@ -47,7 +47,7 @@
   6. the byte-identity control: the pair accessors over an actual pair chain
      lower exactly as before, because that is the closure, lazy-cell, cursor
      and destructuring vocabulary of the whole desugarer."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

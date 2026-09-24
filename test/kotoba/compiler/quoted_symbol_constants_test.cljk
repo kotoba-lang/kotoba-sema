@@ -34,7 +34,7 @@
      quoted list in a body; a quoted list at a def keeps the closedness
      sentence, as `'(1 2)` does; `=` on two symbols is NOT widened here and
      its refusal is pinned so the next wave sees it."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

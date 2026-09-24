@@ -16,7 +16,7 @@
   `juxt2` and `frequencies` all resolved to the module's own function, and the
   identical body renamed to `mapv2` compiled and ran. So this is one
   undeclared alias claiming a name it was never given, not a shadowing policy."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

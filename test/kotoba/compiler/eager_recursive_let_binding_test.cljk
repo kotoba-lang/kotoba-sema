@@ -12,7 +12,7 @@
   Controls: a binding the test needs, one both branches need, one whose call
   is not recursive, and the fixed form all compile. Only the guarded
   recursion is this shape."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

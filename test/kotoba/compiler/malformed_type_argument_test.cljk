@@ -37,7 +37,7 @@
 
   3. The VALUE the well-formed program computes. `no longer exit 70` would
      pass for a compiler that had merely learned to refuse it."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]

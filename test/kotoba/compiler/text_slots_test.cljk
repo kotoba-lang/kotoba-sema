@@ -1,7 +1,7 @@
 (ns kotoba.compiler.text-slots-test
   "The ABI v7 text heads at the frontend: typed, arity-checked, and executed
   through the reference interpreter."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

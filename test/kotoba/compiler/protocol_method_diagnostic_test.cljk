@@ -19,7 +19,7 @@
   One code throughout, `:kotoba.error/protocol-method`; only the sentence
   splits. Every sentence is pinned as a literal here, so folding the arms
   back into one turns exactly these assertions red and nothing else."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.sema :as sema]))
 
 (defn- outcome

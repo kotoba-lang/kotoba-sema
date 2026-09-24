@@ -1,7 +1,7 @@
 (ns kotoba.compiler.affine-test
   "A wrong `true` here silently mutates a value somebody still holds, so most
   of these assert refusals."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.affine :as aff]
             [kotoba.sema :as sema]))
 
