@@ -196,6 +196,18 @@
          (refusal ":i64" "(:a {:a \"x\" 1 2})"))))
 
 (deftest nesting-past-the-type-depth-limit-is-refused-by-name
-  (is (= :kotoba.error/value-type-depth-limit
+  ;; `max-type-depth` moved 8 -> 12 on 2026-09-24 (kotoba-lang lang/limits.edn,
+  ;; adr-2609242100 P1). A keyword-map record costs about five descriptor nodes
+  ;; per level, so this 13-deep literal now meets the 64-node bound before the
+  ;; depth bound -- still refused, by the node limit's own name.
+  (is (= :kotoba.error/value-type-node-limit
          (:code (refusal ":i64" (str "(let [m {:a \"x\" :b {:c {:d {:e {:f {:g {:h {:i"
-                                     " {:j {:k {:l {:m {:n \"deep\"}}}}}}}}}}}}}] 1)"))))))
+                                     " {:j {:k {:l {:m {:n \"deep\"}}}}}}}}}}}}}] 1)")))))
+  ;; The depth bound itself, on a type thin enough to reach it: 12 admitted,
+  ;; 13 refused by the depth limit's name.
+  (let [thin (fn [n] (nth (iterate (fn [t] [:option t]) :i64) n))
+        check #(try (do (#'kotoba.compiler.frontend/validate-value-type! (thin %)) :ok)
+                    (catch #?(:clj Throwable :cljs :default) e
+                      (:kotoba.error/code (ex-data e))))]
+    (is (= :ok (check 12)))
+    (is (= :kotoba.error/value-type-depth-limit (check 13)))))
