@@ -1048,8 +1048,21 @@
 ;; already does that work.
 (def canonical-list-operations
   '#{typed-list-new typed-list-nth})
+;; `:bytes` is the language's byte string: a distinct type from `:vector-i64`
+;; (a CBOR byte string and an array of small ints are different values, and
+;; every checker here refuses one where the other is expected). The last three
+;; heads (2026-09-25, superproject adr-2609242330) are the ones that BUILD
+;; values: before them a program could hold bytes only if a host handed them
+;; over, and could never build a string from bytes at all.
+;;   (bytes-from-vector-i64 v)  -> bytes; every item in [0,255] or it traps
+;;                                 :bytes/item-out-of-range
+;;   (vector-i64-from-bytes b)  -> vector-i64
+;;   (string-from-utf8 b)       -> string; canonical UTF-8 only, every other
+;;                                 sequence traps by name (:utf8/*), never
+;;                                 replaced
 (def bytes-operations
-  '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2})
+  '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2
+    bytes-from-vector-i64 1 vector-i64-from-bytes 1 string-from-utf8 1})
 (def heterogeneous-vector-operations
   '#{hetero-vector-new hetero-vector-count hetero-vector-at
      hetero-vector-assoc hetero-vector-equal})
@@ -8278,6 +8291,11 @@
           (validate-expr left locals functions (inc depth) budget)
           (validate-expr right locals functions (inc depth) budget))
 
+        (contains? '#{bytes-from-vector-i64 vector-i64-from-bytes string-from-utf8} op)
+        (do (when-not (= 1 (count args))
+              (reject! (str op " requires one operand; got " (count args)) form))
+            (validate-expr (first args) locals functions (inc depth) budget))
+
         (= op 'typed-set-new)
         (let [[type & items] args]
           (validate-value-type! type)
@@ -9800,6 +9818,21 @@
           (require-expression-type! (infer-expression-type right locals signatures)
                                     :bytes right)
           :bytes)
+        bytes-from-vector-i64
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :vector-i64 value)
+          :bytes)
+        vector-i64-from-bytes
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :vector-i64)
+        string-from-utf8
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :string)
         hetero-vector-new
         (let [[type & items] args
               item-types (second type)]
@@ -15673,7 +15706,13 @@
                      (catch #?(:clj Throwable :cljs :default) e
                        (let [data (ex-data e)]
                          (cond
-                           (= :fuel-exhausted (:trap data))
+                           ;; `:budget/fuel` since P4 of superproject
+                           ;; adr-2609242100 (osaho renamed `:fuel-exhausted`).
+                           ;; The old name matched nothing on an osaho that
+                           ;; names the budget, so an exhausted fold fell to the
+                           ;; generic arm below ("trapped at compile time:
+                           ;; fuel") -- right outcome, wrong reason.
+                           (= :budget/fuel (:trap data))
                            (def-refusal! name (str "exhausted the compile-time fuel (" def-fold-fuel
                                                    ") -- a constant is evaluated once at analysis time; bound the computation or move it into a function")
                                          form)

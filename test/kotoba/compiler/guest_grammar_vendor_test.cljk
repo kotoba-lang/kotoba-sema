@@ -236,8 +236,13 @@
   Advanced 2026-09-25 to `d87fe28a` (lang/state-ability.edn, slice 1):
   `:sugar :state-ability` admits `defhandler` / `with` / `resume`; this
   frontend's expand-state-ability-forms / specialize-state-abilities /
-  thread-state-abilities land in the same commit."
-  "d87fe28a8c8f3ee18e9f091c186c77e0642eb869ee9c89d0ca87577984ebb506")
+  thread-state-abilities land in the same commit.
+
+  Advanced 2026-09-25 to `d71c8b00` (superproject adr-2609242330):
+  `:predicates` admits the eight bytes heads and `:bytes-value` records the
+  decision; this frontend types the three new heads (`bytes-from-vector-i64`,
+  `vector-i64-from-bytes`, `string-from-utf8`) in the same commit."
+  "d71c8b004b9a1b27667f78d2ded716f05be3b3f339446ebc2dc6f33524622aee")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

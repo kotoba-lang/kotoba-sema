@@ -47,7 +47,15 @@
          ;; interpreter this frontend's tests execute through must know the
          ;; head it admits. Carries osaho's string value bound 4096 -> 65536
          ;; (22789c7), which computed_constant_fold_test now measures.
-         :git/sha "85ed11be624d72f1974dbff8a175941662b6a6d6"}}
+         ;; Advanced 2026-09-25, 85ed11be -> 353dd5f3 (osaho main, ahead 22,
+         ;; forward only): the reference semantics of the bytes heads and
+         ;; string-from-utf8 this frontend now types (superproject
+         ;; adr-2609242330), and P4's trap rename :fuel-exhausted -> :budget/fuel
+         ;; -- this repository's fold refusal keyed on the old name and passed
+         ;; only because this pin predated the rename. The frontend already
+         ;; required osaho's kir/host-stack-exhausted?, which this pin lacked
+         ;; (the suite could not load on the pinned interpreter).
+         :git/sha "353dd5f30bf803528f355f3b8090413a71e51bc8"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner

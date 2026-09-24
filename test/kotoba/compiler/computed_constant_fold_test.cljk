@@ -178,11 +178,14 @@
   ;; `exhausted the compile-time fuel` branch is a backstop this suite
   ;; cannot reach through admitted source. What it can pin is the contract
   ;; the branch keys on: the reference interpreter names the trap
-  ;; `:fuel-exhausted` in ex-data, and a function entry is what it charges.
+  ;; `:budget/fuel` in ex-data (P4 of superproject adr-2609242100 renamed it
+  ;; from `:fuel-exhausted`; this test pinned the old name and passed only
+  ;; while this repo pinned an osaho from before the rename), and a function
+  ;; entry is what it charges.
   (let [hir (sema/analyze "(ns m.probe {:kotoba/export [f g]})\n(defn g [] :i64 1)\n(defn f [] :i64 (g))\n")
         trap (try (kir/execute (kir/lower hir) 'f [] {:fuel 1}) nil
                   (catch #?(:clj Throwable :cljs :default) e (:trap (ex-data e))))]
-    (is (= :fuel-exhausted trap))))
+    (is (= :budget/fuel trap))))
 
 (deftest a-value-with-no-literal-spelling-is-refused-by-name
   ;; a closure is an i64 HANDLE into the interpreter's pair arena; the

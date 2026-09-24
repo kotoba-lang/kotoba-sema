@@ -21,6 +21,7 @@
             [kotoba.compiler.text-slots-test]
             [kotoba.compiler.line-slots-test]
             [kotoba.compiler.range-slots-test]
+            [kotoba.compiler.bytes-value-test]
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
@@ -194,6 +195,7 @@
              'kotoba.compiler.text-slots-test
              'kotoba.compiler.line-slots-test
              'kotoba.compiler.range-slots-test
+             'kotoba.compiler.bytes-value-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
              'kotoba.compiler.defn-body-sequences-test
