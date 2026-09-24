@@ -94,6 +94,16 @@
   {:kotoba/export [*linear-returning* consuming expand-threads in-place-candidates linear-let-thread? linear-parameter? linear-returning? linear? module-linear-returning producing reading unanalysable-thread]}
   (:require [clojure.set :as set]))
 
+;; clojure.core/some, spelled as the loop it is. In Kotoba `some` is the
+;; option constructor and a two-argument `(some pred coll)` is refused as a
+;; name collision (kotoba-sema frontend); this is the same definition as
+;; clojure.core/some -- the first logical-true (pred x), in order, stopping
+;; there -- so the host answer is unchanged on nbb and the JVM.
+(defn- first-truthy [pred coll]
+  (loop [s (seq coll)]
+    (when s
+      (or (pred (first s)) (recur (next s))))))
+
 (def consuming
   "Operations that make the vector they are given dead.
 
@@ -171,7 +181,7 @@
   (and (seq? form)
        (symbol? (first form))
        (boolean
-        (some (fn [[name index]]
+        (first-truthy (fn [[name index]]
                 (and (= name (first form))
                      (= target (nth form (inc index) ::none))))
               *linear-returning*))))
@@ -226,9 +236,9 @@
 (defn- contains-thread? [form]
   (cond
     (seq? form) (or (contains? '#{-> ->> as->} (first form))
-                    (boolean (some contains-thread? form)))
-    (map? form) (boolean (some contains-thread? (mapcat identity form)))
-    (coll? form) (boolean (some contains-thread? form))
+                    (boolean (first-truthy contains-thread? form)))
+    (map? form) (boolean (first-truthy contains-thread? (mapcat identity form)))
+    (coll? form) (boolean (first-truthy contains-thread? form))
     :else false))
 
 (defn expand-threads
@@ -264,9 +274,9 @@
 (defn- contains-in-place? [form]
   (cond
     (seq? form) (or (contains? in-place-heads (first form))
-                    (boolean (some contains-in-place? form)))
-    (map? form) (boolean (some contains-in-place? (mapcat identity form)))
-    (coll? form) (boolean (some contains-in-place? form))
+                    (boolean (first-truthy contains-in-place? form)))
+    (map? form) (boolean (first-truthy contains-in-place? (mapcat identity form)))
+    (coll? form) (boolean (first-truthy contains-in-place? form))
     :else false))
 
 (defn unanalysable-thread
@@ -276,8 +286,8 @@
     (and (seq? form) (contains? unexpanded-threads (first form))
          (contains-in-place? form))
     form
-    (map? form) (some unanalysable-thread (mapcat identity form))
-    (coll? form) (some unanalysable-thread form)
+    (map? form) (first-truthy unanalysable-thread (mapcat identity form))
+    (coll? form) (first-truthy unanalysable-thread form)
     :else nil))
 
 ;; ── the walk, in evaluation order ────────────────────────────────────────────
@@ -304,17 +314,17 @@
   [form target]
   (cond
     (= form target) true
-    (map? form) (boolean (some #(or (occurs? (key %) target)
+    (map? form) (boolean (first-truthy #(or (occurs? (key %) target)
                                     (occurs? (val %) target)) form))
-    (coll? form) (boolean (some #(occurs? % target) form))
+    (coll? form) (boolean (first-truthy #(occurs? % target) form))
     :else false))
 
 (defn- join
   "The state after alternatives: refused if any arm refused, spent if any arm
   may have spent it (a later read would be a read after a store on THAT path)."
   [states]
-  (cond (some #(= ::refused %) states) ::refused
-        (some #(= :spent %) states) :spent
+  (cond (first-truthy #(= ::refused %) states) ::refused
+        (first-truthy #(= :spent %) states) :spent
         :else :live))
 
 (declare walk)
@@ -348,7 +358,7 @@
   [form target]
   (if (and (contains? consuming (first form)) (= target (second form)))
     1
-    (some (fn [[name index]]
+    (first-truthy (fn [[name index]]
             (when (and (= name (first form))
                        (= target (nth form (inc index) ::none)))
               (inc index)))
@@ -389,7 +399,7 @@
         ;; follows from :live. The state handed back is the inner one, so a
         ;; later mention of an outer handle of the same name is judged as if
         ;; it were this one -- over-refusal, the safe direction.
-        (if (some #(occurs? % target) (map second (take (inc i) pairs)))
+        (if (first-truthy #(occurs? % target) (map second (take (inc i) pairs)))
           ::refused
           (->> :live
                (walk-seq (map second (drop (inc i) pairs)) target false)
@@ -411,7 +421,7 @@
     (contains? '#{if-let when-let} (first form))
     (let [[_ bindings & more] form
           s (if (vector? bindings)
-              (if (some #(= target %) (take-nth 2 bindings))
+              (if (first-truthy #(= target %) (take-nth 2 bindings))
                 ::refused
                 (walk-seq (take-nth 2 (rest bindings)) target false state))
               ::refused)]
@@ -434,7 +444,7 @@
           arms (concat (map second (partition 2 clauses))
                        (when (odd? (count clauses)) [(last clauses)]))
           keys* (map first (partition 2 clauses))]
-      (if (some #(occurs? % target) keys*)
+      (if (first-truthy #(occurs? % target) keys*)
         ::refused
         (join (into [s] (map #(walk % target tail? s) arms)))))
 
@@ -579,7 +589,7 @@
               ;; Every name but the last is consumed by some later initialiser
               ;; -- otherwise it is not a thread, just several vectors.
               (every? (fn [n]
-                        (some (fn [pair] (consuming-call? (second pair) n)) pairs))
+                        (first-truthy (fn [pair] (consuming-call? (second pair) n)) pairs))
                       (butlast names))
               ;; The last name is the live one and may be read, linearly.
               (let [live (last names)]
@@ -655,7 +665,7 @@
             :else
             (or (linear? whole argument)
                 (and (linear-returning? whole argument)
-                     (some (fn [index]
+                     (first-truthy (fn [index]
                              (contains? assumed [caller index]))
                            (keep-indexed #(when (= %2 argument) %1) params)))))))
       (calls-to (cons 'do body) name)))
