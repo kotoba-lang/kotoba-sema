@@ -6,7 +6,7 @@
   ;; spec validation (confirmed live; see `kotoba.kir`'s ns form
   ;; for the fuller explanation). `#?@` (splicing) rather than `#?` here
   ;; because each branch below is more than one require-spec.
-  (:require [clojure.set :as set]
+  (:require [kotoba.lang.coll :as set]
             ;; isr: `starts-with?`/`subs` for the interrupt entry name rule.
             ;; The alias does not shadow `clojure.core/str`: only symbols
             ;; carrying a `/` are resolved through it.

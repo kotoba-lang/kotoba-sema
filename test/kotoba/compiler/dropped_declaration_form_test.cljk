@@ -60,7 +60,7 @@
      are asserted to STILL COMPUTE, in the same file."
   (:require #?(:clj  [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
-            [clojure.set :as set]
+            [kotoba.lang.coll :as set]
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.kir :as kir]
