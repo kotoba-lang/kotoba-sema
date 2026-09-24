@@ -25,6 +25,16 @@
             [kotoba.compiler.kotoba-reader :as kr]
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
 
+;; clojure.core/some, spelled as the loop it is. In Kotoba `some` is the
+;; option constructor and a two-argument `(some pred coll)` is refused as a
+;; name collision (kotoba-sema frontend); this is the same definition as
+;; clojure.core/some -- the first logical-true (pred x), in order, stopping
+;; there -- so the host answer is unchanged on nbb and the JVM.
+(defn- first-truthy [pred coll]
+  (loop [s (seq coll)]
+    (when s
+      (or (pred (first s)) (recur (next s))))))
+
 (defn- load-catalog-forbidden
   "P0: merge catalog forbidden-heads when guest-grammar.edn is on classpath."
   []
@@ -2816,7 +2826,7 @@
     (list 'typed-map-new type)
 
     (variant-type? type)
-    (some (fn [[tag payload-type]]
+    (first-truthy (fn [[tag payload-type]]
             (when-let [payload (closure-default-value-expr payload-type)]
               (list 'variant-new type tag payload)))
           (nth type 2))
@@ -2928,7 +2938,7 @@
        (not (contains? non-shadowable-special-heads (first form)))))
 
 (defn- callable-clause-for-arity [contract arity form]
-  (or (some #(when (= arity (count (first %))) %) (callable-clauses contract))
+  (or (first-truthy #(when (= arity (count (first %))) %) (callable-clauses contract))
       (reject! "callable contract does not admit this arity"
                form :kotoba.error/callable-arity)))
 
@@ -3665,7 +3675,7 @@
   (let [[predicate dispatch & clauses] args]
     (when-not (and (symbol? predicate) (nil? (namespace predicate)))
       (reject! "condp predicate must be an unqualified function symbol" form))
-    (when (some #{:>>} clauses)
+    (when (first-truthy #{:>>} clauses)
       (reject! "condp :>> clauses are not supported by this portable profile" form))
     (let [default? (odd? (count clauses))
           default (if default? (last clauses) '(quot 1 0))
@@ -4011,7 +4021,7 @@
   [rec-type field]
   (let [rec (resolve-ref-type rec-type)]
     (when (and (record-type? rec) (keyword? field))
-      (some (fn [[k t]] (when (= k field) t))
+      (first-truthy (fn [[k t]] (when (= k field) t))
             (nth rec 2)))))
 
 (defn- option-vector-type?
@@ -4488,7 +4498,7 @@
   * more than `max-record-fields` entries -- the bound `defrecord` has."
   [form entries]
   (let [typed (mapv (fn [[k v]] [k (map-literal-record-field-type v)]) entries)]
-    (when (some (fn [[_ t]] (and (some? t) (not= :i64 t))) typed)
+    (when (first-truthy (fn [[_ t]] (and (some? t) (not= :i64 t))) typed)
       (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
         (reject! (str "map literal with keyword keys and a non-i64 value lowers "
                       "to a closed record, and the value at key "
@@ -4782,8 +4792,8 @@
   (cond
     (seq? form) (or (= string-from-i64-helper-name (first form))
                     (= string-from-i64-nat-helper-name (first form))
-                    (some uses-string-from-i64? (rest form)))
-    (coll? form) (some uses-string-from-i64? form)
+                    (first-truthy uses-string-from-i64? (rest form)))
+    (coll? form) (first-truthy uses-string-from-i64? form)
     :else false))
 
 (def ^:private map-get-helper-name '__kotoba_map_get)
@@ -4811,8 +4821,8 @@
 (defn- uses-map-get? [form]
   (cond
     (seq? form) (or (= map-get-helper-name (first form))
-                    (some uses-map-get? (rest form)))
-    (coll? form) (some uses-map-get? form)
+                    (first-truthy uses-map-get? (rest form)))
+    (coll? form) (first-truthy uses-map-get? form)
     :else false))
 
 (def ^:private map-without-helper-name '__kotoba_map_without)
@@ -4843,8 +4853,8 @@
 
 (defn- uses-map-without? [form]
   (cond
-    (seq? form) (or (= map-without-helper-name (first form)) (some uses-map-without? (rest form)))
-    (coll? form) (some uses-map-without? form)
+    (seq? form) (or (= map-without-helper-name (first form)) (first-truthy uses-map-without? (rest form)))
+    (coll? form) (first-truthy uses-map-without? form)
     :else false))
 
 ;; ---------------------------------------------------------------------------
@@ -5427,7 +5437,7 @@
   (and (seq? form) (= 'quote (first form)) (= 2 (count form))))
 
 (defn- holds-symbol? [datum]
-  (some symbol? (tree-seq coll? seq datum)))
+  (first-truthy symbol? (tree-seq coll? seq datum)))
 
 (defn- quoted-scalar-type
   "The value type of a scalar inside a quoted symbol-key map, or nil."
@@ -5823,7 +5833,7 @@
                   arities (get *function-arities* function-name)]
               (when-not (seq arities)
                 (reject! "fn-ref requires a declared top-level function" function-name))
-              (when (some #(> % 4) arities)
+              (when (first-truthy #(> % 4) arities)
                 (reject! "fn-ref target exceeds closure ABI arity four" function-name))
               (lift-lambda
                (cons 'fn
@@ -6298,7 +6308,7 @@
             (let [[type tag payload] args
                   canonical-type (canonical-closure-result-type type)
                   payload-type (when (variant-type? canonical-type)
-                                 (some (fn [[case-tag case-type]]
+                                 (first-truthy (fn [[case-tag case-type]]
                                          (when (= case-tag tag) case-type))
                                        (nth canonical-type 2)))]
               (list 'variant-new type tag
@@ -6626,7 +6636,7 @@
               (reject! "record-assoc requires type, value, literal field, and replacement" form))
             (let [type (canonical-closure-result-type (first args))
                   field-type (when (record-type? type)
-                               (some (fn [[field field-type]]
+                               (first-truthy (fn [[field field-type]]
                                        (when (= field (nth args 2)) field-type))
                                      (nth type 2)))]
               (list 'record-assoc type (desugar-expected-value type (second args))
@@ -7323,7 +7333,7 @@
         ;; program keeps its HIR and its CIDs.
         contracts (into {}
                         (filter (fn [[_ contract]]
-                                  (some (fn [[parameter-types _]]
+                                  (first-truthy (fn [[parameter-types _]]
                                           (not (i64-parameter-types? parameter-types)))
                                         (callable-clauses contract))))
                         contracts)]
@@ -7467,26 +7477,26 @@
   "Whether this body mentions the slice at all. A `false` here is what makes
   the pass a no-op -- and therefore byte-identical -- for every other program."
   [form]
-  (boolean (some (fn [node]
+  (boolean (first-truthy (fn [node]
                    (when-let [head (local-state-head node)]
                      (or (contains? local-state-write-heads head)
                          (local-state-deref-head? head))))
                  (local-state-nodes form))))
 
 (defn- local-state-writes? [form]
-  (boolean (some (fn [node]
+  (boolean (first-truthy (fn [node]
                    (when-let [head (local-state-head node)]
                      (contains? local-state-write-heads head)))
                  (local-state-nodes form))))
 
 (defn- local-state-reads? [form]
-  (boolean (some (fn [node]
+  (boolean (first-truthy (fn [node]
                    (when-let [head (local-state-head node)]
                      (local-state-deref-head? head)))
                  (local-state-nodes form))))
 
 (defn- local-state-mentions-cell? [form cells]
-  (boolean (some #(and (symbol? %) (contains? cells %)) (local-state-nodes form))))
+  (boolean (first-truthy #(and (symbol? %) (contains? cells %)) (local-state-nodes form))))
 
 (defn- local-state-touches? [form cells]
   (or (local-state-writes? form)
@@ -7494,7 +7504,7 @@
       (local-state-mentions-cell? form cells)))
 
 (defn- local-state-effectful? [form]
-  (boolean (some (fn [node]
+  (boolean (first-truthy (fn [node]
                    (when-let [head (local-state-head node)]
                      (or (contains? local-state-effect-heads head)
                          (contains? source-operation-registry head))))
@@ -8355,7 +8365,7 @@
               fields (when (record-type? type) (nth type 2))]
           (when-not (= 3 (count args)) (reject! "record projection shape is invalid" form))
           (validate-value-type! type)
-          (when-not (and (record-type? type) (keyword? field) (some #{field} (map first fields)))
+          (when-not (and (record-type? type) (keyword? field) (first-truthy #{field} (map first fields)))
             (reject! "record field must be a declared keyword literal" form))
           (validate-expr value locals functions (inc depth) budget))
 
@@ -8364,7 +8374,7 @@
               fields (when (record-type? type) (nth type 2))]
           (when-not (= 4 (count args)) (reject! "record replacement shape is invalid" form))
           (validate-value-type! type)
-          (when-not (and (record-type? type) (keyword? field) (some #{field} (map first fields)))
+          (when-not (and (record-type? type) (keyword? field) (first-truthy #{field} (map first fields)))
             (reject! "record field must be a declared keyword literal" form))
           (validate-expr value locals functions (inc depth) budget)
           (validate-expr replacement locals functions (inc depth) budget))
@@ -8709,7 +8719,7 @@
   `infer-absent-parameter-types` can refine a provisional-i64 parameter to the
   float its sibling operand demands."
   [op args types]
-  (let [float-type (some #{:f64 :f32} types)]
+  (let [float-type (first-truthy #{:f64 :f32} types)]
     (if (nil? float-type)
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :i64 arg))
@@ -8830,7 +8840,7 @@
          (let [data (ex-data error)]
            (if (and (:phase data)
                     (not (contains? data :kotoba.error/use-site))
-                    (some #(= % (:form data)) args))
+                    (first-truthy #(= % (:form data)) args))
              (throw (ex-info (ex-message error)
                              (assoc data :kotoba.error/use-site (cons op args))))
              (throw error))))))
@@ -8863,7 +8873,7 @@
           :i64)
 
       (= op '=)
-      (if (some #{:f64 :f32} types)
+      (if (first-truthy #{:f64 :f32} types)
         ;; Float equality resolves to `f64-eq`/`f32-eq` (IEEE: NaN is never
         ;; equal); a float next to an i64 or the other float width is the
         ;; mixed-type rejection, not "outside the safe value profile".
@@ -9621,7 +9631,7 @@
         variant-new
         (let [[type tag payload] args
               type (canonical-closure-result-type type)
-              payload-type (some (fn [[case-tag case-type]]
+              payload-type (first-truthy (fn [[case-tag case-type]]
                                    (when (= case-tag tag) case-type))
                                  (nth type 2))]
           (validate-value-type! type)
@@ -10043,7 +10053,7 @@
           type)
         record-get
         (let [[type value field] args
-              field-type (some (fn [[declared-field declared-type]]
+              field-type (first-truthy (fn [[declared-field declared-type]]
                                  (when (= declared-field field) declared-type))
                                (nth type 2))]
           (validate-value-type! type)
@@ -10051,7 +10061,7 @@
           field-type)
         record-assoc
         (let [[type value field replacement] args
-              field-type (some (fn [[declared-field declared-type]]
+              field-type (first-truthy (fn [[declared-field declared-type]]
                                  (when (= declared-field field) declared-type))
                                (nth type 2))]
           (validate-value-type! type)
@@ -10538,7 +10548,7 @@
   permissive -- an intermediate disagreement is usually a placeholder that has
   not settled yet -- and the last one refuses."
   [functions shapes]
-  (if-not (some :loop-helper? functions)
+  (if-not (first-truthy :loop-helper? functions)
     functions
     (letfn [(result-of [f fs]
               (loop-helper-result f (:declared-result (get shapes (:name f)))
@@ -11463,7 +11473,7 @@
               ;; already gets through `contextual-f32-argument-indexes`. The
               ;; literal reaches this pass as the closed `(f64-from-bits N)`
               ;; form desugar produced; nothing but that shape is touched.
-              rewritten (if (some #{:f32} types)
+              rewritten (if (first-truthy #{:f32} types)
                           (mapv (fn [arg type]
                                   (if (and (= :f64 type) (f64-bits-literal-form? arg))
                                     (list 'f32-from-bits
@@ -11471,7 +11481,7 @@
                                     arg))
                                 rewritten types)
                           rewritten)
-              types (if (some #{:f32} types) (mapv operand-type rewritten) types)]
+              types (if (first-truthy #{:f32} types) (mapv operand-type rewritten) types)]
           (if (and (seq types) (every? #{:f64 :f32} types) (apply = types))
             (resolve-float-operator op (first types) rewritten)
             (cons op rewritten)))
@@ -11593,7 +11603,7 @@
             (recur (next pairs) need)))
         (reduce need-join need (map #(binding-need binder %) (drop 2 form)))))
     (and (seq? form) (= 'fn (first form)))
-    (if (some #(= binder %) (tree-seq coll? seq form)) :sometimes :never)
+    (if (first-truthy #(= binder %) (tree-seq coll? seq form)) :sometimes :never)
     (coll? form) (reduce need-join :never (map #(binding-need binder %) (seq form)))
     :else :never))
 
@@ -11610,14 +11620,14 @@
       (if (and (= :never (binding-need binder test))
                (not= then-refers? else-refers?))
         [form (if then-refers? :then :else)]
-        (some #(deciding-branch binder %) [test then else])))
-    (coll? form) (some #(deciding-branch binder %) (seq form))
+        (first-truthy #(deciding-branch binder %) [test then else])))
+    (coll? form) (first-truthy #(deciding-branch binder %) (seq form))
     :else nil))
 
 (defn- self-call-in
   "The first call to one of SELF-NAMES inside FORM, or nil."
   [self-names form]
-  (some #(when (and (seq? %) (contains? self-names (first %))) %)
+  (first-truthy #(when (and (seq? %) (contains? self-names (first %))) %)
         (tree-seq coll? seq form)))
 
 (defn- eager-recursive-let-binding!
@@ -11769,7 +11779,7 @@
         fs
         (let [table (signature-table fs)
               refinement
-              (some (fn [{:keys [name params param-types body param-types-inferred]}]
+              (first-truthy (fn [{:keys [name params param-types body param-types-inferred]}]
                       (when (seq param-types-inferred)
                         (try
                           (do (infer-expression-type body (zipmap params param-types) table)
@@ -11883,7 +11893,7 @@
   every abort pass makes first, so a module without either takes exactly the
   path it took before the ability existed."
   [form]
-  (boolean (some #(and (seq? %) (contains? '#{throw try} (first %)))
+  (boolean (first-truthy #(and (seq? %) (contains? '#{throw try} (first %)))
                  (tree-seq coll? seq form))))
 
 (defn- abort-escapes?
@@ -11898,14 +11908,14 @@
         (= op 'throw) true
         (= op 'try) (abort-escapes? (last (second args)) abort-error-types)
         (contains? abort-error-types op) true
-        :else (boolean (some #(abort-escapes? % abort-error-types) args))))
-    (coll? form) (boolean (some #(abort-escapes? % abort-error-types) form))
+        :else (boolean (first-truthy #(abort-escapes? % abort-error-types) args))))
+    (coll? form) (boolean (first-truthy #(abort-escapes? % abort-error-types) form))
     :else false))
 
 (defn- first-aborting-call
   "The name of the first aborting function FORM calls, for a refusal."
   [form abort-error-types]
-  (some (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
+  (first-truthy (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
         (tree-seq coll? seq form)))
 
 (defn- abort-synthesized-context
@@ -11942,7 +11952,7 @@
   `[:result :i64 :string]`, contains no seq and is therefore trivial -- which
   is what keeps a type out of a `let` binding, where it would not be a value."
   [form]
-  (not (some seq? (tree-seq coll? seq form))))
+  (not (first-truthy seq? (tree-seq coll? seq form))))
 
 (defn- a-normalize-aborts
   "A-normalize every aborting form into a position the elaboration admits:
@@ -12176,7 +12186,7 @@
   Returns `{:functions fs :abort-error-types {name E}}`. A module with no
   `throw`/`try` returns exactly `(infer-absent-results functions)` and `{}`."
   [functions]
-  (if-not (some #(abort-form-mentions? (:body %)) functions)
+  (if-not (first-truthy #(abort-form-mentions? (:body %)) functions)
     {:functions (infer-absent-results functions) :abort-error-types {}}
     (loop [known {} fs functions]
       (let [fs (binding [*abort-error-types* known]
@@ -12218,7 +12228,7 @@
                               name :kotoba.error/abort-error-type)
 
                      (and (= 1 (count own))
-                          (some (fn [[_ e]] (not (same-expression-type? e (first own)))) sites))
+                          (first-truthy (fn [[_ e]] (not (same-expression-type? e (first own)))) sites))
                      (let [[callee callee-error]
                            (first (remove (fn [[_ e]] (same-expression-type? e (first own))) sites))]
                        (reject! (str "function " label " throws " (abort-type-text (first own))
@@ -12229,7 +12239,7 @@
                      (and (empty? own) (> (count propagated) 1))
                      (let [[[a ae] [b be]] (->> sites
                                                 (reduce (fn [seen [callee e]]
-                                                          (if (some (fn [[_ s]] (same-expression-type? s e)) seen)
+                                                          (if (first-truthy (fn [[_ s]] (same-expression-type? s e)) seen)
                                                             seen
                                                             (conj seen [callee e])))
                                                         [])
@@ -12284,7 +12294,7 @@
   signatures, never from lowered forms, so the two views never disagree."
   [functions abort-error-types]
   (if-not (or (seq abort-error-types)
-              (some #(abort-form-mentions? (:body %)) functions))
+              (first-truthy #(abort-form-mentions? (:body %)) functions))
     functions
     (let [sigs (abort-signatures functions)]
       (binding [*abort-error-types* abort-error-types
@@ -12550,7 +12560,7 @@
     (letfn [(binding-value [env name]
               (get env name))
             (lambda-info-for-id [id]
-              (some #(when (= id (:id %)) %) lambda-infos))
+              (first-truthy #(when (= id (:id %)) %) lambda-infos))
             (pair-chain-values [form]
               (loop [chain form values []]
                 (cond
@@ -12568,7 +12578,7 @@
                    ;; path. Lambda IDs are bounded by max-functions, so a
                    ;; deterministic linear scan avoids hashing arbitrary pair
                    ;; payloads without widening the analysis.
-                   (some #(= % (second form)) lambda-ids)))
+                   (first-truthy #(= % (second form)) lambda-ids)))
             (zero-tested-symbol [form]
               (when (and (seq? form) (= '= (first form)) (= 3 (count form)))
                 (let [[left right] (rest form)]
@@ -12649,7 +12659,7 @@
                                               function-name % env param-indexes facts seen)
                                              args)]
                       (cond
-                        (some #{:trap} arg-statuses) :trap
+                        (first-truthy #{:trap} arg-statuses) :trap
                         (and (contains? function-names op)
                              (get-in facts [op :result?])) :closure
                         :else :unknown))))
@@ -12879,11 +12889,11 @@
 
 (defn- form-contains-linear-call?
   [form]
-  (boolean (some linear-typed-cap-call? (tree-seq coll? seq form))))
+  (boolean (first-truthy linear-typed-cap-call? (tree-seq coll? seq form))))
 
 (defn- mentions-sym?
   [form sym]
-  (boolean (some #(= % sym) (tree-seq coll? seq form))))
+  (boolean (first-truthy #(= % sym) (tree-seq coll? seq form))))
 
 (defn- exclusive-use-of-linear
   "If `form` exclusively moves or consumes `sym` (no other linear calls),
@@ -13016,7 +13026,7 @@
 
 (defn- check-linear-resource-ownership! [functions]
   (doseq [{:keys [param-types result body] :as function} functions]
-    (when (some linear-resource-type? param-types)
+    (when (first-truthy linear-resource-type? param-types)
       (reject! "linear resources require move-aware parameters"
                (:name function)))
     (let [linear-calls
@@ -13448,8 +13458,8 @@
                            calls)))
            facts)
      :uses-boot-info?
-     (boolean (some (fn [{:keys [body]}]
-                      (some #(and (seq? %) (= 'kernel-boot-info (first %)))
+     (boolean (first-truthy (fn [{:keys [body]}]
+                      (first-truthy #(and (seq? %) (= 'kernel-boot-info (first %)))
                             (tree-seq coll? seq body)))
                     functions))
      :tainted tainted
@@ -13463,8 +13473,8 @@
 
 (defn- check-kernel-region-provenance! [functions]
   (let [function-names (into #{} (map :name) functions)]
-    (when (some (fn [{:keys [body]}]
-                  (some #(and (seq? %) (kernel-memory-op? (first %)))
+    (when (first-truthy (fn [{:keys [body]}]
+                  (first-truthy #(and (seq? %) (kernel-memory-op? (first %)))
                         (tree-seq coll? seq body)))
                 functions)
       (let [{:keys [tainted]} (kernel-region-report functions)]
@@ -13560,7 +13570,7 @@
   (symbol (str "slice-" kind "-" (name element))))
 
 (defn- uses-slice-values? [body slice-parameters]
-  (boolean (some #(and (seq? %)
+  (boolean (first-truthy #(and (seq? %)
                        (or (contains? slice-value-operations (first %))
                            ;; A caller that merely PASSES a slice on has no
                            ;; slice operation of its own. Without this arm it
@@ -14032,7 +14042,7 @@
                        ;; the wrong name (see `affine/expand-threads`).
                        (map #(update % :body (fn [body] (map affine/expand-threads body)))))
         _ (doseq [{:keys [name body]} functions]
-            (when-let [form (some affine/unanalysable-thread body)]
+            (when-let [form (first-truthy affine/unanalysable-thread body)]
               (reject! (str "vector-assoc! inside " (first form) " in " name
                             " cannot be checked for linearity; write the"
                             " writes as nested calls or a let")
@@ -14150,7 +14160,7 @@
   (symbol (str (name source-name) "$arity$" arity)))
 
 (defn- variadic-params? [raw-params]
-  (and (vector? raw-params) (boolean (some #(= '& %) raw-params))))
+  (and (vector? raw-params) (boolean (first-truthy #(= '& %) raw-params))))
 
 (defn- declaration-clauses
   "The `(params ...)` clauses a defn form declares, single-arity written as
@@ -14172,7 +14182,7 @@
   (into #{}
         (keep (fn [[_ source-name :as form]]
                 (when (and (symbol? source-name)
-                           (some #(variadic-params? (first %)) (declaration-clauses form)))
+                           (first-truthy #(variadic-params? (first %)) (declaration-clauses form)))
                   source-name)))
         defs))
 
@@ -14761,7 +14771,7 @@
                                       (pr-str (into (sorted-set) (concat (:effects hir) (:named-operations hir))))
                                       " -- a module-level constant must be effect-free; move it into a function or a capability")
                             form))
-          probe-function (some #(when (= fold-probe-function (:name %)) %) (:functions hir))
+          probe-function (first-truthy #(when (= fold-probe-function (:name %)) %) (:functions hir))
           result-type (:result probe-function)
           ;; A closure, a cons list, a lazy sequence and a kgraph datom are
           ;; all `:i64` HANDLES into the interpreter's arenas -- the number
@@ -15068,7 +15078,7 @@
       (reject! "desugar template parameter count exceeds limit" form))
     (when-not (every? simple-symbol? params)
       (reject! "desugar template parameters must be plain symbols" params))
-    (when (some reserved-binding-name? params)
+    (when (first-truthy reserved-binding-name? params)
       (reject! "symbol uses the reserved __kotoba_ prefix" params))
     (when-not (= (count params) (count (set params)))
       (reject! "desugar template parameters must be distinct" params))
@@ -15413,9 +15423,9 @@
          field-parts)])
 
 (defn- record-field-parts [fields form]
-  (let [typed? (or (some keyword? fields)
+  (let [typed? (or (first-truthy keyword? fields)
                    (and (even? (count fields))
-                        (some structured-type? (map second (partition 2 fields)))))]
+                        (first-truthy structured-type? (map second (partition 2 fields)))))]
     (if typed?
       (do
         (when-not (even? (count fields))
@@ -15886,7 +15896,7 @@
   (rewrite-record-member-access* form receiver descriptor true))
 
 (defn- expand-record-protocol-forms [forms]
-  (let [namespace-symbol (or (some (fn [form]
+  (let [namespace-symbol (or (first-truthy (fn [form]
                                      (when (and (seq? form) (= 'ns (first form)))
                                        (second form)))
                                    forms)
@@ -16023,8 +16033,8 @@
         (into {} (keep (fn [{:keys [descriptor]}]
                          (let [field-types (map second (nth descriptor 2))
                                inline-nominal?
-                               (some (fn [field-type]
-                                       (some #(or (record-type? %)
+                               (first-truthy (fn [field-type]
+                                       (first-truthy #(or (record-type? %)
                                                   (variant-type? %))
                                              (tree-seq coll? seq field-type)))
                                      field-types)]
@@ -16194,10 +16204,10 @@
         function-arities
         (reduce (fn [out {:keys [source-name logical-arity raw-params]}]
                   (if (vector? raw-params)
-                    (let [typed? (or (some keyword? raw-params)
-                                     (some type-alias-form? raw-params)
+                    (let [typed? (or (first-truthy keyword? raw-params)
+                                     (first-truthy type-alias-form? raw-params)
                                      (and (even? (count raw-params))
-                                          (some structured-type?
+                                          (first-truthy structured-type?
                                                 (map second (partition 2 raw-params)))))
                           arity (or logical-arity
                                     (if typed? (quot (count raw-params) 2)
@@ -16228,10 +16238,10 @@
               (keep (fn [{:keys [source-name logical-arity raw-params
                                  callable-result-contract]}]
                       (when callable-result-contract
-                        (let [typed? (or (some keyword? raw-params)
-                                         (some type-alias-form? raw-params)
+                        (let [typed? (or (first-truthy keyword? raw-params)
+                                         (first-truthy type-alias-form? raw-params)
                                          (and (even? (count raw-params))
-                                              (some structured-type?
+                                              (first-truthy structured-type?
                                                     (map second (partition 2 raw-params)))))
                               arity (or logical-arity
                                         (if typed? (quot (count raw-params) 2)
@@ -16446,7 +16456,7 @@
                     @required-dispatchers)
               inference-functions
               (cond-> (into parsed (concat helpers inference-dispatchers))
-                (some #(uses-string-from-i64? (:body %)) helpers)
+                (first-truthy #(uses-string-from-i64? (:body %)) helpers)
                 (into [string-from-i64-nat-helper string-from-i64-helper]))
               candidates (binding [*schemas* (:schemas namespace-info)]
                            (->> inference-functions
@@ -16496,9 +16506,9 @@
         ;; below (signatures' map semantics silently drop one entry, count
         ;; mismatch trips it).
         parsed (cond-> parsed
-                 (some #(uses-map-get? (:body %)) parsed) (conj map-get-helper)
-                 (some #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
-                 (some #(uses-string-from-i64? (:body %)) parsed)
+                 (first-truthy #(uses-map-get? (:body %)) parsed) (conj map-get-helper)
+                 (first-truthy #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
+                 (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                  (#(into % [string-from-i64-nat-helper string-from-i64-helper])))
         parsed (mapv #(if (:param-types %)
                         %
@@ -16581,7 +16591,7 @@
                   ;; narrows the implicit export set to the public ones. Was
                   ;; `(some #(= 'defn- (first %)) defs)`, which read the
                   ;; head and would have exported a `^:private` function.
-                  (some (complement :public?) def-parts) (vec (mapcat expand-export source-public))
+                  (first-truthy (complement :public?) def-parts) (vec (mapcat expand-export source-public))
                   :else (mapv :name parsed))
         entry (when (contains? signatures 'main) 'main)]
     (when (seq (set/intersection (set (keys constants)) (set source-names)))
@@ -16604,7 +16614,7 @@
       (reject! "entryless library requires at least one exported function" exports))
     (when (and entry (not (empty? (get signatures entry))))
       (reject! "main must take zero arguments" 'main))
-    (when (and entry (not (some #{entry} exports)))
+    (when (and entry (not (first-truthy #{entry} exports)))
       (reject! "main entrypoint must be exported" exports))
     ;; Abort ability, slice 1: an aborting function's interface is
     ;; `[:result T E]`, which the wire ABI does not carry across an export
@@ -16669,12 +16679,12 @@
     (check-lowering-budget! parsed)
     (let [typed-values? (boolean
                          (or (seq (:schemas namespace-info))
-                             (some #(or (seq (:closure-param-indexes %))
+                             (first-truthy #(or (seq (:closure-param-indexes %))
                                         (seq (:i64-pair-chain-param-indexes %))
                                         (:closure-result? %))
                                parsed)
-                         (some (fn [{:keys [param-types result body]}]
-                                 (or (some #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
+                         (first-truthy (fn [{:keys [param-types result body]}]
+                                 (or (first-truthy #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
                                                 (structured-type? %)) param-types)
                                      (or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} result)
                                          (structured-type? result))
@@ -16684,7 +16694,7 @@
                                      ;; `:param-types` table in typed HIR. Without that, a
                                      ;; library whose only typed feature is `[b :bool]` emits
                                      ;; compatibility HIR and silently relabels `b` as :i64.
-                                     (some #(or (string? %) (keyword? %)
+                                     (first-truthy #(or (string? %) (keyword? %)
                                                 (and (seq? %)
                                                      (or (contains? typed-map-operations (first %))
                                                          (contains? typed-safe-value-operations (first %))
@@ -16755,7 +16765,7 @@
                               true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?)
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
-          main-result (some->> parsed (some #(when (= 'main (:name %)) (:result %))))
+          main-result (some->> parsed (first-truthy #(when (= 'main (:name %)) (:result %))))
           named-operations (cond-> (into (sorted-set) @used-capabilities)
                              ;; The elaboration adds nothing to the effect row
                              ;; -- the cell does not exist at runtime -- so this
