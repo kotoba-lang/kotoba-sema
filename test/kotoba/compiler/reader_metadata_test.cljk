@@ -36,7 +36,7 @@
   firing on what it is for, and privacy is proved by the export refusal --
   parsing `^:private` is not honouring it."
   (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.compiler.kotoba-reader :as kr]
             [kotoba.sema :as sema]))
 
