@@ -11206,18 +11206,37 @@
           (when-not (seq items)
             (reject! (str op " requires a set and at least one item")
                      form :kotoba.error/set-operation-arity))
-          (when-not (typed-set-type? value-type)
-            (reject! (str op " requires a typed set [:set item-type]; got "
-                          (pr-str value-type)
-                          ". A bounded vector answers to vector-conj, and a "
-                          "canonical typed map answers to typed-map-assoc and "
-                          "typed-map-dissoc")
-                     form (if conj?
-                            :kotoba.error/set-conj-receiver
-                            :kotoba.error/set-disj-receiver)))
-          (reduce (fn [accumulated item]
-                    (list primitive value-type accumulated item))
-                  receiver items))
+          (cond
+            ;; `conj` on a bounded vector appends at the END, which is what
+            ;; Clojure's `conj` does to a vector and what `vector-conj` /
+            ;; `vector-f64-conj` already are. Until 2026-09-25 this arm knew
+            ;; only the typed set and told the author to spell the vector
+            ;; primitive by hand, so `(conj (filterv p v) x)` -- ordinary
+            ;; Clojure -- was refused. `disj` stays set-only: it has no vector
+            ;; meaning in Clojure either.
+            (and conj? (= :vector-i64 value-type))
+            (reduce (fn [accumulated item] (list 'vector-conj accumulated item))
+                    receiver items)
+
+            (and conj? (= :vector-f64 value-type))
+            (reduce (fn [accumulated item] (list 'vector-f64-conj accumulated item))
+                    receiver items)
+
+            :else
+            (do
+              (when-not (typed-set-type? value-type)
+                (reject! (str op " requires a typed set [:set item-type]"
+                              (when conj? " or a bounded :vector-i64 / :vector-f64")
+                              "; got " (pr-str value-type)
+                              ". A bounded vector answers to vector-conj, and a "
+                              "canonical typed map answers to typed-map-assoc and "
+                              "typed-map-dissoc")
+                         form (if conj?
+                                :kotoba.error/set-conj-receiver
+                                :kotoba.error/set-disj-receiver)))
+              (reduce (fn [accumulated item]
+                        (list primitive value-type accumulated item))
+                      receiver items))))
 
         (= op 'vector-drop)
         (let [rewritten-args
