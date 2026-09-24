@@ -23,7 +23,7 @@
   is a throw-free program whose HIR and KIR hashes were taken on the commit
   before this ability existed (kotoba-sema c14ca39e): a change to how any
   throw-free program lowers would move them."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.bytes :as kbytes] [kotoba.test :refer [deftest is testing]]
             [kotoba.kir :as kir]
             [kotoba.sema :as sema]))
 
@@ -379,7 +379,7 @@
 
 (defn- sha256-hex [^String text]
   (let [digest (java.security.MessageDigest/getInstance "SHA-256")]
-    (apply str (map #(format "%02x" %) (.digest digest (.getBytes text "UTF-8"))))))
+    (apply str (map #(format "%02x" %) (.digest digest (kbytes/utf8-bytes text))))))
 
 (deftest a-throw-free-program-lowers-byte-for-byte-as-before
   ;; Both hashes were taken on kotoba-sema c14ca39e, the main tip before this
