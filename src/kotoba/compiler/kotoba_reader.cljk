@@ -31,10 +31,10 @@
   (:require [kotoba.lang.text :as str]))
 
 (defn- whitespace-char? [ch]
-  (or (= ch \space) (= ch \tab) (= ch \newline) (= ch \return) (= ch \,)))
+  (or (= ch " ") (= ch "\t") (= ch "\n") (= ch "\r") (= ch ",")))
 
 (defn- delimiter-char? [ch]
-  (contains? #{\( \) \[ \] \{ \} \" \; nil} ch))
+  (contains? #{"(" ")" "[" "]" "{" "}" "\"" ";" nil} ch))
 
 ;; `depth`/`max-depth` and `max-token-chars` mirror
 ;; `kotoba.compiler.bounded-edn/preflight!`'s two DURING-parse guards
@@ -160,7 +160,7 @@
   `:vector-i64`, so meta shape is load-bearing, not cosmetic)."
   [st]
   (let [st-open (advance (advance st)) ; consume `#` and `(`
-        [st forms] (read-delimited st-open \))]
+        [st forms] (read-delimited st-open ")")]
     (when (empty? forms)
       (reject! "#() shorthand requires a body" {}))
     (when (some #(and (symbol? %) (not (namespace %)) (= "%&" (name %)))
@@ -199,9 +199,9 @@
       (cond
         (nil? ch) st
         (whitespace-char? ch) (recur (advance st))
-        (= ch \;) (recur (loop [st (advance st)]
+        (= ch ";") (recur (loop [st (advance st)]
                            (let [ch (peek-ch st)]
-                             (if (or (nil? ch) (= ch \newline))
+                             (if (or (nil? ch) (= ch "\n"))
                                st
                                (recur (advance st))))))
         :else st))))
@@ -359,21 +359,21 @@
     (if (>= i (count s))
       (apply str (persistent! acc))
       (let [ch (nth s i)]
-        (if (and (= ch \\) (< (inc i) (count s)))
+        (if (and (= ch "\\") (< (inc i) (count s)))
           (let [nxt (nth s (inc i))
                 ;; `\uXXXX` -- exactly four hex digits, one UTF-16 code unit,
                 ;; as Clojure's reader defines it. Measured 2026-09-11 in the
                 ;; compiler's own bounded_edn / elf64 sources; without it the
                 ;; whole file is refused at the reader, before any semantics.
                 [mapped width]
-                (if (= nxt \u)
+                (if (= nxt "u")
                   (let [hex (subs s (+ i 2) (min (count s) (+ i 6)))]
                     (when-not (and (= 4 (count hex)) (re-matches #"[0-9a-fA-F]{4}" hex))
                       (reject! "unsupported string escape" {:escape nxt :hex hex}))
                     [(char #?(:clj (Integer/parseInt hex 16) :cljs (js/parseInt hex 16))) 6])
                   [(case nxt
-                     \n \newline \t \tab \r \return
-                     \\ \\ \" \" \0 (char 0)
+                     "n" "\n" "t" "\t" "r" "\r"
+                     "\\" "\\" "\"" "\"" "0" (char 0)
                      ;; `\b` and `\f` are the two remaining single-letter
                      ;; escapes Clojure's StringReader accepts (backspace,
                      ;; form feed). Measured 2026-09-12: the reader refused
@@ -381,7 +381,7 @@
                      ;; THIS file (its own EDN printer) whole for one each,
                      ;; and every compiler module that requires either was
                      ;; refused `source reader rejected input` in a dependency.
-                     \b (char 8) \f (char 12)
+                     "b" (char 8) "f" (char 12)
                      (reject! "unsupported string escape" {:escape nxt}))
                    2])]
             (recur (+ i width) (conj! acc mapped)))
@@ -393,8 +393,8 @@
       (let [ch (peek-ch st)]
         (cond
           (nil? ch) (reject! "unterminated string literal" {})
-          (= ch \") [(advance st) (unescape (apply str acc))]
-          (and (= ch \\) (some? (peek-ch2 st)))
+          (= ch "\"") [(advance st) (unescape (apply str acc))]
+          (and (= ch "\\") (some? (peek-ch2 st)))
           (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
           :else (recur (advance st) (conj acc ch)))))))
 
@@ -406,9 +406,9 @@
     (let [ch (peek-ch st)]
       (cond
         (nil? ch) (reject! "unterminated regex literal" {})
-        (= ch \") [(advance st) (apply str acc)]
-        (and (= ch \\) (= (peek-ch2 st) \")) (recur (advance (advance st)) (conj acc \"))
-        (and (= ch \\) (some? (peek-ch2 st))) (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
+        (= ch "\"") [(advance st) (apply str acc)]
+        (and (= ch "\\") (= (peek-ch2 st) "\"")) (recur (advance (advance st)) (conj acc "\""))
+        (and (= ch "\\") (some? (peek-ch2 st))) (recur (advance (advance st)) (conj acc ch (peek-ch2 st)))
         :else (recur (advance st) (conj acc ch))))))
 
 (defn- splice?
@@ -519,18 +519,18 @@
     (cond
       (nil? ch) (reject! "unexpected end of input" {})
 
-      (= ch \() (let [[st forms] (read-delimited (advance st) \))]
+      (= ch "(") (let [[st forms] (read-delimited (advance st) ")")]
                   [st (located (apply list forms) start st) false])
 
-      (= ch \[) (let [[st forms] (read-delimited (advance st) \])]
+      (= ch "[") (let [[st forms] (read-delimited (advance st) "]")]
                   [st (located (vec forms) start st) false])
 
-      (= ch \{) (let [[st forms] (read-delimited (advance st) \})]
+      (= ch "{") (let [[st forms] (read-delimited (advance st) "}")]
                   (when (odd? (count forms))
                     (reject! "map literal must contain an even number of forms" {}))
                   [st (located (reader-map forms) start st) false])
 
-      (= ch \") (let [[st s] (read-string-literal st)] [st s false])
+      (= ch "\"") (let [[st s] (read-string-literal st)] [st s false])
 
       ;; `@a` is `(deref a)`. This dispatch had no case for `@` at all, and
       ;; `@` is not a delimiter, so `@a` fell through to
@@ -553,7 +553,7 @@
       ;; corpus exercises them, so their absence is UNMEASURED, not
       ;; known-good. Do not read this clause as evidence the rest are covered.
       ;; (`^meta` was on this list until 2026-09-11; see the `\^` arm below.)
-      (= ch \@) (let [[st inner _] (read-form (advance st))]
+      (= ch "@") (let [[st inner _] (read-form (advance st))]
                   [st (located (list 'deref inner) start st) false])
 
       ;; `'form` -> `(quote form)`. Measured 2026-09-11 (adr-2609111900): the
@@ -565,7 +565,7 @@
       ;; silently as the symbol named `'sym`. Whether `quote` is admitted is
       ;; the frontend's decision; the reader's job is to hand over what was
       ;; written.
-      (= ch \') (let [[st inner skipped?] (read-form (advance st))]
+      (= ch "'") (let [[st inner skipped?] (read-form (advance st))]
                   (when skipped? (reject! "quote must precede a form" {}))
                   [st (located (list 'quote inner) start st) false])
 
@@ -596,7 +596,7 @@
       ;; existing meta -- it does not `with-meta` a fresh map -- so the user's
       ;; keys survive it. A refusal inside a `^:private` function still
       ;; carries a `:span`; `reader_metadata_test` pins that.
-      (= ch \^)
+      (= ch "^")
       (let [[st meta-form meta-skipped?] (read-form (advance st))
             _ (when meta-skipped?
                 (reject! "metadata must be a keyword, symbol, string, or map"
@@ -623,25 +623,25 @@
         ;; comparator-ordered map `reader-map` builds and FORM has no meta.
         [st (located (with-meta form (merge {} (meta form) m)) start st) false])
 
-      (= ch \:) (read-keyword st)
+      (= ch ":") (read-keyword st)
 
-      (= ch \#)
+      (= ch "#")
       (let [ch2 (peek-ch2 st)]
         (cond
-          (= ch2 \() (read-fn-shorthand st)
-          (= ch2 \{) (let [[st forms] (read-delimited (advance (advance st)) \})]
+          (= ch2 "(") (read-fn-shorthand st)
+          (= ch2 "{") (let [[st forms] (read-delimited (advance (advance st)) "}")]
                        [st (located (reader-set forms) start st) false])
           ;; `#_ form` -- the discard is a reader-level comment: the next
           ;; form is read (so nesting and balance are honoured) and dropped.
-          (= ch2 \_) (let [[st _ _] (read-form (advance (advance st)))]
+          (= ch2 "_") (let [[st _ _] (read-form (advance (advance st)))]
                        [st nil true])
-          (= ch2 \?) (let [st (advance (advance st))
-                           splicing? (= (peek-ch st) \@)
+          (= ch2 "?") (let [st (advance (advance st))
+                           splicing? (= (peek-ch st) "@")
                            st (if splicing? (advance st) st)
                            st (skip-ws+comments st)]
-                       (when-not (= (peek-ch st) \()
+                       (when-not (= (peek-ch st) "(")
                          (reject! (if splicing? "expected `(` after `#?@`" "expected `(` after `#?`") {}))
-                       (let [[st clauses] (read-delimited (advance st) \))
+                       (let [[st clauses] (read-delimited (advance st) ")")
                              [form matched?] (reader-conditional-branch clauses)]
                          (cond
                            (not matched?) [st nil true]
@@ -658,11 +658,11 @@
           ;; `#:ns{...}` -- namespaced map literal. Unqualified keyword keys
           ;; take the namespace; `_/k` keeps the key bare; qualified keys and
           ;; non-keyword keys are untouched. Values are never rewritten.
-          (= ch2 \:) (let [[st ns-token] (read-token (advance (advance st)))
+          (= ch2 ":") (let [[st ns-token] (read-token (advance (advance st)))
                            st (skip-ws+comments st)]
-                       (when (or (str/blank? ns-token) (not= (peek-ch st) \{))
+                       (when (or (str/blank? ns-token) (not= (peek-ch st) "{"))
                          (reject! "expected `{` after `#:ns`" {:ns ns-token}))
-                       (let [[st forms] (read-delimited (advance st) \})
+                       (let [[st forms] (read-delimited (advance st) "}")
                              _ (when (odd? (count forms))
                                  (reject! "map literal must contain an even number of forms" {}))
                              qualify (fn [k]
@@ -672,7 +672,7 @@
                                              :else (keyword ns-token (name k))))
                              forms (vec (map-indexed (fn [i f] (if (even? i) (qualify f) f)) forms))]
                          [st (located (reader-map forms) start st) false]))
-          (= ch2 \#) (let [[st token] (read-token (advance (advance st)))
+          (= ch2 "#") (let [[st token] (read-token (advance (advance st)))
                             value (case token
                                     "NaN" (f64-form #?(:clj Double/NaN :cljs js/NaN))
                                     "Inf" (f64-form #?(:clj Double/POSITIVE_INFINITY :cljs js/Infinity))
@@ -689,11 +689,11 @@
           ;; this literal alone, most of them inside branches that would
           ;; never have been selected. The pattern is taken raw, as Clojure
           ;; does: only `\"` is an escape inside a regex literal.
-          (= ch2 \") (let [[st pat] (read-regex-body (advance (advance st)))]
+          (= ch2 "\"") (let [[st pat] (read-regex-body (advance (advance st)))]
                        [st (located (list 'kotoba.reader/regex pat) start st) false])
           ;; `#js {...}` / `#js [...]` -- host interop literal, same treatment:
           ;; read as `(kotoba.reader/js <form>)`, refused by name in admission.
-          (= ch2 \j) (let [[st token] (read-token (advance st))]
+          (= ch2 "j") (let [[st token] (read-token (advance st))]
                        (when-not (= token "js")
                          (reject! "unsupported reader dispatch" {:next ch2 :token token}))
                        (let [[st form skipped?] (read-form st)]
@@ -703,7 +703,7 @@
           ;; refusal is about the macro and not about two characters that
           ;; happen to sit inside a string or a comment (the frontend used to
           ;; grep the whole source for them).
-          (= ch2 \=) (reject! "reader evaluation is forbidden" {:next ch2})
+          (= ch2 "=") (reject! "reader evaluation is forbidden" {:next ch2})
           :else (reject! "unsupported reader dispatch" {:next ch2})))
 
       ;; `\c` character literal. Measured 2026-09-11 (adr-2609111900): the
@@ -714,11 +714,11 @@
       ;; UTF-8 bytes; the guest spells a byte as an integer), so it reads as
       ;; the tagged form `(kotoba.reader/char "c")` and is refused by name in
       ;; admission if a selected branch still carries it.
-      (= ch \\)
+      (= ch "\\")
       (let [st (advance st)
             c (peek-ch st)
             _ (when (nil? c) (reject! "unexpected end of input after `\\`" {}))
-            [st text] (if (or (delimiter-char? c) (whitespace-char? c) (= c \\) (= c \") (= c \;))
+            [st text] (if (or (delimiter-char? c) (whitespace-char? c) (= c "\\") (= c "\"") (= c ";"))
                         [(advance st) (str c)]
                         (read-token st))
             value (case text
@@ -733,9 +733,9 @@
                       :else (reject! "unsupported character literal" {:literal (str "\\" text)})))]
         [st (located (list 'kotoba.reader/char value) start st) false])
 
-      (= ch \)) (reject! "unmatched `)`" {})
-      (= ch \]) (reject! "unmatched `]`" {})
-      (= ch \}) (reject! "unmatched `}`" {})
+      (= ch ")") (reject! "unmatched `)`" {})
+      (= ch "]") (reject! "unmatched `]`" {})
+      (= ch "}") (reject! "unmatched `}`" {})
 
       :else (let [[st form] (read-symbol-or-number st)]
               [st (located form start st) false]))))
