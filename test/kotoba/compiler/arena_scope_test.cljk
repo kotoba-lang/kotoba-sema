@@ -5,7 +5,7 @@
   :f64, so no handle can be the result and nothing the body allocated is
   reachable after the release. This file pins that rule in both directions,
   with the reason literal, and the arity by name."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

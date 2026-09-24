@@ -8,7 +8,7 @@
   `(kernel-function-address f)` takes a NAME -- checked against this module's
   own functions, not typed as an expression. Which TARGET may name either is
   amu's, exactly as it is for the literal heads."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :as frontend]

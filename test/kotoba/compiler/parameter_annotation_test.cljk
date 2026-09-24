@@ -17,7 +17,7 @@
   the head, which is a keyword in every value type and a symbol in every
   pattern. `destructuring-pattern-is-not-read-as-a-type` is the case that
   separates that rule from `vector?`: with the looser test it fails."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

@@ -1,6 +1,6 @@
 (ns kotoba.compiler.range-slots-test
   "The ABI v10 range heads at the frontend: typed, arity-checked, executed."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

@@ -8,7 +8,7 @@
   failure this namespace is for: the missing head would fall through to
   \"unknown function\", and a base in position 2 would flow past the
   provenance walk entirely."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))

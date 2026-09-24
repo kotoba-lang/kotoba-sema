@@ -17,7 +17,7 @@
   reads XCR0 or feature detection faults in the middle of itself. No arity
   check can express an ordering constraint between two separate calls. See
   kotoba-native `docs/avx2-guard-sequence.md`."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]))

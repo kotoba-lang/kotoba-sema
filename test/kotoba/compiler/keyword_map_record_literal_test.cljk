@@ -50,7 +50,7 @@
      budget (the same count a `defrecord` is refused at) and past
      `max-record-fields`, a mixed key kind, and nesting past the type depth
      limit."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]

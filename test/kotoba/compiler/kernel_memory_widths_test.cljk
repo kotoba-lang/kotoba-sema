@@ -10,7 +10,7 @@
   `a-new-width-inherits-the-provenance-rule` would fail while everything else
   stayed green."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))

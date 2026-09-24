@@ -15,7 +15,7 @@
   - `an-argument-is-evaluated-once` counts the argument's call in the analyzed
     body; textual substitution puts it there twice, which is invisible until
     the argument is a capability call."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

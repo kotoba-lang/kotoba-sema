@@ -12,7 +12,7 @@
   module. Nothing is invented -- no candidate is offered when nothing is near,
   and the list is bounded (three) and ordered by edit distance, then name, so
   the message is deterministic on both runtimes."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

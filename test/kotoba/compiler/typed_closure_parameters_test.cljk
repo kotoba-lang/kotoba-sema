@@ -33,7 +33,7 @@
       sentence that names the rule; a type outside the result profile is
       refused by the sentence that names the predicate; a wrong argument at
       the call site is refused by the ordinary type-mismatch sentence."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]

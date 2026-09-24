@@ -8,7 +8,7 @@
   the JVM reads synchronously; that is why this file is `.clj` -- on
   ClojureScript the same head answers as unknown, and the `.cljc` sibling
   documents that."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.sema :as sema]))
 
 (defn- refusal [source]

@@ -49,7 +49,7 @@
   And the control that says the change refuses only what was already wrong:
   two correct declaration-dense programs whose HIR and KIR digests are the
   ones measured before the fix."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]

@@ -3,7 +3,7 @@
   and answers :string, the arity is 1, and the contextual string-argument
   index covers position 0. Mirrors the shape of the type-directed arithmetic
   tests (analyze / rejection helpers, pinned messages)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.sema :as sema]))
 
 (defn- analyze [source] (sema/analyze source))

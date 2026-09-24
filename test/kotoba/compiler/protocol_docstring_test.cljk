@@ -26,7 +26,7 @@
 
   Every test here is a pair: the documented form is admitted AND the check it
   used to be caught by still catches what it is for."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.sema :as sema]))
 
 (defn- outcome

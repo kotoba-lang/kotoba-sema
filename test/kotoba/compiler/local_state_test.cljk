@@ -26,7 +26,7 @@
   atom-free program whose HIR and KIR hashes were taken on the commit before
   this pass existed (kotoba-sema 411d4cab): a change to how any atom-free
   program lowers would move them."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.kir :as kir]
             [kotoba.sema :as sema]))
 

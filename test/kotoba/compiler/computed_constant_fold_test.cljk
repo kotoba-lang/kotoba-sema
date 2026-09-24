@@ -26,7 +26,7 @@
   3. the refusals BY NAME: `atom`, `delay`, an effectful call, a forward
      reference, self-reference, a call to a module function, an unbounded
      loop (fuel), and a value with no literal spelling (a closure)."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.sema :as sema]

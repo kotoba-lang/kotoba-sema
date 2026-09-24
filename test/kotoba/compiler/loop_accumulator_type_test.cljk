@@ -28,7 +28,7 @@
   in the helper's own function map, which pushed it past the eight-entry
   array-map threshold, and every loop-using module's HIR text moved without a
   single value in it changing."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

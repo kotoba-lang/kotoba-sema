@@ -15,7 +15,7 @@
   because amu's `kotoba.compiler.diagnostic/refine` recognises exactly that
   code and head and renames it to the project-route remedy. A rename here
   would turn that remedy into the generic refusal again."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

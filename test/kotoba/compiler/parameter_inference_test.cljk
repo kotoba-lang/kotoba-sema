@@ -15,7 +15,7 @@
   annotation is never refined, a parameter used as an i64 stays one, and a
   parameter whose uses disagree fails at the same place it failed before,
   with the old message as its head and both uses named after it."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

@@ -16,7 +16,7 @@
 
   These tests are `.cljc` on purpose: on the JVM every one of them passed
   before the fix, which is exactly why nothing noticed."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.sema :as sema]))

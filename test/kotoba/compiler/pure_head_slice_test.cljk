@@ -21,7 +21,7 @@
   `Cannot create property 'closure_uid_...' on bigint '1'` under nbb (a call
   form used as a map key, hashing its own bigint literal) while the JVM
   refused the same program cleanly."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

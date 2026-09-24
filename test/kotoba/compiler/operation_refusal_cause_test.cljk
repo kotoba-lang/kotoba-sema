@@ -24,7 +24,7 @@
   head answers as unknown, which is what the runtime can honestly say.
   Nothing here changes what is admitted: every program below was refused
   before, with a sentence that did not say why."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

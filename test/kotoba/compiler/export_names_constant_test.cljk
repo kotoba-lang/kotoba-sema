@@ -8,7 +8,7 @@
   as a `def` cost one round to learn that exports are functions and another to
   learn the fix. The head of the sentence is kept so a reader who pinned it
   still matches."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

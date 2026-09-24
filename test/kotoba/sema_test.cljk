@@ -1,7 +1,7 @@
 (ns kotoba.sema-test
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))

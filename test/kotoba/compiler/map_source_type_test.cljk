@@ -22,7 +22,7 @@
   4. compiler `mapv` on a bounded vector still runs when the name is free;
   5. the unchanged integer `map` program still emits the same helper
      param-types the loop-accumulator suite already pinned."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

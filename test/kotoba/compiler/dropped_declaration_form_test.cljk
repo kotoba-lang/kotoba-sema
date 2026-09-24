@@ -58,7 +58,7 @@
      declaration, because a template body is substituted into an expression
      position. Inert in every program, so refused. The nine that may be calls
      are asserted to STILL COMPUTE, in the same file."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.coll :as set]
             [kotoba.sema :as sema]
