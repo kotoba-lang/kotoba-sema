@@ -1342,7 +1342,13 @@
 ;; 4096, which refused 3 of the compiler's own sources whose ns docstrings
 ;; run to 27,879 chars -- this workspace writes its "why" in docstrings on
 ;; purpose (measured 2026-09-11, adr-2609111900). 64 KiB is still a bound.
-(def max-type-depth 8)
+;; The type-descriptor bounds below are kotoba-lang `lang/limits.edn`
+;; `:language/static` (adr-2609242100 P1), compared against this file by amu
+;; `value_bounds_agreement_test`. Depth was 8 here while osaho's
+;; `adt-depth-limit` -- which checks the same descriptors -- had been 12 since
+;; osaho ADR 0025; a descriptor of depth 9..12 was admitted by the reference
+;; interpreter and refused by this frontend. Unified at 12 on 2026-09-24.
+(def max-type-depth 12)
 (def max-type-nodes 64)
 (def max-variant-cases 32)
 (def max-heterogeneous-vector-items 32)

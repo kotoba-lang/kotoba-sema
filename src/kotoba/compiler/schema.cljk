@@ -5,7 +5,10 @@
 
 (def max-schemas 32)
 (def max-schema-nodes 64)
-(def max-schema-depth 8)
+;; kotoba-lang lang/limits.edn :language/static :type-descriptor-depth
+;; (8 -> 12 on 2026-09-24, adr-2609242100 P1; the frontend's max-type-depth
+;; and osaho's adt-depth-limit are the same bound).
+(def max-schema-depth 12)
 
 (def ^:private primitives
   ;; :document admitted 2026-08-01 (document-in-record): design-system
