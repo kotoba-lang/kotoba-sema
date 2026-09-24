@@ -231,8 +231,13 @@
   `max-typed-set-items` was already 32), the `:string-bound` sentence 4096
   -> 65536, the variadic `:abi-bound` 5 -> 64. No head admitted or
   withdrawn; this frontend's `max-type-depth` / `max-schema-depth` moved
-  8 -> 12 in the same commit."
-  "bdbc847485e2d8e0b279cfffa333b077548fce8b9ff7ad592c7573d00709e95b")
+  8 -> 12 in the same commit.
+
+  Advanced 2026-09-25 to `d87fe28a` (lang/state-ability.edn, slice 1):
+  `:sugar :state-ability` admits `defhandler` / `with` / `resume`; this
+  frontend's expand-state-ability-forms / specialize-state-abilities /
+  thread-state-abilities land in the same commit."
+  "d87fe28a8c8f3ee18e9f091c186c77e0642eb869ee9c89d0ca87577984ebb506")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

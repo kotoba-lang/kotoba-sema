@@ -14,6 +14,9 @@
   (:require [cljs.test :as t]
             ;; a wrong argument count is refused in both directions
             [kotoba.compiler.call-arity-test]
+            ;; the state ability (kotoba-lang lang/state-ability.edn): a handler
+            ;; written in the language, specialization, state passing, refusals
+            [kotoba.compiler.state-ability-test]
             [kotoba.compiler.arena-scope-test]
             [kotoba.compiler.text-slots-test]
             [kotoba.compiler.line-slots-test]
@@ -180,6 +183,7 @@
     (set! (.-exitCode js/process) 1)))
 
 (t/run-tests 'kotoba.compiler.protocol-docstring-test
+             'kotoba.compiler.state-ability-test
              'kotoba.compiler.namespace-attr-map-test
              'kotoba.compiler.namespace-refused-clause-test
              'kotoba.compiler.namespace-refer-clojure-test

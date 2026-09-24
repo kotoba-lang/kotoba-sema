@@ -26,7 +26,12 @@
          :git/sha "86d88bd58299cf575e9dfa2ab4789a0baa166614"}
         io.github.kotoba-lang/kotoba-hir
         {:git/url "https://github.com/kotoba-lang/kotoba-hir.git"
-         :git/sha "ac8e70514ee3c9b87ae71324e6e714447acc971c"}
+         ;; Advanced 2026-09-25 ac8e7051 -> 95af6410 (main tip, forward only): the
+         ;; HIR contract admits the pure ability :state as a row member, which
+         ;; the state ability (kotoba-lang lang/state-ability.edn) puts on a
+         ;; handler specialization. Carries hir's clojure.set -> kotoba.lang.coll
+         ;; move, which the coll floor above (0ffd5f6) already satisfies.
+         :git/sha "95af641005b3b88717a62f871bc8773b00012d26"}
         io.github.kotoba-lang/osaho
         {:git/url "https://github.com/kotoba-lang/osaho.git"
          ;; b021a0d1: the five collection primitives the friendly heads in
