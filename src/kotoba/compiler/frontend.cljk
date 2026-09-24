@@ -1807,6 +1807,30 @@
   (and (= (count originals) (count rewritten))
        (every? true? (map identical? originals rewritten))))
 
+;; State ability, slice 1 (kotoba-lang `lang/state-ability.edn`). The two
+;; operations of the pure ability `state`, and how many values each takes.
+;; `(perform :state/get)` and `(perform :state/put v)` are NOT capability
+;; calls: they are answered by a handler written in the language, so this
+;; rewrite leaves them (and `(handle body (with handler init))`) for
+;; `expand-state-ability-forms`, which runs after the reserved-prefix check.
+;; `:state/transact` is a host capability of the same kind name and still
+;; takes the `cap-call` route.
+(def ^:private state-ability-operations {:state/get 0 :state/put 1})
+
+(defn- state-ability-perform-form? [form]
+  (and (seq? form) (= 'perform (first form))
+       (contains? state-ability-operations (second form))))
+
+(defn- state-ability-handle-form? [form]
+  (and (seq? form) (= 'handle (first form)) (= 3 (count form))
+       (let [clause (nth form 2)]
+         (and (seq? clause) (= 'with (first clause))))))
+
+(def ^:dynamic ^:private *state-handlers*
+  "The module's state handlers, `{handler-keyword {:name :state-type
+  :clauses}}`, in a volatile bound per analysis. Read by inference to type the
+  resolved state heads.")
+
 (defn- rewrite-pure-app-form [form]
   (cond
     (seq? form)
@@ -1814,6 +1838,11 @@
       (cond
         (= 'quote head)
         form
+        (or (state-ability-perform-form? form) (state-ability-handle-form? form))
+        (let [rewritten (mapv rewrite-pure-app-form form)]
+          (if (nothing-rewritten? form rewritten)
+            form
+            (with-meta (apply list rewritten) (meta form))))
         (= 'lam head)
         (let [rewritten (cons 'fn (mapv rewrite-pure-app-form (rest form)))]
           (with-meta rewritten (meta form)))
@@ -9552,6 +9581,26 @@
                (= then-type else-type) then-type
                :else (reject! "if branches must have the same value type" form)))
         do (last (mapv #(infer-expression-type % locals signatures) args))
+        ;; State ability, slice 1: an operation resolved to its handler has
+        ;; that handler's state type; `put` takes one. A handle has its body's
+        ;; type, and its initial state must be the handler's.
+        __kotoba_state_op
+        (let [[handler-key op & values] args
+              state-type (:state-type (get (some-> *state-handlers* deref) handler-key))]
+          (when-not state-type
+            (reject! (str "state operation names no handler: " handler-key) form
+                     :kotoba.error/state-shape))
+          (when (= :put op)
+            (require-expression-type! (infer-expression-type (first values) locals signatures)
+                                      state-type (first values)))
+          state-type)
+        __kotoba_state_with
+        (let [[handler-key init body] args
+              state-type (:state-type (get (some-> *state-handlers* deref) handler-key))]
+          (when-not state-type
+            (reject! (str "handle names no handler: " handler-key) form :kotoba.error/state-shape))
+          (require-expression-type! (infer-expression-type init locals signatures) state-type init)
+          (infer-expression-type body locals signatures))
         throw
         (let [[value] args]
           (when-not (= 1 (count args))
@@ -12502,6 +12551,800 @@
                       :else function)))
                 functions))))))
 
+
+;; ── State ability, slice 1 ──────────────────────────────────────────────────
+;;
+;; Contract: kotoba-lang `lang/state-ability.edn` (superproject
+;; adr-2609242200-kotoba-in-language-handlers-for-pure-abilities). `state` is a
+;; PURE ability: get/put over one typed cell, whose handler is written in the
+;; language and handles it by threading the state value.
+;;
+;;   (defhandler counter [:state :i64]
+;;     (get [s] (resume s s))
+;;     (put [s v] (resume v v)))
+;;
+;;   (defn- tick [] (perform :state/put (+ 1 (perform :state/get))))
+;;   (defn main [] :i64 (handle (do (tick) (tick) (perform :state/get))
+;;                              (with counter 40)))
+;;
+;; Three passes, at three moments, because three facts become known at three
+;; different times:
+;;
+;;   expand-state-ability-forms   SOURCE, before desugaring. `defhandler`
+;;                                becomes one private defn per clause; the
+;;                                `perform :state/*`, `handle ... (with ...)`
+;;                                and `resume` spellings become reserved heads
+;;                                a program cannot write.
+;;   specialize-state-abilities   after desugaring, before any inference.
+;;                                Which functions perform :state is syntax (a
+;;                                fixed point over the call graph); each one is
+;;                                specialized per handler it runs under, so it
+;;                                is type-checked at that handler's state type.
+;;                                Each clause is split into its resumed VALUE
+;;                                and its NEXT STATE.
+;;   thread-state-abilities       after abort elaboration, when every result
+;;                                type is known. A specialization takes the
+;;                                state as its first parameter and returns
+;;                                `[:record :kotoba.state/retN [[:value T]
+;;                                [:state S]]]`; get/put become calls to the
+;;                                clause functions; nothing else is new.
+;;
+;; No backend construct is added: what reaches KIR is let / if / calls /
+;; record-new / record-get, which every backend already lowers. The ability
+;; stays in the TYPE: a specialization's effect row carries :state, so it is
+;; sealed into its definition CID; the function that installs the handler
+;; does not carry it.
+
+(def ^:private state-perform-heads
+  "The two reserved heads a performed operation passes through: unresolved
+  (straight from source) and resolved to the handler that answers it."
+  '#{__kotoba_state_perform __kotoba_state_op})
+
+(def ^:private state-handle-heads
+  '#{__kotoba_state_handle __kotoba_state_with})
+
+(def ^:private state-all-heads
+  (into '#{__kotoba_state_resume} (concat state-perform-heads state-handle-heads)))
+
+(defn- state-head-form? [x heads]
+  (and (seq? x) (seq x) (contains? heads (first x))))
+
+(defn- state-mentions? [form heads]
+  (boolean (first-truthy #(state-head-form? % heads) (tree-seq coll? seq form))))
+
+(defn- state-rebuild-seq [form items]
+  (if (seq (meta form)) (with-meta (apply list items) (meta form)) (apply list items)))
+
+(defn- state-clause-function-name [handler op]
+  (symbol (str "__kotoba_state_" handler "_" (name op))))
+
+(declare rewrite-state-ability-form)
+
+(defn- state-rewrite-children
+  "Rewrite FORM's children, returning FORM itself when none changed: a map or
+  set literal rebuilt needlessly would hash its keys, which a ClojureScript
+  bigint literal cannot survive (see `rewrite-pure-app-form`)."
+  [form]
+  (cond
+    (seq? form)
+    (let [items (mapv rewrite-state-ability-form form)]
+      (if (every? true? (map identical? form items)) form (state-rebuild-seq form items)))
+    (vector? form)
+    (let [items (mapv rewrite-state-ability-form form)]
+      (if (every? true? (map identical? form items)) form (with-meta items (meta form))))
+    (map? form)
+    (let [entries (seq form)
+          items (mapv (fn [e] [(rewrite-state-ability-form (key e)) (rewrite-state-ability-form (val e))]) entries)]
+      (if (every? true? (map (fn [e [k v]] (and (identical? (key e) k) (identical? (val e) v))) entries items))
+        form
+        (with-meta (apply array-map (mapcat identity items)) (meta form))))
+    :else form))
+
+(defn- rewrite-state-ability-form
+  "`(perform :state/get)` -> `(__kotoba_state_perform :get)`,
+  `(perform :state/put v)` -> `(__kotoba_state_perform :put v)`,
+  `(handle body (with h init))` -> `(__kotoba_state_handle :h init body)`.
+  Everything else is walked and returned identical when nothing changed."
+  [form]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+    (state-ability-perform-form? form)
+    (let [[_ op & values] form
+          expected (get state-ability-operations op)]
+      (when-not (= expected (count values))
+        (reject! (str "perform " op " takes "
+                      (if (zero? expected) "no value" "exactly one value")
+                      "; got " (count values))
+                 form :kotoba.error/state-shape))
+      (state-rebuild-seq form (list* '__kotoba_state_perform (keyword (name op))
+                                     (map rewrite-state-ability-form values))))
+    (state-ability-handle-form? form)
+    (let [[_ body clause] form
+          [_ handler init & extra] clause]
+      (when-not (and (simple-symbol? handler) (= 3 (count clause)) (empty? extra))
+        (reject! "handle installs one handler with one initial state: (handle body (with handler init))"
+                 form :kotoba.error/state-shape))
+      (state-rebuild-seq form (list '__kotoba_state_handle (keyword (name handler))
+                                    (rewrite-state-ability-form init)
+                                    (rewrite-state-ability-form body))))
+    :else (state-rewrite-children form)))
+
+(def ^:private state-clause-parameters
+  "The parameters each clause of a :state handler takes: the current state,
+  then the operation's values."
+  {:get 1 :put 2})
+
+(defn- state-resume-rewrite
+  "Inside ONE handler clause body, `(resume value state)` becomes the reserved
+  head; a resume of any other arity is refused here, by its own name."
+  [form handler op]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+    (and (seq? form) (= 'resume (first form)))
+    (do (when-not (= 3 (count form))
+          (reject! (str "resume takes the resumed value and the next state: (resume value state); handler "
+                        handler " clause " (name op) " passes " (dec (count form)))
+                   form :kotoba.error/state-resume))
+        (state-rebuild-seq form (list '__kotoba_state_resume
+                                      (state-resume-rewrite (nth form 1) handler op)
+                                      (state-resume-rewrite (nth form 2) handler op))))
+    (seq? form) (state-rebuild-seq form (map #(state-resume-rewrite % handler op) form))
+    (vector? form) (with-meta (mapv #(state-resume-rewrite % handler op) form) (meta form))
+    :else form))
+
+(defn- parse-defhandler
+  "One `(defhandler name doc? [:state S] (get [s] body) (put [s v] body))`
+  form -> `{:handler {...} :defns [...]}`. Each clause becomes a private defn
+  whose parameters are typed by the handler's state type."
+  [form]
+  (let [[_ handler & more] form
+        _ (when-not (and (simple-symbol? handler) (valid-name? handler))
+            (reject! "defhandler requires a handler name: (defhandler name [:state S] (get [s] ...) (put [s v] ...))"
+                     form :kotoba.error/state-handler-shape))
+        more (if (string? (first more)) (rest more) more)
+        [signature & clauses] more]
+    (when-not (and (vector? signature) (= 2 (count signature)) (keyword? (first signature)))
+      (reject! (str "defhandler " handler " requires an ability signature: [:state S]")
+               form :kotoba.error/state-handler-shape))
+    (when-not (= :state (first signature))
+      (reject! (str "defhandler supports only the :state ability in state slice 1; "
+                    handler " names " (pr-str (first signature)))
+               form :kotoba.error/state-handler-shape))
+    (let [state-type (second signature)
+          _ (validate-value-type! state-type)
+          parsed (mapv (fn [clause]
+                         (when-not (and (seq? clause) (symbol? (first clause))
+                                        (vector? (second clause)) (seq (drop 2 clause)))
+                           (reject! (str "handler " handler " clause must be (op [state value ...] body): "
+                                         (pr-str clause))
+                                    form :kotoba.error/state-handler-shape))
+                         (let [op (keyword (name (first clause)))
+                               params (second clause)
+                               body (drop 2 clause)]
+                           {:op op :params params
+                            :body (if (< 1 (count body)) (cons 'do body) (first body))}))
+                       clauses)
+          ops (mapv :op parsed)]
+      (when-not (and (= (set ops) (set (keys state-clause-parameters)))
+                     (= (count ops) (count (distinct ops))))
+        (reject! (str "handler " handler " does not match the :state ability: it must define exactly get and put, once each; it defines "
+                      (if (seq ops) (str/join ", " (map name ops)) "nothing"))
+                 form :kotoba.error/state-handler-type))
+      (doseq [{:keys [op params]} parsed]
+        (let [expected (get state-clause-parameters op)]
+          (when-not (and (= expected (count params)) (every? simple-symbol? params)
+                         (= (count params) (count (distinct params))))
+            (reject! (str "handler " handler " does not match the :state ability: its " (name op)
+                          " clause takes " (if (= 1 expected) "[state]" "[state value]")
+                          ", got " (pr-str params))
+                     form :kotoba.error/state-handler-type))))
+      {:handler {:name handler :state-type state-type
+                 :clauses (into {} (map (fn [{:keys [op]}]
+                                          [op {:fn (state-clause-function-name handler op)}]))
+                                parsed)}
+       :defns (mapv (fn [{:keys [op params body]}]
+                      (with-meta
+                        (list 'defn- (state-clause-function-name handler op)
+                              (vec (mapcat (fn [p] [p state-type]) params))
+                              (state-resume-rewrite (rewrite-state-ability-form body) handler op))
+                        (meta form)))
+                    parsed)})))
+
+(defn- expand-state-ability-forms
+  "Source-level expansion of the state ability. Returns `{:forms :handlers}`;
+  a module that mentions none of it comes back as the identical vector with
+  no handlers, so it lowers to the bytes it did before the ability existed."
+  [forms]
+  (if-not (first-truthy (fn [x] (or (and (seq? x) (= 'defhandler (first x)))
+                                    (state-ability-perform-form? x)
+                                    (state-ability-handle-form? x)))
+                        (tree-seq coll? seq forms))
+    {:forms forms :handlers {}}
+    (let [out (reduce (fn [{:keys [forms handlers]} form]
+                        (if (and (seq? form) (= 'defhandler (first form)))
+                          (let [{:keys [handler defns]} (parse-defhandler form)
+                                key (keyword (name (:name handler)))]
+                            (when (contains? handlers key)
+                              (reject! (str "duplicate handler name: " (:name handler))
+                                       form :kotoba.error/state-handler-shape))
+                            {:forms (into forms defns) :handlers (assoc handlers key handler)})
+                          {:forms (conj forms (rewrite-state-ability-form form)) :handlers handlers}))
+                      {:forms [] :handlers {}}
+                      forms)]
+      out)))
+
+(defn- state-escapes?
+  "Does FORM perform :state past its own boundary -- a perform, or a call to a
+  function in STATEFUL, with no `handle` body in between? A handle's INIT is
+  evaluated outside it and counts."
+  [form stateful]
+  (cond
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (= op 'quote) false
+        (contains? state-perform-heads op) true
+        (contains? state-handle-heads op) (state-escapes? (second args) stateful)
+        (contains? stateful op) true
+        :else (boolean (first-truthy #(state-escapes? % stateful) args))))
+    (or (vector? form) (set? form)) (boolean (first-truthy #(state-escapes? % stateful) form))
+    :else false))
+
+(defn- state-handle-bodies [form]
+  (keep (fn [x] (when (state-head-form? x state-handle-heads) (nth x 3)))
+        (tree-seq coll? seq form)))
+
+(defn- state-first-stateful-operation
+  "The first stateful thing FORM does, as a phrase for a refusal."
+  [form stateful]
+  (first-truthy (fn [x]
+                  (when (seq? x)
+                    (cond
+                      (state-head-form? x state-perform-heads)
+                      (str "perform :state/"
+                           (name (if (= '__kotoba_state_perform (first x)) (second x) (nth x 2))))
+                      (contains? stateful (first x)) (str "a call to stateful function `" (first x) "`"))))
+                (tree-seq coll? seq form)))
+
+(defn- state-split-resume
+  "One half of a clause: PART :value keeps each tail `(resume v s)`'s v, PART
+  :state keeps its s. Every tail must be exactly one resume, and resume may
+  appear nowhere else -- which is what makes the continuation one-shot and
+  tail-resumptive, and the lowering a plain function."
+  [body part handler op]
+  (letfn [(bad! [form]
+            (reject! (str "handler " handler " clause " (name op)
+                          " must end every branch in exactly one (resume value state) in tail position")
+                     form :kotoba.error/state-resume))
+          (mentions? [x] (state-mentions? x '#{__kotoba_state_resume}))
+          (arm [[tag binder b :as branch]]
+            (if (vector? branch) [tag binder (tail b)] (list tag binder (tail b))))
+          (tail [form]
+            (if-not (and (seq? form) (seq form))
+              (bad! form)
+              (let [[op* & args] form]
+                (case op*
+                  __kotoba_state_resume
+                  (let [[v s] args]
+                    (when (or (mentions? v) (mentions? s)) (bad! form))
+                    (if (= part :value) v s))
+                  let
+                  (let [bindings (first args) b (let-body args form)]
+                    (when (mentions? bindings) (bad! form))
+                    (list 'let bindings (tail b)))
+                  if
+                  (let [[c t e] (if-parts args form)]
+                    (when (mentions? c) (bad! form))
+                    (list 'if c (tail t) (tail e)))
+                  do
+                  (do (when (mentions? (butlast args)) (bad! form))
+                      (apply list 'do (concat (butlast args) [(tail (last args))])))
+                  result-match-of
+                  (let [[type value ok-name ok-body err-name err-body] args]
+                    (when (mentions? value) (bad! form))
+                    (list 'result-match-of type value ok-name (tail ok-body) err-name (tail err-body)))
+                  option-match
+                  (let [[type value none-body some-name some-body] args]
+                    (when (mentions? value) (bad! form))
+                    (list 'option-match type value (tail none-body) some-name (tail some-body)))
+                  variant-match
+                  (let [[type value branches] args]
+                    (when (mentions? value) (bad! form))
+                    (list 'variant-match type value
+                          (if (vector? branches) (mapv arm branches) (apply list (map arm branches)))))
+                  (bad! form)))))]
+    (tail body)))
+
+(defn- state-refuse-impure-handler! [handler op operations form]
+  (reject! (str "handler " handler " is not pure: its " (name op) " clause performs "
+                (pr-str operations) "; a handler for the pure ability :state must be pure")
+           form :kotoba.error/state-handler-impure))
+
+(defn- specialize-state-abilities
+  "Specialize every stateful function per handler it runs under, and split
+  every handler clause into its resumed value and its next state.
+
+  A function is STATEFUL when it performs :state, or calls a stateful
+  function, outside every `handle` body -- a fixed point over the call graph,
+  like abort's propagation. A stateful function never runs without a handler:
+  it exists only as its specializations, `__kotoba_state_<f>_under_<h>`, each
+  checked at h's state type. That is how one function is handled at two state
+  types: it is specialized twice. A stateful loop helper's specialization is a
+  fresh `__kotoba_loop_N`, so it keeps the self-tail trampoline.
+
+  EXPORTED names the source functions the module exports (nil: all of them).
+  A stateful one of those has no handler anywhere it could be called from and
+  is refused at the export boundary; that is also where `perform` outside any
+  handler is refused, since propagation carries it there."
+  [functions lambda-helpers handlers exported loop-helper-shapes]
+  (if (and (empty? handlers)
+           (not (first-truthy #(state-mentions? (:body %) state-all-heads)
+                              (concat functions lambda-helpers))))
+    {:functions functions :clones {} :handlers handlers}
+    (let [clause-owner (into {} (for [[hk {:keys [clauses]}] handlers
+                                      [op {cfn :fn}] clauses]
+                                  [cfn [hk op]]))
+          ordinary (remove #(contains? clause-owner (:name %)) functions)
+          stateful (loop [known #{}]
+                     (let [next-known (into known
+                                            (comp (filter #(state-escapes? (:body %) known))
+                                                  (map :name))
+                                            ordinary)]
+                       (if (= next-known known) known (recur next-known))))
+          label (fn [f] (or (:source-name f) (:name f)))]
+      ;; 1. the export boundary (a stateful function nothing can handle)
+      (doseq [f ordinary
+              :when (and (:source-name f) (contains? stateful (:name f))
+                         (or (nil? exported) (contains? exported (:source-name f))
+                             (= 'main (:source-name f))))]
+        (reject! (str "unhandled ability :state at export boundary; handle it with (handle body (with handler init)): "
+                      (:source-name f))
+                 (:source-name f) :kotoba.error/state-unhandled-export))
+      ;; 2. fn literals and lazy thunks: their body runs at a call count the
+      ;; enclosing handler does not see
+      (doseq [h lambda-helpers
+              :let [what (or (state-first-stateful-operation (:body h) stateful)
+                             (when (state-mentions? (:body h) state-handle-heads) "a handle"))]
+              :when what]
+        (reject! (str "state slice 1 does not admit " what " inside "
+                      (if (:lazy-thunk? h) "a lazy thunk" "a fn literal"))
+                 (:name h) :kotoba.error/state-position))
+      ;; 3. a stateful function used as a value
+      (doseq [f (concat functions lambda-helpers)
+              arg ((fn values-in [x]
+                     (cond
+                       (and (seq? x) (seq x))
+                       (if (= 'quote (first x))
+                         []
+                         (concat (when (seq? (first x)) (values-in (first x)))
+                                 (mapcat values-in (rest x))))
+                       (vector? x) (mapcat values-in x)
+                       (symbol? x) [x]
+                       :else []))
+                   (:body f))
+              :when (contains? stateful arg)]
+        (reject! (str "stateful function " arg " cannot be used as a value in state slice 1; call it under a handler")
+                 arg :kotoba.error/state-position))
+      ;; 4. abort inside a stateful function or a handle body
+      (doseq [f ordinary
+              :let [scopes (cond-> (vec (state-handle-bodies (:body f)))
+                             (contains? stateful (:name f)) (conj (:body f)))]
+              :when (first-truthy abort-form-mentions? scopes)]
+        (reject! (str "state slice 1 does not admit throw or try inside a stateful function or a handle body: "
+                      (label f))
+                 (label f) :kotoba.error/state-abort))
+      (let [by-name (into {} (map (juxt :name identity)) functions)
+            ;; the next loop-helper names nobody has taken, found by probing
+            ;; rather than by parsing digits (no host number parser needed)
+            taken-names (volatile! (into #{} (map :name) functions))
+            fresh-loop-name! (fn []
+                               (loop [k 1]
+                                 (let [n (symbol (str "__kotoba_loop_" k))]
+                                   (if (contains? @taken-names n)
+                                     (recur (inc k))
+                                     (do (vswap! taken-names conj n) n)))))
+            clone-names (volatile! {})
+            queue (volatile! [])
+            clone-name!
+            (fn [g hk]
+              (or (get @clone-names [g hk])
+                  (let [cn (if (:loop-helper? (get by-name g))
+                             (fresh-loop-name!)
+                             (symbol (str "__kotoba_state_" g "_under_" (name hk))))]
+                    (vswap! clone-names assoc [g hk] cn)
+                    (vswap! queue conj [g hk cn])
+                    (when-let [shape (get @loop-helper-shapes g)]
+                      (vswap! loop-helper-shapes assoc cn shape))
+                    cn)))
+            rewrite
+            (fn rw [form ctx]
+              (cond
+                (and (seq? form) (seq form))
+                (let [[op & args] form]
+                  (cond
+                    (= op 'quote) form
+                    (= op '__kotoba_state_perform)
+                    (if ctx
+                      (state-rebuild-seq form (into ['__kotoba_state_op ctx (first args)]
+                                                     (mapv #(rw % ctx) (rest args))))
+                      (reject! (str "unhandled ability :state: perform :state/" (name (first args))
+                                    " outside any handler")
+                               form :kotoba.error/state-unhandled))
+                    (= op '__kotoba_state_handle)
+                    (let [[hk init body] args]
+                      (when-not (contains? handlers hk)
+                        (reject! (str "handle names no handler: " (name hk))
+                                 form :kotoba.error/state-shape))
+                      (state-rebuild-seq form (list '__kotoba_state_with hk (rw init ctx) (rw body hk))))
+                    (contains? stateful op)
+                    (if ctx
+                      (let [expected (count (:params (get by-name op)))
+                            _ (when-not (= expected (count args))
+                                (reject-call-arity! (or (:source-name (get by-name op)) op)
+                                                    expected (count args) form))
+                            cn (clone-name! op ctx)]
+                        (state-rebuild-seq form (into [cn] (mapv #(rw % ctx) args))))
+                      (reject! (str "unhandled ability :state: a call to stateful function `" op
+                                    "` outside any handler")
+                               form :kotoba.error/state-unhandled))
+                    :else (state-rebuild-seq form (into [op] (mapv #(rw % ctx) args)))))
+                (vector? form) (with-meta (mapv #(rw % ctx) form) (meta form))
+                :else form))
+            ;; handler clauses: pure, then split
+            clause-split
+            (into {}
+                  (for [[cfn [hk op]] clause-owner
+                        :let [f (get by-name cfn)
+                              handler (:name (get handlers hk))]]
+                    (do
+                      (when-let [what (or (state-first-stateful-operation (:body f) stateful)
+                                          (when (state-mentions? (:body f) state-handle-heads) "a handle"))]
+                        (state-refuse-impure-handler! handler op #{:state} (:body f)))
+                      [cfn (mapv (fn [part]
+                                   (-> f
+                                       (dissoc :source-name)
+                                       (assoc :name (symbol (str cfn "_" (name part)))
+                                              :body (state-split-resume (:body f) part handler op)
+                                              :result :i64 :result-inferred? true
+                                              :state-handler-clause {:handler hk :op op :part part})))
+                                 [:value :state])])))
+            handlers (reduce (fn [hs [cfn [hk op]]]
+                               (update-in hs [hk :clauses op] assoc
+                                          :value (symbol (str cfn "_value"))
+                                          :state (symbol (str cfn "_state"))))
+                             handlers clause-owner)
+            roots (into [] (mapcat (fn [f]
+                            (cond
+                              (contains? clause-split (:name f)) (get clause-split (:name f))
+                              (contains? stateful (:name f)) []
+                              :else [(update f :body #(rewrite % nil))]))
+                          functions))
+            clones (loop [out [] info {}]
+                     (if-let [[g hk cn] (first @queue)]
+                       (do (vswap! queue #(vec (rest %)))
+                           (let [f (get by-name g)]
+                             (recur (conj out (assoc f :name cn :body (rewrite (:body f) hk)))
+                                    (assoc info cn {:of g :handler hk}))))
+                       {:functions out :info info}))]
+        {:functions (vec (concat roots (:functions clones)))
+         :clones (:info clones)
+         :handlers handlers}))))
+
+(defn- check-state-abort-interaction!
+  "A specialization cannot also abort in slice 1: its interface is already the
+  state pair, and a `[:result T E]` inside it is a lowering nobody wrote."
+  [functions clones abort-error-types]
+  (doseq [f functions
+          :when (and (contains? clones (:name f)) (contains? abort-error-types (:name f)))]
+    (reject! (str "state slice 1 does not admit a stateful function that aborts: "
+                  (or (:source-name f) (:of (get clones (:name f)))))
+             (:name f) :kotoba.error/state-abort))
+  (doseq [f functions
+          body (state-handle-bodies (:body f))
+          :when (abort-escapes? body abort-error-types)]
+    (reject! (str "state slice 1 does not admit a call to an aborting function inside a handle body: "
+                  (or (:source-name f) (:name f)))
+             (:name f) :kotoba.error/state-abort)))
+
+(defn- thread-state-abilities
+  "Lower every specialization by state passing, and every `handle` in place.
+
+  A specialization under handler h with state type S gains the state as its
+  first parameter and returns the pair P = `[:record :kotoba.state/retN
+  [[:value T] [:state S]]]`. Inside, the state is a let-bound value rebound
+  after every operation: get is `(h-get-value s)` / `(h-get-state s)`, put is
+  the same over `(s v)` -- plain calls to the split clause, no allocation. A
+  call to another specialization passes the state and destructures its pair,
+  except in tail position when the pair type is the caller's own: that is a
+  tail call, which is what keeps a stateful loop a loop.
+
+  Joins. A branching form whose arms touch the state is emitted once, with the
+  continuation copied into each arm, when the continuation is small (a tail,
+  or a statement that only needs the state). Otherwise its arms become ONE
+  synthesized join function, `__kotoba_state_join_N`, that returns the pair,
+  and the join destructures that call -- the one place, besides a
+  specialization's return, where a pair is allocated. Its parameters are the
+  state and every local the form mentions; the pair's types come from the
+  ORIGINAL form (`infer-expression-type` against the pre-threading
+  signatures)."
+  [functions clones handlers]
+  (if (and (empty? clones)
+           (not (first-truthy #(state-mentions? (:body %) state-handle-heads) functions)))
+    functions
+    (let [sigs (abort-signatures functions)
+          extra (volatile! [])
+          pairs (volatile! {})
+          pair-type (fn [T S]
+                      (or (get @pairs [T S])
+                          (let [t [:record (keyword "kotoba.state" (str "ret" (inc (count @pairs))))
+                                   [[:value T] [:state S]]]]
+                            (vswap! pairs assoc [T S] t)
+                            t)))
+          ;; every clause's resumed value and next state must be S
+          _ (doseq [[_ {:keys [name state-type clauses]}] handlers
+                    [op {:keys [value state]}] clauses
+                    [part fname] [[:value value] [:state state]]
+                    :let [actual (:result (get sigs fname))]
+                    :when (not (same-expression-type? actual state-type))]
+              (reject! (str "handler " name " resumes state/" (clojure.core/name op)
+                            (if (= part :value) " with " " with next state ")
+                            (abort-type-text actual)
+                            (if (= part :value)
+                              (str ", but state/" (clojure.core/name op) " returns ")
+                              ", but the handler's state is ")
+                            (abort-type-text state-type)
+                            " in a " (pr-str [:state state-type]) " handler")
+                       fname :kotoba.error/state-handler-type))]
+      (binding [*synthetic-counter* (volatile! 0)]
+        (letfn [(type-of [form env] (infer-expression-type form env sigs))
+                (touches? [form]
+                  (boolean (first-truthy #(and (seq? %) (seq %)
+                                               (or (contains? '#{__kotoba_state_op __kotoba_state_with} (first %))
+                                                   (contains? clones (first %))))
+                                         (tree-seq coll? seq form))))
+                (trivial? [form] (not (first-truthy seq? (tree-seq coll? seq form))))
+                (fresh [p] (synthetic (str "state_" p)))
+                (fk [f] {:kind :fn :f f})
+                (small? [k] (not= :fn (:kind k)))
+                (apply-k [k v s]
+                  (case (:kind k)
+                    :pair (list 'record-new (:type k) v s)
+                    :value v
+                    :state (if (trivial? v) s (list 'do v s))
+                    :fn ((:f k) v s)))
+                (join [form env s k ctx sv sv-type build]
+                  ;; The arms become ONE synthesized helper that returns the
+                  ;; pair, and the join destructures that call's result -- the
+                  ;; shape every backend already carries for a specialization.
+                  ;; Its parameters are the state and every local the form
+                  ;; mentions; the scrutinee's value is let-bound first so it is
+                  ;; still evaluated here, once, in order.
+                  (let [P (pair-type (type-of form env) (:S ctx))
+                        [pre sv*] (if (trivial? sv) [[] sv] (let [t (fresh "t")] [[t sv] t]))
+                        env* (if (and (symbol? sv*) (not (contains? env sv*))) (assoc env sv* sv-type) env)
+                        free (vec (sort-by str (distinct (filter #(and (symbol? %) (contains? env* %))
+                                                                 (tree-seq coll? seq (list form sv*))))))
+                        hs (fresh "hs")
+                        helper (fresh "join")
+                        _ (when (> (inc (count free)) max-parameters)
+                            (reject! (str "state slice 1 cannot join this branch: it mentions "
+                                          (count free) " locals and a join takes at most "
+                                          (dec max-parameters))
+                                     form :kotoba.error/state-position))
+                        body (build {:kind :pair :type P} hs sv*)
+                        p (fresh "p") v (fresh "v") s2 (fresh "s")]
+                    (vswap! extra conj {:name helper :params (into [hs] free)
+                                        :param-types (into [(:S ctx)] (map env* free))
+                                        :result P :result-inferred? false :effects #{}
+                                        :state-handler (:handler ctx) :body body})
+                    (list 'let (into pre [p (list* helper s free)
+                                          v (list 'record-get P p :value)
+                                          s2 (list 'record-get P p :state)])
+                          (apply-k k v s2))))
+                (branch [form env s k ctx arms sv sv-type build-plain build]
+                  (cond
+                    (not (first-truthy touches? arms)) (apply-k k (build-plain) s)
+                    (small? k) (build k s sv)
+                    :else (join form env s k ctx sv sv-type build)))
+                (thread-args [args env s ctx f]
+                  (letfn [(step [remaining acc s]
+                            (if (empty? remaining)
+                              (f acc s)
+                              (let [a (first remaining)]
+                                (if (not (first-truthy touches? remaining))
+                                  (f (into acc remaining) s)
+                                  (th a env s
+                                      (fk (fn [v s1]
+                                            (if (trivial? v)
+                                              (step (rest remaining) (conj acc v) s1)
+                                              (let [t (fresh "arg")]
+                                                (list 'let [t v] (step (rest remaining) (conj acc t) s1))))))
+                                      ctx)))))]
+                    (step args [] s)))
+                (call [form env s k ctx]
+                  (let [[op & args] form]
+                    (when (contains? '#{fn arena-scope} op)
+                      (reject! (str "state slice 1 does not thread state through " op)
+                               form :kotoba.error/state-position))
+                    (thread-args (vec args) env s ctx
+                                 (fn [vals s1]
+                                   (if (contains? clones op)
+                                     (let [P (pair-type (:result (get sigs op)) (:S ctx))]
+                                       (if (and (= :pair (:kind k)) (= P (:type k)))
+                                         (list* op s1 vals)
+                                         (let [p (fresh "p") v (fresh "v") s2 (fresh "s")]
+                                           (list 'let [p (list* op s1 vals)
+                                                       v (list 'record-get P p :value)
+                                                       s2 (list 'record-get P p :state)]
+                                                 (apply-k k v s2)))))
+                                     (apply-k k (apply list op vals) s1))))))
+                (th [form env s k ctx]
+                  (cond
+                    (not (touches? form)) (apply-k k form s)
+                    (vector? form) (thread-args form env s ctx (fn [vals s1] (apply-k k (vec vals) s1)))
+                    (not (seq? form))
+                    (reject! "state slice 1 does not thread state through a map or set literal"
+                             form :kotoba.error/state-position)
+                    :else
+                    (let [[op & args] form]
+                      (case op
+                        let
+                        (let [bindings (first args) body (let-body args form)]
+                          ((fn chain [pairs env s]
+                             (if-let [[x e] (first pairs)]
+                               (th e env s
+                                   (fk (fn [v s1]
+                                         (list 'let [x v]
+                                               (chain (rest pairs) (assoc env x (type-of e env)) s1))))
+                                   ctx)
+                               (th body env s k ctx)))
+                           (partition 2 bindings) env s))
+                        do
+                        (let [items (vec args) n (count items)]
+                          ((fn step [i s]
+                             (let [item (nth items i)]
+                               (cond
+                                 (= i (dec n)) (th item env s k ctx)
+                                 (touches? item)
+                                 (let [s2 (fresh "s")]
+                                   (list 'let [s2 (th item env s {:kind :state} ctx)] (step (inc i) s2)))
+                                 :else (list 'do item (step (inc i) s)))))
+                           0 s))
+                        if
+                        (let [[c a b] (if-parts args form)]
+                          (th c env s
+                              (fk (fn [cv s1]
+                                    (branch form env s1 k ctx [a b] cv (type-of c env)
+                                            #(list 'if cv a b)
+                                            (fn [kk st sv] (list 'if sv (th a env st kk ctx) (th b env st kk ctx))))))
+                              ctx))
+                        result-match-of
+                        (let [[type value ok-name ok-body err-name err-body] args
+                              env-ok (assoc env ok-name (second type))
+                              env-err (assoc env err-name (nth type 2))]
+                          (th value env s
+                              (fk (fn [vv s1]
+                                    (branch form env s1 k ctx [ok-body err-body] vv type
+                                            #(list 'result-match-of type vv ok-name ok-body err-name err-body)
+                                            (fn [kk st sv] (list 'result-match-of type sv
+                                                           ok-name (th ok-body env-ok st kk ctx)
+                                                           err-name (th err-body env-err st kk ctx))))))
+                              ctx))
+                        option-match
+                        (let [[type value none-body some-name some-body] args
+                              env-some (assoc env some-name (second type))]
+                          (th value env s
+                              (fk (fn [vv s1]
+                                    (branch form env s1 k ctx [none-body some-body] vv type
+                                            #(list 'option-match type vv none-body some-name some-body)
+                                            (fn [kk st sv] (list 'option-match type sv
+                                                           (th none-body env st kk ctx)
+                                                           some-name (th some-body env-some st kk ctx))))))
+                              ctx))
+                        variant-match
+                        (let [[type value branches] args
+                              cases (nth (canonical-closure-result-type type) 2)
+                              bodies (map #(nth % 2) branches)]
+                          (th value env s
+                              (fk (fn [vv s1]
+                                    (let [rebuild (fn [sv f]
+                                                    (let [lowered (mapv (fn [[_tag payload-type] [tag binder b :as br]]
+                                                                          (let [b* (f b (assoc env binder payload-type))]
+                                                                            (if (vector? br) [tag binder b*] (list tag binder b*))))
+                                                                        cases branches)]
+                                                      (list 'variant-match type sv
+                                                            (if (vector? branches) (vec lowered) (apply list lowered)))))]
+                                      (branch form env s1 k ctx bodies vv type
+                                              #(list 'variant-match type vv branches)
+                                              (fn [kk st sv] (rebuild sv (fn [b env*] (th b env* st kk ctx))))))))
+                              ctx))
+                        __kotoba_state_op
+                        (let [[hk op* & values] args
+                              {vf :value sf :state} (get-in handlers [hk :clauses op*])]
+                          (if (= op* :get)
+                            (let [v (fresh "v") s2 (fresh "s")]
+                              (list 'let [v (list vf s) s2 (list sf s)] (apply-k k v s2)))
+                            (th (first values) env s
+                                (fk (fn [av s1]
+                                      (let [a (fresh "a") v (fresh "v") s2 (fresh "s")]
+                                        (list 'let [a av v (list vf s1 a) s2 (list sf s1 a)]
+                                              (apply-k k v s2)))))
+                                ctx)))
+                        __kotoba_state_with
+                        (let [[hk init body] args]
+                          (th init env s
+                              (fk (fn [iv s1]
+                                    (apply-k k (with-form hk iv body env) s1)))
+                              ctx))
+                        quote (apply-k k form s)
+                        (call form env s k ctx)))))
+                (with-form [hk init body env]
+                  (let [s0 (fresh "s")]
+                    (list 'let [s0 init]
+                          (th body env s0 {:kind :value}
+                              {:S (:state-type (get handlers hk)) :handler hk}))))
+                (expand-withs [form env]
+                  ;; A function that is not a specialization: every `handle`
+                  ;; is replaced in place by its value; nothing else changes.
+                  (cond
+                    (not (state-mentions? form state-handle-heads)) form
+                    (vector? form) (with-meta (mapv #(expand-withs % env) form) (meta form))
+                    (not (seq? form)) form
+                    :else
+                    (let [[op & args] form]
+                      (case op
+                        quote form
+                        __kotoba_state_with
+                        (let [[hk init body] args]
+                          (with-form hk (expand-withs init env) body env))
+                        let
+                        (let [bindings (first args) body (let-body args form)
+                              [out env*] (reduce (fn [[out env] [x e]]
+                                                   [(conj out x (expand-withs e env))
+                                                    (assoc env x (type-of e env))])
+                                                 [[] env] (partition 2 bindings))]
+                          (list 'let out (expand-withs body env*)))
+                        result-match-of
+                        (let [[type value ok-name ok-body err-name err-body] args]
+                          (list 'result-match-of type (expand-withs value env)
+                                ok-name (expand-withs ok-body (assoc env ok-name (second type)))
+                                err-name (expand-withs err-body (assoc env err-name (nth type 2)))))
+                        option-match
+                        (let [[type value none-body some-name some-body] args]
+                          (list 'option-match type (expand-withs value env)
+                                (expand-withs none-body env)
+                                some-name (expand-withs some-body (assoc env some-name (second type)))))
+                        variant-match
+                        (let [[type value branches] args
+                              cases (nth (canonical-closure-result-type type) 2)
+                              lowered (mapv (fn [[_tag payload-type] [tag binder b :as br]]
+                                              (let [b* (expand-withs b (assoc env binder payload-type))]
+                                                (if (vector? br) [tag binder b*] (list tag binder b*))))
+                                            cases branches)]
+                          (list 'variant-match type (expand-withs value env)
+                                (if (vector? branches) (vec lowered) (apply list lowered))))
+                        (state-rebuild-seq form (cons op (map #(expand-withs % env) args)))))))]
+          (into
+           (mapv (fn [{:keys [name params param-types result body] :as f}]
+                  (if-let [{:keys [handler]} (get clones name)]
+                    (let [S (:state-type (get handlers handler))
+                          P (pair-type result S)
+                          s0 (fresh "s")]
+                      (assoc f
+                             :params (into [s0] params)
+                             :param-types (into [S] param-types)
+                             :result P
+                             :result-inferred? false
+                             :state-handler handler
+                             :body (th body (zipmap params param-types) s0
+                                       {:kind :pair :type P} {:S S :handler handler})))
+                    (if (state-mentions? body state-handle-heads)
+                      (assoc f :body (expand-withs body (zipmap params param-types)))
+                      f)))
+                functions)
+           ;; realized above, so every join helper the walk made is here
+           @extra))))))
+
 (def ^:private dataspace-capability-ids
   "The wire IDs of every `:dataspace/*` capability -- the facet operations
   whose unwind the abort ability has no checked form for yet."
@@ -13838,15 +14681,22 @@
   The mark, not the call graph, is the authority."
   [functions]
   (let [names (set (map :name functions))
-        direct (into {} (map (fn [{:keys [name body abort-error-type]}]
+        direct (into {} (map (fn [{:keys [name body abort-error-type state-handler]}]
                                [name (cond-> (direct-facts body names)
-                                       abort-error-type (update :effects conj :abort))]))
+                                       abort-error-type (update :effects conj :abort)
+                                       ;; State ability, slice 1: a handler
+                                       ;; specialization performs :state. Like
+                                       ;; :abort, the mark is the authority and
+                                       ;; the call graph is not: the function
+                                       ;; that installs the handler calls the
+                                       ;; specialization and does NOT perform it.
+                                       state-handler (update :effects conj :state))]))
                      functions)]
     (loop [inferred (into {} (map (fn [[name facts]] [name (:effects facts)]) direct))]
       (let [next-effects
             (into {} (map (fn [[name {direct-effects :effects calls :calls}]]
                             [name (reduce set/union direct-effects
-                                          (map #(disj (get inferred % #{}) :abort) calls))])
+                                          (map #(disj (get inferred % #{}) :abort :state) calls))])
                           direct))]
         (if (= inferred next-effects) inferred (recur next-effects))))))
 
@@ -13945,8 +14795,12 @@
           (map (fn [kw]
                  (if-let [id (get capability-registry kw)]
                    [:cap/call id]
-                   (reject! (str "effect ceiling names unregistered capability: " kw)
-                            form))))
+                   ;; The pure ability `state` (lang/state-ability.edn) is a
+                   ;; row member of its own, not a capability.
+                   (if (= :state kw)
+                     :state
+                     (reject! (str "effect ceiling names unregistered capability: " kw)
+                              form)))))
           ceiling)))
 
 (defn- in-place-targets
@@ -16061,7 +16915,7 @@
   ([source] (analyze* source nil))
   ([source opts] (analyze-forms* (read-forms source) opts)))
 
-(defn- analyze-forms*
+(defn- analyze-forms**
   "Analyze already-read Kotoba source forms into HIR. `analyze*` is the
   text entry; `fold-def-value!` calls this one directly with the probe
   module it builds for a computed constant, so the fold and the module it
@@ -16087,6 +16941,12 @@
             (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
+        ;; State ability, slice 1: after the reserved-prefix check, because
+        ;; what it writes uses the reserved prefix. `defhandler` becomes
+        ;; private defns; the state spellings become reserved heads.
+        state-expansion (expand-state-ability-forms forms)
+        forms (:forms state-expansion)
+        _ (vreset! *state-handlers* (:handlers state-expansion))
         ;; The definition layer's backstop, installed at every entry point
         ;; that turns a top-level declaration into parts. A deliberate
         ;; refusal passes through untouched; a HOST error that escapes now
@@ -16432,6 +17292,22 @@
                                       effects-ceiling (assoc :effects-ceiling effects-ceiling))]
                                    @loop-helpers)))))
                      def-parts)))
+        ;; State ability, slice 1: specialize every stateful function per
+        ;; handler it runs under, and split every handler clause, BEFORE any
+        ;; inference -- which functions are stateful is syntax, and a
+        ;; specialization is inferred at its own handler's state type.
+        state-specialization
+        (specialize-state-abilities
+         parsed (mapv :helper @lambda-infos) @*state-handlers*
+         (cond
+           (some? (:exports namespace-info)) (set (:exports namespace-info))
+           (first-truthy (complement :public?) def-parts)
+           (set (map :source-name (filter :public? def-parts)))
+           :else nil)
+         loop-helper-shapes)
+        parsed (:functions state-specialization)
+        state-clones (:clones state-specialization)
+        _ (vreset! *state-handlers* (:handlers state-specialization))
         ;; Infer lambda helper bodies before constructing dispatchers.  A
         ;; dispatcher has one concrete Wasm result type, so typed closures must
         ;; not share the legacy i64 dispatcher family. Keep every not-yet-
@@ -16567,8 +17443,12 @@
         parsed (a-normalize-aborts parsed {} "abort_thrown")
         {parsed :functions abort-error-types :abort-error-types}
         (infer-abort-error-types parsed)
+        _ (check-state-abort-interaction! parsed state-clones abort-error-types)
         parsed (a-normalize-aborts parsed abort-error-types "abort_operand")
         parsed (elaborate-aborts parsed abort-error-types)
+        ;; State ability, slice 1: lower by state passing, now that every
+        ;; result type is known and abort's lowering is done.
+        parsed (thread-state-abilities parsed state-clones @*state-handlers*)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
         ;; `option-or` intentionally survives syntactic desugaring until the
@@ -16733,6 +17613,25 @@
                                parsed)))
           function-effects (infer-effects parsed)
           _ (check-abort-facet-unwind! parsed function-effects)
+          ;; State ability, slice 1: a handler for a pure ability is pure.
+          ;; Its clauses were split into plain functions, so their inferred
+          ;; rows are the whole of what the handler can do.
+          _ (doseq [{:keys [name body state-handler-clause]} parsed
+                    :when state-handler-clause
+                    :let [row (get function-effects name #{})]
+                    :when (seq row)]
+              (state-refuse-impure-handler!
+               (:name (get @*state-handlers* (:handler state-handler-clause)))
+               (:op state-handler-clause)
+               (into (sorted-set)
+                     (map (fn [effect]
+                            (if (vector? effect)
+                              (or (first-truthy (fn [[id op]] (when (= (str id) (str (second effect))) op))
+                                            capability-id->name)
+                               effect)
+                              effect)))
+                     row)
+               body))
           _ (doseq [{:keys [name lazy-thunk?]} parsed
                     :when (and lazy-thunk? (seq (get function-effects name)))]
               (reject! "lazy sequence thunks must be effect-free because forcing is non-memoized"
@@ -16768,7 +17667,8 @@
                               ;; A frontend-internal mark: which parameters were
                               ;; written without a type. HIR has a closed key
                               ;; set and this is not one of its keys.
-                              true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?)
+                              true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?
+                                           :state-handler :state-handler-clause)
                               (not typed-values?) (dissoc :param-types)))
                           parsed)
           main-result (some->> parsed (first-truthy #(when (= 'main (:name %)) (:result %))))
@@ -16796,6 +17696,13 @@
         :named-operations named-operations
         :language-profile language-profile
         :functions functions}))))
+
+(defn- analyze-forms*
+  "`analyze-forms**` with this analysis's state handler table bound: a probe
+  module analysed from inside it (`fold-def-value!`) gets a table of its own."
+  [source-forms opts]
+  (binding [*state-handlers* (volatile! {})]
+    (analyze-forms** source-forms opts)))
 
 (defn analyze
   "Analyze Kotoba source into HIR, refusing in this language's own vocabulary
