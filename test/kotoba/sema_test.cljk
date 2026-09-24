@@ -1,5 +1,5 @@
 (ns kotoba.sema-test
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend]

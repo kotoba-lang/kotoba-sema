@@ -48,7 +48,7 @@
   one. So the `COMPARED` count here is 1 and the cross-repository half is done
   by the pinned digest, not by a comparison. amu and kotoba each see two and
   three copies respectively and compare them across their pins."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
