@@ -23,7 +23,7 @@
   is a throw-free program whose HIR and KIR hashes were taken on the commit
   before this ability existed (kotoba-sema c14ca39e): a change to how any
   throw-free program lowers would move them."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.kir :as kir]
             [kotoba.sema :as sema]))
 

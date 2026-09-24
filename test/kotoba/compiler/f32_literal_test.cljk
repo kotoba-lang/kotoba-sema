@@ -38,7 +38,7 @@
   Bit patterns are compared through `norm`, which renders integers as decimal
   strings: a JVM `Long` and an nbb `BigInt` of the same value are the same
   answer, and this file is about the value, not the host's box for it."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

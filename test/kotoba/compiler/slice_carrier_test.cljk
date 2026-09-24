@@ -15,7 +15,7 @@
   every one is pinned by code AND by message here: a refusal that fires for a
   different reason than the one it names would otherwise count as a pass."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))

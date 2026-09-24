@@ -9,7 +9,7 @@
   target -- the frontend admits these target-independently, exactly as it
   admits `kernel-write-cr3` for `x86_64-linux-kotoba-v1`, and amu owns the
   gate."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :as frontend]

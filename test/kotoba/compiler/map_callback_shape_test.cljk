@@ -40,7 +40,7 @@
   CID control: an already-admitted `(map (fn [x] ...) coll)` analyses to the
   same HIR before and after (the split touches only refusals and the
   stored-callback dispatcher request), so amu's definition CIDs cannot move."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

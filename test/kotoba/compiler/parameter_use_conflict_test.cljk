@@ -16,7 +16,7 @@
   the function, and both operations with the type each requires. The
   operations come from the call the checker was inside when it refused
   (`:kotoba.error/use-site`), not from a second walk of the body."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

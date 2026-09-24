@@ -11,7 +11,7 @@
   and `kernel-scratch-region`; a loaded word is still refused, and so is an
   address the program computed. The page count is a literal, so this pass
   holds the region's length and refuses a window wider than it."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :as frontend]

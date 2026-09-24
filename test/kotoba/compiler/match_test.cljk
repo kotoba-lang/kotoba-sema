@@ -22,7 +22,7 @@
     equals the absent-key default. `map-get` answers the default for a missing
     key, so a map pattern lowered as projection alone is irrefutable: every
     `match` on a map would take its first arm."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text]
             [kotoba.sema :as sema]

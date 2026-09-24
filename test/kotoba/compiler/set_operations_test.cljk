@@ -33,7 +33,7 @@
   4. `#{...}` is `[:set :keyword]` and nothing else -- a heterogeneous literal
      is NOT admitted, and the refusal now says so rather than reporting a bare
      `expected keyword, got i64`."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

@@ -7,7 +7,7 @@
   only in guest-grammar's :admitted-builtins for the old WASM emitter). The
   KIR PR adds the interpreter case; this test pins the sema side: the heads
   are admitted as binary i64 operations and type-check to i64."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]))
 

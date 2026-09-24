@@ -38,7 +38,7 @@
   direction: an EMPTY defn body; `loop` (`:refuses`, its helper lowering);
   `try` (`lang/abort-ability.edn` `:try :body-forms 1`); a protocol method
   (its own diagnostic, not this profile's); an empty map callback."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))

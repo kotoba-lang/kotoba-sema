@@ -19,7 +19,7 @@
   entry down at that vector. That is kotoba-native's, and the two halves are
   deliberately separate -- this one is about the SOURCE naming a vector, that
   one about an IMAGE having one."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.compiler.frontend :as frontend]))

@@ -16,7 +16,7 @@
   the host and of the caller's own stack, and naming a number here would test
   the release. They pin the two things that must hold on every runtime: below
   the ceiling it analyzes, and at the ceiling the failure is ours."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend :refer [max-reader-depth]]

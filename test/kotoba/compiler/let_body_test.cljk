@@ -17,7 +17,7 @@
   truncating compiler answers the first one), and an earlier EFFECT survives (a
   compiler that sequenced by nesting `let`s would make it an unused binding and
   be entitled to drop it)."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.compiler.frontend :as frontend]
             [kotoba.sema :as sema]

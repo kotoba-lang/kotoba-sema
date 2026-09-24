@@ -9,7 +9,7 @@
   exactly the hole `traceable-base?` exists to close, reopened for one
   operation. `kernel-base-positions` is the fix, and this namespace is what
   would fail if the walk went back to reading argument 0."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))

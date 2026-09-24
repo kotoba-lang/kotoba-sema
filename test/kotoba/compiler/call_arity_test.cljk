@@ -25,7 +25,7 @@
   Every case below is one positive and one negative. The negatives pin the
   exact message, because a refusal that stops naming what it refused is how
   the next truncation gets read as a scoping rule."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.artifact.core :as artifact]
             [kotoba.sema :as sema]

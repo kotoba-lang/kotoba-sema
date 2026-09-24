@@ -6,7 +6,7 @@
   `(js/BigInt \"2\")` rather than quoted literals -- a quoted `2` in CLJS
   is a double and `=` fails against the reader's bigint."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :as t :refer [deftest is]]
+            [kotoba.test :as t :refer [deftest is]]
             [kotoba.compiler.kotoba-reader :as r]))
 
 #?(:clj  (def ^:private two 2)

@@ -29,7 +29,7 @@
   `first` / `second` / `rest` / `empty?` / `cons` and `apply` read. A
   fixed-arity defn is untouched: its CID is measured unchanged in amu
   (`definition-cids`), not here."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
             [kotoba.kir :as kir]))
