@@ -94,9 +94,12 @@
 ;; --- the refusals, by the reason they name ---------------------------------
 
 (deftest a-non-set-receiver-is-refused-and-says-what-to-write
-  (testing "conj on a bounded vector names vector-conj"
-    (let [r (refusal "(typed-set-count [:set :keyword] (conj [1 2] 3))")]
-      (is (= :kotoba.error/set-conj-receiver (:code r)))
+  ;; `conj` on a bounded vector is no longer a refusal (2026-09-25): it
+  ;; appends, see conj-on-a-vector-test. `disj` has no vector meaning in
+  ;; Clojure and is still refused, naming the vector primitive.
+  (testing "disj on a bounded vector is refused and names vector-conj"
+    (let [r (refusal "(typed-set-count [:set :keyword] (disj [1 2] 2))")]
+      (is (= :kotoba.error/set-disj-receiver (:code r)))
       (is (re-find #"vector-conj" (:message r)))))
   (testing "disj on a canonical typed map names typed-map-dissoc"
     (let [r (refusal "(typed-set-count [:set :keyword]
