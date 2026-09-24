@@ -5828,7 +5828,10 @@
         ;; the authority, and whether a module may define one is a decision
         ;; nobody has made. This changes only the two that the authority does
         ;; not declare.
-        (and (contains? '#{mapv filterv} op)
+        ;; `remove` joined the set 2026-09-25 when it gained its lowering
+        ;; (the `(filter remove)` arm below): lang/stdlib/core defines its own
+        ;; `remove`, and that definition must keep winning.
+        (and (contains? '#{mapv filterv remove} op)
              (top-level-function-symbol? op))
         (apply list op (map desugar-expr args))
 
@@ -7301,10 +7304,18 @@
                                    acc))))))))
         ;; T4.5: bounded filter over vector-i64 → zero-charge loop + vector-conj.
         ;; (filter (fn [x] pred) coll) or (filter named-pred coll).
-        filter
+        ;;
+        ;; `remove` is Clojure's `(filter (complement pred) coll)` and lowers
+        ;; to exactly this loop with the predicate's result negated: every
+        ;; predicate shape filter admits (inline fn, named function, stored
+        ;; callback bound once ahead of the source), no new KIR head, no
+        ;; backend work. Until 2026-09-25 it was `unknown operation: remove
+        ;; is not a builtin` (aiueos desktop floor :browser-component, wall
+        ;; 7). A module defining its own `remove` keeps it (the guard above).
+        (filter remove)
         (do
           (when-not (= 2 (count args))
-            (reject! "filter requires pred and one vector-i64 collection" form))
+            (reject! (str op " requires pred and one vector-i64 collection") form))
           (let [[p-form coll-form] args
                 coll* (desugar-vector-i64-source coll-form)
                 v (synthetic "filter_v")
@@ -7324,7 +7335,7 @@
                     (when-not (and (vector? params) (= 1 (count params))
                                    (every? symbol? params)
                                    (seq body))
-                      (reject! "filter pred must be (fn [x] single-expr)" p-form))
+                      (reject! (str op " pred must be (fn [x] single-expr)") p-form))
                     (let [[px] params]
                       ;; Bind user param to element; desugar body in that scope.
                       (list 'let [px x]
@@ -7347,7 +7358,9 @@
                            (list 'if (list '< i (list 'vector-count v))
                                  (list 'let [x (list 'vector-at v i)]
                                        (list 'recur (list '+ i 1)
-                                             (list 'if pred-body
+                                             (list 'if (if (= op 'remove)
+                                                         (list 'not pred-body)
+                                                         pred-body)
                                                    (list 'vector-conj acc x)
                                                    acc)))
                                  acc)))))))
