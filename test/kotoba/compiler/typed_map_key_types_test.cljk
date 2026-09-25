@@ -239,7 +239,7 @@
                         "keyword map has no presence primitive at all")
           :code :kotoba.error/map-presence-receiver}
          (refusal "(if (contains? {:a 1} :a) 7 8)")))
-  (is (= {:message (str "dissoc requires a canonical typed map "
+  (is (= {:message (str "dissoc requires a record or a canonical typed map "
                         "[:map key-type value-type]; got :map. A typed set "
                         "answers to typed-set-disj, and the bounded keyword "
                         "map has no removal primitive at all")
