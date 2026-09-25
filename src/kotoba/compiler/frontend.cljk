@@ -7499,6 +7499,31 @@
                           args)
              (map desugar-expr args)))))
 
+(def ^:private i64-answer-predicates
+  "ADR 0353 floor :bool-predicates (amends ADR 0028). The predicate primitives
+  whose KIR operation still answers the legacy 0/1 `:i64`. The backends
+  (kotoba-wasm `typed`, kotoba-script, kotoba-native) type these operations
+  as `:i64` and are not changed; the LANGUAGE answers `:bool`, because every
+  source occurrence is elaborated once to `(= op 1)`. With that, no predicate
+  a program can write answers a number, and `if` refuses an `:i64` test."
+  '#{record-equal hetero-vector-equal typed-set-equal typed-map-equal
+     task-ready? object-cas-won})
+
+(defn- bool-predicate-answer
+  "Wraps a desugared 0/1 predicate operation as `(= op 1)`, exactly once.
+  The head symbol is marked (`::i64-answer`): symbol meta is what survives the
+  later passes, and a form whose source head already carries the mark is a
+  re-desugar of an elaborated operand, which is marked again, not re-wrapped."
+  [form result]
+  (if (and (seq? result) (contains? i64-answer-predicates (first result)))
+    (let [marked (apply list (vary-meta (first result) assoc ::i64-answer true)
+                        (rest result))]
+      (if (and (seq? form) (symbol? (first form))
+               (::i64-answer (meta (first form))))
+        marked
+        (list '= marked 1)))
+    result))
+
 (defn- desugar-expr [form]
   ;; The one chokepoint every desugared node passes through, and therefore the
   ;; only place a host error escaping ANY branch of the lowering table can be
@@ -7526,6 +7551,7 @@
                                    (rest result))
                    (meta result))
                  result)
+        result (bool-predicate-answer form result)
         location (select-keys (meta form)
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (or (coll? result) (symbol? result)))
@@ -9693,8 +9719,16 @@
                  test-type (infer-expression-type test locals signatures)
                  then-type (infer-expression-type then locals signatures)
                  else-type (infer-expression-type else locals signatures)]
-             (when-not (contains? #{:i64 :bool} test-type)
-               (reject! "if test must be bool or legacy i64" test))
+             ;; ADR 0353 floor :bool-predicates: numbers are never truthy.
+             ;; An option test never reaches here (it is presence, rewritten
+             ;; by `option-presence-test`), and no predicate answers a number
+             ;; (`i64-answer-predicates`), so the only test is `:bool`.
+             (when (= :i64 test-type)
+               (reject! (str "if test is :i64, and a number is never truthy: "
+                             "compare it (for example (not= x 0)) or answer :bool")
+                        test))
+             (when-not (= :bool test-type)
+               (reject! "if test must be bool or an option" test))
              ;; A branch that aborts has no value, so the other branch's type is
              ;; the `if`'s. Two aborting branches make the `if` itself bottom.
              (cond
@@ -10950,7 +10984,8 @@
         ;; `[:option T]` only: an option test is presence. `when`, `if-not`,
         ;; `when-not`, `not`, `cond`, `cond->` and `if-let` / `when-let` all
         ;; reach here as `if`. Any other test type is left for inference to
-        ;; refuse ("if test must be bool or legacy i64").
+        ;; refuse ("if test must be bool or an option"; an `:i64` by its own
+        ;; name, floor :bool-predicates).
         (= op 'if)
         (let [[test & branches] (mapv #(rewrite-record-projection % locals signatures schemas) args)
               test-type (try (infer-expression-type test locals signatures)
