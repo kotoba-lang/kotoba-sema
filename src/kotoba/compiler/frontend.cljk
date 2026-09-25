@@ -14146,8 +14146,27 @@
               :else nil))]
     (walk body)))
 
+(defn- unwrap-linear-bool-answers
+  "ADR 0353 floor :bool-predicates elaborates `(task-ready? x)` to
+  `(= (task-ready? x) 1)` so it answers :bool. Ownership is about the
+  consume, not about the comparison around it: the linear shapes below see
+  the consume itself (only an elaborated, marked head is unwrapped)."
+  [form]
+  (cond
+    (and (seq? form) (= '= (first form)) (= 3 (count form))
+         (seq? (second form))
+         (linear-consume-head? (first (second form)))
+         (::i64-answer (meta (first (second form))))
+         (= 1 (nth form 2)))
+    (unwrap-linear-bool-answers (second form))
+
+    (seq? form) (apply list (map unwrap-linear-bool-answers form))
+    (vector? form) (mapv unwrap-linear-bool-answers form)
+    :else form))
+
 (defn- check-linear-resource-ownership! [functions]
-  (doseq [{:keys [param-types result body] :as function} functions]
+  (doseq [{:keys [param-types result body] :as function} functions
+          :let [body (unwrap-linear-bool-answers body)]]
     (when (first-truthy linear-resource-type? param-types)
       (reject! "linear resources require move-aware parameters"
                (:name function)))
