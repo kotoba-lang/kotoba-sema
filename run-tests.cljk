@@ -132,6 +132,7 @@
             ;; the JVM-free reader's `#()` fn shorthand (lang-cosientist
             ;; iteration 3): one call form, fail-closed rest/empty
             [kotoba.compiler.kotoba-reader-test]
+            [kotoba.compiler.kotoba-reader-host-char-test]
             [kotoba.compiler.malformed-type-argument-test]
             ;; a malformed top-level DECLARATION is refused, not crashed --
             ;; fifteen spellings of a non-symbol in a `defn` name position
@@ -235,6 +236,7 @@
              'kotoba.compiler.conj-on-a-vector-test
              'kotoba.compiler.remove-test
              'kotoba.compiler.kotoba-reader-test
+             'kotoba.compiler.kotoba-reader-host-char-test
              'kotoba.compiler.malformed-type-argument-test
              'kotoba.compiler.malformed-definition-form-test
              'kotoba.compiler.dropped-declaration-form-test

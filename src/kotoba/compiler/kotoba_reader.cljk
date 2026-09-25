@@ -56,13 +56,24 @@
 ;; silently letting an oversized NUMERIC literal through uncaught)."
 (defrecord ReaderState [source length position depth max-depth max-token-chars line-starts])
 
+(defn- char-at
+  "The one-character STRING at index I of S. `(nth s i)` is a String on
+  ClojureScript but a java.lang.Character on the JVM, and every comparison in
+  this reader is against one-character strings (\" \", \"(\", \"\\\\\" ...) since
+  44f162c took the host char literals out. With `nth`, on the JVM nothing was
+  whitespace or a delimiter, and `read-forms` returned the WHOLE source as one
+  symbol (measured 2026-09-25 through kotoba-lang's JVM suite: 1,300 failures
+  and errors, `only ns, def, defn, and defn- are allowed at top level`)."
+  [s i]
+  (subs s i (inc i)))
+
 (defn- peek-ch [st]
   (let [{:keys [source length position]} st]
-    (when (< position length) (nth source position))))
+    (when (< position length) (char-at source position))))
 
 (defn- peek-ch2 [st]
   (let [{:keys [source length position]} st]
-    (when (< (inc position) length) (nth source (inc position)))))
+    (when (< (inc position) length) (char-at source (inc position)))))
 
 (defn- advance [st] (update st :position inc))
 
@@ -358,9 +369,9 @@
   (loop [i 0 acc (transient [])]
     (if (>= i (count s))
       (apply str (persistent! acc))
-      (let [ch (nth s i)]
+      (let [ch (char-at s i)]
         (if (and (= ch "\\") (< (inc i) (count s)))
-          (let [nxt (nth s (inc i))
+          (let [nxt (char-at s (inc i))
                 ;; `\uXXXX` -- exactly four hex digits, one UTF-16 code unit,
                 ;; as Clojure's reader defines it. Measured 2026-09-11 in the
                 ;; compiler's own bounded_edn / elf64 sources; without it the
