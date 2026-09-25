@@ -12152,7 +12152,19 @@
   "name -> {index fields} for every function with a row parameter, to a fixed
   point over pass-through."
   [functions]
-  (let [candidates
+  (let [by-name (into {} (map (juxt :name identity)) functions)
+        ;; A parameter also passed to a parameter DECLARED as a record already
+        ;; has a type: `infer-absent-parameter-types` refines it to that record,
+        ;; as it did before rows existed, so it is not a row.
+        annotated-record-use?
+        (fn [passes]
+          (some (fn [[callee j]]
+                  (let [{:keys [param-types param-types-inferred]} (get by-name callee)]
+                    (and (< j (count param-types))
+                         (not (contains? (set param-types-inferred) j))
+                         (row-record-fields (nth param-types j)))))
+                passes))
+        candidates
         (into {}
               (keep (fn [{:keys [name params param-types param-types-inferred body
                                  source-name loop-helper?]}]
@@ -12162,7 +12174,9 @@
                                             (let [p (nth params i)]
                                               (when (and (= :i64 (nth param-types i))
                                                          (simple-symbol? p)
-                                                         (not (row-rebinds? p body)))
+                                                         (not (row-rebinds? p body))
+                                                         (not (annotated-record-use?
+                                                               (row-pass-through p body))))
                                                 [i {:reads (row-field-reads p body)
                                                     :passes (row-pass-through p body)}]))))
                                     (sort param-types-inferred))])))
