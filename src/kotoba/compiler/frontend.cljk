@@ -12061,6 +12061,283 @@
                exports :kotoba.error/export-names-undefined
                {:kotoba.error/export offender}))))
 
+;; --- row-polymorphic parameters (ADR 0353 point 3, floor :row-records) -----
+;;
+;; `(defn- f [m] (:a m))` used to be refused: an unannotated parameter was a
+;; provisional `:i64`, and `(record-get m :a)` without a descriptor needs a
+;; record. The parameter's type is now read from its uses as a ROW: every
+;; field read off it, `{:a T | r}`. There is still no dynamically shaped
+;; record boundary (ADR 0214) and no value carries its type at run time: f
+;; exists only as its specializations, one per record type a call passes it
+;; (`f__row_0_b_s`), each checked at that record like any annotated function
+;; (monomorphization). A call whose argument is not a record, or is a record
+;; without a field the row reads, is refused by name at the call.
+;;
+;; What makes a parameter a row: an unannotated parameter the body reads a
+;; field off (`(:k m)`, desugared to a 2-arity `record-get`), or passes on
+;; unchanged to another function's row parameter (a fixed point over the
+;; call graph). A parameter the body rebinds is left as it was.
+;;
+;; Cut of this slice, each keeping the refusal it had: loop helpers and fn
+;; literals are not generic (a loop over a row parameter), a parameter that is
+;; only returned beside a row (`(if c m n)`) is not unified into it, and
+;; assoc / dissoc / merge / select-keys are not yet row operations (floor
+;; :row-operations). A specialization's definition CID is its own KIR's, which
+;; already seals the record it was specialized at (floor
+;; :specialization-identity derives it from the generic's).
+
+(def ^:private row-binding-heads
+  "Desugared heads that bind names in their arguments. Inside them the walk
+  forgets what it knew about the names they bind."
+  '#{option-match result-match-of variant-match})
+
+(defn- row-symbols-in [form]
+  (into #{} (filter simple-symbol?) (tree-seq coll? seq form)))
+
+(defn- row-rebinds?
+  "Does FORM bind PARAM anywhere (a let binder, or a name a match binds)?"
+  [param form]
+  (boolean
+   (first-truthy
+    (fn [x]
+      (and (seq? x)
+           (or (and (= 'let (first x)) (vector? (second x))
+                    (some #(= param %) (take-nth 2 (second x))))
+               (and (contains? row-binding-heads (first x))
+                    (contains? (row-symbols-in (drop 3 x)) param)))))
+    (tree-seq coll? seq form))))
+
+(defn- row-field-reads
+  "The fields FORM reads off PARAM with a descriptor-less `(record-get PARAM :k)`."
+  [param form]
+  (into (sorted-set)
+        (keep (fn [x]
+                (when (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
+                           (= param (second x)) (keyword? (nth x 2)))
+                  (nth x 2))))
+        (tree-seq coll? seq form)))
+
+(defn- row-pass-through
+  "`[[callee index] ...]` for every call in FORM that passes PARAM itself as an
+  argument."
+  [param form]
+  (into []
+        (mapcat (fn [x]
+                  (when (and (seq? x) (symbol? (first x)))
+                    (keep-indexed (fn [i arg] (when (= param arg) [(first x) i]))
+                                  (rest x)))))
+        (tree-seq coll? seq form)))
+
+(defn- row-record-fields
+  "The field keys of record type T (`[:ref :ns/name]` naming a :record schema),
+  or nil when T is not a record."
+  [t]
+  (when (and (vector? t) (= :ref (first t)) (keyword? (second t)))
+    (let [schema (get *schemas* (second t))]
+      (when (and (vector? schema) (= :record (first schema)))
+        (into #{} (map first) (nth schema 2))))))
+
+(defn- row-text [fields]
+  (str "{" (str/join " " (map #(str % " T") fields)) " | r}"))
+
+(defn- row-name-part [t]
+  (apply str (map (fn [c] (let [s (str c)]
+                            (if (contains? #{"a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m"
+                                             "n" "o" "p" "q" "r" "s" "t" "u" "v" "w" "x" "y" "z"
+                                             "0" "1" "2" "3" "4" "5" "6" "7" "8" "9"} s)
+                              s "_")))
+                  (str (namespace (second t)) "_" (name (second t))))))
+
+(defn- row-generics
+  "name -> {index fields} for every function with a row parameter, to a fixed
+  point over pass-through."
+  [functions]
+  (let [candidates
+        (into {}
+              (keep (fn [{:keys [name params param-types param-types-inferred body
+                                 source-name loop-helper?]}]
+                      (when (and source-name (not loop-helper?) (seq param-types-inferred))
+                        [name (into {}
+                                    (keep (fn [i]
+                                            (let [p (nth params i)]
+                                              (when (and (= :i64 (nth param-types i))
+                                                         (simple-symbol? p)
+                                                         (not (row-rebinds? p body)))
+                                                [i {:reads (row-field-reads p body)
+                                                    :passes (row-pass-through p body)}]))))
+                                    (sort param-types-inferred))])))
+              functions)]
+    (loop [known {}]
+      (let [next-known
+            (into {}
+                  (keep (fn [[fname slots]]
+                          (let [rows (into (sorted-map)
+                                           (keep (fn [[i {:keys [reads passes]}]]
+                                                   (when (or (seq reads)
+                                                             (some (fn [[callee j]]
+                                                                     (contains? (get known callee) j))
+                                                                   passes))
+                                                     [i reads])))
+                                           slots)]
+                            (when (seq rows) [fname rows]))))
+                  candidates)]
+        (if (= next-known known) known (recur next-known))))))
+
+(defn- row-generic-call-refusal!
+  [generic index param reads arg arg-type]
+  (let [row (row-text reads)]
+    (cond
+      (nil? arg-type)
+      (reject! (str "argument " (use-site-text arg) " to " generic " has no type known here, and parameter "
+                    param " of " generic " is the row " row
+                    ": only a record satisfies a row; bind the argument to a record first")
+               arg :kotoba.error/row-argument-not-record
+               {:kotoba.error/function generic :kotoba.error/parameter param})
+      (nil? (row-record-fields arg-type))
+      (reject! (str "argument " (use-site-text arg) " to " generic " is "
+                    (if (keyword? arg-type) (name arg-type) (pr-str arg-type))
+                    ", and parameter " param " of " generic " is the row " row
+                    ": only a record satisfies a row")
+               arg :kotoba.error/row-argument-not-record
+               {:kotoba.error/function generic :kotoba.error/parameter param
+                :kotoba.error/actual arg-type})
+      :else
+      (let [missing (first (remove (row-record-fields arg-type) reads))]
+        (reject! (str "argument " (use-site-text arg) " to " generic " is record "
+                      (second arg-type) ", which has no field " missing
+                      " that the row " row " of parameter " param " reads")
+                 arg :kotoba.error/row-field-missing
+                 {:kotoba.error/function generic :kotoba.error/parameter param
+                  :kotoba.error/field missing :kotoba.error/actual arg-type})))))
+
+(defn- specialize-row-parameters
+  "Monomorphize every row-polymorphic function at the record types its calls
+  pass, and drop the generic. EXPORTED is the set of exported source names
+  (nil: every function); a generic there has no single ABI and is refused."
+  [functions exported]
+  (let [generics (row-generics functions)]
+    (if (empty? generics)
+      functions
+      (let [by-name (into {} (map (juxt :name identity)) functions)
+            label (fn [g] (or (:source-name (get by-name g)) g))]
+        (doseq [[g rows] generics
+                :let [f (get by-name g)]
+                :when (or (nil? exported) (contains? exported (:source-name f)))]
+          (let [i (ffirst rows)
+                p (nth (:params f) i)]
+            (reject! (str "exported function " (label g) " has the row-polymorphic parameter " p
+                          " " (row-text (get rows i))
+                          ", and an export has one ABI: annotate " p
+                          " with a record type, or make " (label g) " private with defn-")
+                     (:source-name f) :kotoba.error/row-generic-export
+                     {:kotoba.error/function (label g) :kotoba.error/parameter p})))
+        (doseq [f functions
+                x (tree-seq coll? seq (:body f))
+                :when (and (coll? x) (seq x) (not (and (seq? x) (= 'quote (first x)))))
+                arg (if (seq? x) (rest x) (seq x))
+                :when (contains? generics arg)]
+          (reject! (str "row-polymorphic function " (label arg)
+                        " cannot be used as a value: it exists only as its specializations, "
+                        "one per record type a call passes it")
+                   arg :kotoba.error/row-generic-value
+                   {:kotoba.error/function (label arg)}))
+        (let [specs (volatile! {})
+              spec-functions (volatile! [])
+              taken (volatile! (into #{} (map :name) functions))
+              instantiate!
+              (fn [g types]
+                (or (get @specs [g types])
+                    (let [f (get by-name g)
+                          base (str g "__row_"
+                                    (str/join "_" (map (fn [[i t]] (str i "_" (row-name-part t)))
+                                                       types)))
+                          sname (loop [k 1]
+                                  (let [n (symbol (if (= 1 k) base (str base "_" k)))]
+                                    (if (contains? @taken n) (recur (inc k)) n)))
+                          spec (-> f
+                                   (assoc :name sname
+                                          :param-types (reduce (fn [pt [i t]] (assoc pt i t))
+                                                               (:param-types f) types))
+                                   (update :param-types-inferred
+                                           #(not-empty (reduce disj (set %) (keys types)))))
+                          spec (if (:param-types-inferred spec) spec (dissoc spec :param-types-inferred))]
+                      (vswap! taken conj sname)
+                      (vswap! specs assoc [g types] sname)
+                      (vswap! spec-functions conj spec)
+                      sname)))
+              arg-type (fn [arg locals table]
+                         (try (infer-expression-type arg locals table)
+                              (catch #?(:clj Exception :cljs :default) _ nil)))
+              rewrite
+              (fn rw [form locals table final?]
+                (cond
+                  (and (seq? form) (seq form))
+                  (let [[op & args] form]
+                    (cond
+                      (= op 'quote) form
+                      (and (= op 'let) (vector? (first args)))
+                      (let [[bindings locals]
+                            (reduce (fn [[out locals] [b v]]
+                                      (let [v (rw v locals table final?)
+                                            t (arg-type v locals table)]
+                                        [(conj out b v)
+                                         (if (and t (simple-symbol? b)) (assoc locals b t) (dissoc locals b))]))
+                                    [[] locals] (partition 2 (first args)))]
+                        (apply list 'let bindings (map #(rw % locals table final?) (rest args))))
+                      (contains? row-binding-heads op)
+                      (let [inner (apply dissoc locals (row-symbols-in (drop 3 form)))]
+                        (apply list op (map #(rw % inner table final?) args)))
+                      (contains? generics op)
+                      (let [args (mapv #(rw % locals table final?) args)
+                            rows (get generics op)
+                            types (into (sorted-map)
+                                        (map (fn [[i _]] [i (arg-type (nth args i) locals table)]))
+                                        rows)
+                            bad (first (keep (fn [[i t]]
+                                               (let [fields (row-record-fields t)
+                                                     reads (get rows i)]
+                                                 (when-not (and fields (every? fields reads)) i)))
+                                             types))]
+                        (cond
+                          (nil? bad) (apply list (instantiate! op types) args)
+                          final? (row-generic-call-refusal!
+                                  (label op) bad (nth (:params (get by-name op)) bad)
+                                  (get rows bad) (nth args bad) (get types bad))
+                          :else (apply list op args)))
+                      :else (apply list op (map #(rw % locals table final?) args))))
+                  (vector? form) (mapv #(rw % locals table final?) form)
+                  :else form))
+              signatures (fn [fs]
+                           (into {} (map (fn [{:keys [name params param-types result]}]
+                                           [name {:params params :param-types param-types
+                                                  :result result}]))
+                                 fs))
+              infer-results (fn [fs]
+                              (let [table (signatures fs)]
+                                (mapv (fn [{:keys [params param-types body result-inferred?] :as f}]
+                                        (if-let [t (and result-inferred?
+                                                        (arg-type body (zipmap params param-types) table))]
+                                          (assoc f :result t)
+                                          f))
+                                      fs)))
+              round (fn [fs final?]
+                      (let [fs (infer-results (infer-results fs))
+                            table (signatures fs)]
+                        (mapv (fn [{:keys [params param-types] :as f}]
+                                (update f :body rewrite (zipmap params param-types) table final?))
+                              fs)))
+              ordinary (vec (remove #(contains? generics (:name %)) functions))]
+          (loop [fs ordinary budget 64]
+            (let [before (count @spec-functions)
+                  fs' (round fs false)
+                  fs' (into fs' (subvec @spec-functions before))]
+              (if (or (zero? budget)
+                      (and (= before (count @spec-functions)) (= fs' fs)))
+                (let [n (count @spec-functions)
+                      final (round fs' true)]
+                  (into final (subvec @spec-functions n)))
+                (recur fs' (dec budget))))))))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -17719,6 +17996,18 @@
         parsed (check-loop-recur-argument-types! parsed @loop-helper-shapes)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
+        ;; ADR 0353 floor :row-records: a parameter read as a record is a row,
+        ;; and its function exists only as its specializations. Before
+        ;; parameter inference, so a specialization's row parameter is
+        ;; already its record when anything else reasons about it.
+        parsed (binding [*schemas* (:schemas namespace-info)]
+                 (specialize-row-parameters
+                  parsed
+                  (cond
+                    (some? (:exports namespace-info)) (set (:exports namespace-info))
+                    (first-truthy (complement :public?) def-parts)
+                    (set (map :source-name (filter :public? def-parts)))
+                    :else nil)))
         parsed (infer-absent-parameter-types parsed)
         ;; ADR 0189: resolve `(record-get value :field)` to the canonical
         ;; 3-arity form. This must precede every later pass that runs type
