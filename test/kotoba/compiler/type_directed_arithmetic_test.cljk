@@ -12,8 +12,8 @@
   an f64, is rejected with a message that names both types and the explicit
   conversion operations; the message is pinned here verbatim because it is
   the thing that tells the author where to go."
-  (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.edn :as edn]
+            [kotoba.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.sema :as sema]))
@@ -29,7 +29,7 @@
   "The message and code of the rejection, or ::no-rejection."
   [source]
   (try (analyze source) ::no-rejection
-       (catch clojure.lang.ExceptionInfo e
+       (catch kerror/ExceptionInfo e
          {:message (ex-message e)
           :code (:kotoba.error/code (ex-data e))
           :expected (:kotoba.error/expected (ex-data e))
@@ -182,7 +182,7 @@
     (is (= :f64 (call)) "before the final check the float reading types")
     (is (= :kotoba.error/numeric-resolution-unresolved
            (try (binding [frontend/*numeric-resolution-final* true] (call) ::no-rejection)
-                (catch clojure.lang.ExceptionInfo e (:kotoba.error/code (ex-data e))))))))
+                (catch kerror/ExceptionInfo e (:kotoba.error/code (ex-data e))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Output identity: a program without floats is byte-identical

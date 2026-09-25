@@ -9,7 +9,7 @@
   exactly the hole `traceable-base?` exists to close, reopened for one
   operation. `kernel-base-positions` is the fix, and this namespace is what
   would fail if the walk went back to reading argument 0."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
             [kotoba.sema :as sema]))
@@ -28,11 +28,11 @@
     ;; function" instead, which is a different failure -- so the message is
     ;; pinned rather than merely asserting that something threw.
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"kernel memory operation arity mismatch"
+         kerror/ExceptionInfo #"kernel memory operation arity mismatch"
          (sema/analyze
           (beside-main "(defn p [a al b bl] (kernel-dot-f32 a al b bl))"))))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"kernel memory operation arity mismatch"
+         kerror/ExceptionInfo #"kernel memory operation arity mismatch"
          (sema/analyze
           ;; A sixth ARGUMENT, not a sixth parameter: five is the ABI's own
          ;; parameter ceiling and a six-parameter function is refused before
@@ -81,14 +81,14 @@
             "(defn p [a b n] (kernel-dot-f32 (+ a 1) 8 (+ b 1) 8 n))"]]]
     (testing label
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel memory base must name a region, not compute one"
            (sema/analyze (beside-main src))))))
   (testing "a load laundered through a base position is refused in either slot"
     (doseq [src ["(defn p [a al b bl n] (kernel-dot-f32 (kernel-load-u8 a al 0) al b bl n))"
                  "(defn p [a al b bl n] (kernel-dot-f32 a al (kernel-load-u8 b bl 0) bl n))"]]
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel memory base must name a region, not compute one"
            (sema/analyze (beside-main src)))))))
 
@@ -116,7 +116,7 @@
   ;; something traceable. Reading argument 0 only would leave this caller free
   ;; to compute the pointer.
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"kernel memory base must name a region, not compute one"
        (sema/analyze
         (beside-main

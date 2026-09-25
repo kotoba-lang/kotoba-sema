@@ -9,7 +9,7 @@
   while the provenance walk kept its own list,
   `a-new-width-inherits-the-provenance-rule` would fail while everything else
   stayed green."
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
             [kotoba.hir :as hir]
@@ -77,12 +77,12 @@
   ;; message is pinned rather than merely asserting that something threw.
   (doseq [op every-load]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"kernel memory operation arity mismatch"
+         kerror/ExceptionInfo #"kernel memory operation arity mismatch"
          (sema/analyze (beside-main (str "(defn p [a b c d] (" op " a b c d))"))))
         op))
   (doseq [op every-store]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"kernel memory operation arity mismatch"
+         kerror/ExceptionInfo #"kernel memory operation arity mismatch"
          (sema/analyze (beside-main (str "(defn p [a b c] (" op " a b c))"))))
         op)))
 
@@ -122,7 +122,7 @@
                 (str "(defn p [a b] (" op " (+ a 1) b 0 7))")
                 (str "(defn p [a b] (" op " (+ a 1) b 0))"))]
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel memory base must name a region, not compute one"
            (sema/analyze (beside-main src)))
           op))))

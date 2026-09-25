@@ -60,7 +60,7 @@
 
 (defn- rejection [source]
   (try (do (sema/analyze source) ::no-rejection)
-       (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+       (catch :default e
          (select-keys (ex-data e) [:phase :kotoba.error/code]))))
 
 ;; Bit patterns, written as the decimal longs a HIR form actually carries, with

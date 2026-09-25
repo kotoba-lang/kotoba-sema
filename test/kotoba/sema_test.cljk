@@ -1,6 +1,6 @@
 (ns kotoba.sema-test
-  (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.edn :as edn]
+            [kotoba.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend]
             [kotoba.hir :as hir]
@@ -42,7 +42,7 @@
     (is (empty? (get-in result [:functions 0 :effects])))
     (is (hir/valid? result)))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"expected bytes, got i64"
+       kerror/ExceptionInfo #"expected bytes, got i64"
        (sema/analyze
         "(ns example.bytes (:export [size]))
          (defn size [value :i64] :i64 (bytes-count value))"))))
@@ -65,24 +65,24 @@
       (is (hir/valid? result))))
   (testing "the sequence operand must be bytes"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         kerror/ExceptionInfo #"expected bytes, got i64"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :i64] :i64 (bytes-at value 0))"))))
   (testing "the index operand must be i64"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         kerror/ExceptionInfo #"expected i64, got bytes"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :i64 (bytes-at value value))"))))
   (testing "arity is fixed at two operands"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-at requires a bytes operand and an index"
+         kerror/ExceptionInfo #"bytes-at requires a bytes operand and an index"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :i64 (bytes-at value))")))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-at requires a bytes operand and an index"
+         kerror/ExceptionInfo #"bytes-at requires a bytes operand and an index"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :i64 (bytes-at value 0 1))")))))
@@ -113,29 +113,29 @@
       (is (hir/valid? result))))
   (testing "the sequence operand must be bytes"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         kerror/ExceptionInfo #"expected bytes, got i64"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :i64] :bytes (bytes-slice value 0 2))"))))
   (testing "both offsets must be i64"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         kerror/ExceptionInfo #"expected i64, got bytes"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :bytes (bytes-slice value value 2))")))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected i64, got bytes"
+         kerror/ExceptionInfo #"expected i64, got bytes"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :bytes (bytes-slice value 0 value))"))))
   (testing "arity is fixed at three operands"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
+         kerror/ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :bytes (bytes-slice value 0))")))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
+         kerror/ExceptionInfo #"bytes-slice requires a bytes operand and two offsets"
          (sema/analyze
           "(ns example.bytes (:export [head]))
            (defn head [value :bytes] :bytes (bytes-slice value 0 1 2))")))))
@@ -164,23 +164,23 @@
       (is (hir/valid? result))))
   (testing "both operands must be bytes"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         kerror/ExceptionInfo #"expected bytes, got i64"
          (sema/analyze
           "(ns example.bytes (:export [j]))
            (defn j [value :bytes] :bytes (bytes-concat value (bytes-count value)))")))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"expected bytes, got i64"
+         kerror/ExceptionInfo #"expected bytes, got i64"
          (sema/analyze
           "(ns example.bytes (:export [j]))
            (defn j [value :i64] :bytes (bytes-concat value value))"))))
   (testing "arity is fixed at two operands"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-concat requires two bytes operands"
+         kerror/ExceptionInfo #"bytes-concat requires two bytes operands"
          (sema/analyze
           "(ns example.bytes (:export [j]))
            (defn j [value :bytes] :bytes (bytes-concat value))")))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"bytes-concat requires two bytes operands"
+         kerror/ExceptionInfo #"bytes-concat requires two bytes operands"
          (sema/analyze
           "(ns example.bytes (:export [j]))
            (defn j [value :bytes] :bytes (bytes-concat value value value))")))))
@@ -248,14 +248,14 @@
     (is (= #{[:cap/call 30]} (:effects hir)))
     (is (= '(typed-cap-call 30 :document :i64 request) (:body run))))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"typed eval requires exactly one"
        (sema/analyze
         "(ns app (:capabilities #{:code/eval}))
          (defn run [] :i64 (eval))
          (defn main [] 0)")))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"forbidden"
        (sema/analyze "(defn main [] (load-string \"(+ 1 2)\"))"))))
 
@@ -328,24 +328,24 @@
 
 (deftest dataspace-source-forms-fail-closed
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"not declared in namespace :capabilities"
+       kerror/ExceptionInfo #"not declared in namespace :capabilities"
        (sema/analyze
         "(ns app (:capabilities #{:entropy/draw}))
          (defn publish [x :document] (assert! x))
          (defn main [] 0)")))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"assert! requires an assertion document"
+       kerror/ExceptionInfo #"assert! requires an assertion document"
        (sema/analyze
         "(ns app (:capabilities #{:dataspace/transact}))
          (defn publish [] (assert!))")))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"type mismatch"
+       kerror/ExceptionInfo #"type mismatch"
        (sema/analyze
         "(ns app (:capabilities #{:dataspace/transact}))
          (defn publish [] (assert! (quot 1 0)))
          (defn main [] 0)")))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"outside pure-product profile"
+       kerror/ExceptionInfo #"outside pure-product profile"
        (sema/analyze
         "(defn publish [x :document] (assert! x))"
         {:language-profile :pure-product}))))
@@ -378,7 +378,7 @@
 
 (deftest undeclared-dataspace-capability-is-rejected
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"not declared in namespace :capabilities"
        (sema/analyze
         "(ns app (:capabilities #{:entropy/draw}))
@@ -410,7 +410,7 @@
     (is (= :i64 (:result result)))
     (is (hir/valid? result)))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"kernel privileged operation arity mismatch"
        (sema/analyze
         "(defn main [] (kernel-rt-timer-handler-address 1))"))))
@@ -424,7 +424,7 @@
     (is (= :i64 (:result result)))
     (is (hir/valid? result)))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
+       kerror/ExceptionInfo
        #"kernel privileged operation arity mismatch"
        (sema/analyze
         "(defn main [] (kernel-undefined-opcode-handler-address 6))"))))
@@ -451,7 +451,7 @@
   (is (map? (sema/kernel-region-report
              (sema/analyze "(defn main [] 42)"))))
   (with-redefs [sema/max-functions 1]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"function count"
+    (is (thrown-with-msg? kerror/ExceptionInfo #"function count"
                           (sema/analyze
                            "(defn helper [] 1) (defn main [] 42)")))))
 
@@ -476,7 +476,7 @@
   (testing "not, over a string predicate"
     (is (= :bool (result-of "(defn p [a :string b :string] :bool (not (string=? a b)))"))))
   (testing "an i64-declared function may no longer return one — this is the break"
-    (is (thrown? clojure.lang.ExceptionInfo
+    (is (thrown? kerror/ExceptionInfo
                  (result-of "(defn p [a :string b :string] :i64 (string=? a b))"))))
   (testing "the migration ADR 0191 names is available: (if p 1 0)"
     (is (= :i64 (result-of
@@ -575,7 +575,7 @@
       (is (some #{'option-some?} (body-heads (:body p))))
       (is (not-any? #{'option-some?-of} (body-heads (:body p))))))
   (testing "rewrite leak still fails closed: option-some? remains option-i64-only"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+    (is (thrown-with-msg? kerror/ExceptionInfo
                           #"expected option-i64"
                           (sema/analyze
                            "(defn p [v :i64] :bool (option-some? v))\n(defn main [] 0)")))))
@@ -618,14 +618,14 @@
            (defn main [] 0)"))))
   (testing "refused: a read after the write, inside when -- once admitted"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"requires a linear handle"
+         kerror/ExceptionInfo #"requires a linear handle"
          (sema/analyze
           "(defn peek0 [v :vector-i64 c :i64] :i64
              (when (= c 1) (vector-assoc! v 0 5) (vector-at v 0)))
            (defn main [] 0)"))))
   (testing "still refused: the handle read again after the fused write consumed it"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"requires a linear handle"
+         kerror/ExceptionInfo #"requires a linear handle"
          (sema/analyze
           "(defn add-then-read! [v :vector-i64 k :i64 delta :i64] :i64
              (do (vector-assoc! v k (+ (vector-at v k) delta))
@@ -633,7 +633,7 @@
            (defn main [] 0)"))))
   (testing "still refused: two fused writes to the same handle on one path"
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"requires a linear handle"
+         kerror/ExceptionInfo #"requires a linear handle"
          (sema/analyze
           "(defn add-twice! [v :vector-i64 k1 :i64 k2 :i64 d1 :i64 d2 :i64] :i64
              (do (vector-assoc! v k1 (+ (vector-at v k1) d1))
@@ -680,7 +680,7 @@
                    (str "(" head " base 4096 0 1 2 3)")]
             :when (not= arity (dec (count (re-seq #"\S+" wrong))))]
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel memory operation arity mismatch"
            (sema/analyze (sysops-module wrong)))
           wrong))))
@@ -697,7 +697,7 @@
                 unrooted (str "(" head " (kernel-load-u8 buf 512 0) " after-base)]]
     (testing unrooted
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel memory base must name a region, not compute one"
            (sema/analyze
             (str "(defn go [buf] " unrooted ") (defn main [] (go 4096))")))
@@ -715,7 +715,7 @@
         (is (= :i64 (:result result)))
         (is (hir/valid? result)))
       (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
+           kerror/ExceptionInfo
            #"kernel privileged operation arity mismatch"
            (sema/analyze (str "(defn main [] (" head " 1))")))))))
 
