@@ -49,7 +49,7 @@
   by the pinned digest, not by a comparison. amu and kotoba each see two and
   three copies respectively and compare them across their pins."
   (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]

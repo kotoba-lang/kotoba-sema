@@ -67,7 +67,7 @@
 
 (defn- trap-of [body]
   (try (do (run body) nil)
-       (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+       (catch :default e
          (:trap (ex-data e)))))
 
 (defn- definition-refusal [head]

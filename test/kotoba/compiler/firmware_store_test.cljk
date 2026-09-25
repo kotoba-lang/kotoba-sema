@@ -29,7 +29,7 @@
 
 (defn- rejection-code [source]
   (try (do (sema/analyze (unit source)) nil)
-       (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e
+       (catch :default e
          (:kotoba.error/code (ex-data e)))))
 
 ;; One page, AllocateAnyPages, EfiLoaderData, at boot services +0x28.

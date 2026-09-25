@@ -13,7 +13,7 @@
 
 (defn- rejection [source]
   (try (analyze source) ::no-rejection
-       (catch #?(:clj clojure.lang.ExceptionInfo :cljs js/Error) e
+       (catch js/Error e
          {:message (ex-message e)
           :code (:kotoba.error/code (ex-data e))})))
 
