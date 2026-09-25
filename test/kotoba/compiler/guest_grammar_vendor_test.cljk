@@ -241,8 +241,13 @@
   Advanced 2026-09-25 to `d71c8b00` (superproject adr-2609242330):
   `:predicates` admits the eight bytes heads and `:bytes-value` records the
   decision; this frontend types the three new heads (`bytes-from-vector-i64`,
-  `vector-i64-from-bytes`, `string-from-utf8`) in the same commit."
-  "d71c8b004b9a1b27667f78d2ded716f05be3b3f339446ebc2dc6f33524622aee")
+  `vector-i64-from-bytes`, `string-from-utf8`) in the same commit.
+  Advanced 2026-09-25 to `5e71ffed` (superproject adr-2609242330, the
+  selfhost builtin gaps): `:library-heads` and the `:string-equality` /
+  `:true?` / `:integer?` sugar, implemented by this frontend's
+  `expand-intrinsic-helper-forms` and type-directed rewrite in the same
+  commit; the `:throw` note admits a loop body."
+  "5e71ffedfdd9c9e151f46f45e54aaee9b9ae56790152c51bfc722851470d5ab1")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

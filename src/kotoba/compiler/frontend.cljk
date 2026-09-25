@@ -2764,9 +2764,17 @@
 (defn- abort-lexical-context
   "The description of the lexical context that refuses `throw`, or nil."
   []
+  ;; A loop/doseq/dotimes body is NOT here since 2026-09-25 (superproject
+  ;; adr-2609242330; kotoba-lang lang/abort-ability.edn :loop-body). Its body
+  ;; becomes a loop helper that is called exactly where the loop is written,
+  ;; so an abort from it reaches the enclosing function, which becomes
+  ;; aborting in turn -- and `check-abort-facet-unwind!` refuses every
+  ;; aborting function whose interprocedural row carries a facet operation.
+  ;; That check IS the facet-unwind precondition for a lexically bounded body.
+  ;; A lazy thunk and a fn literal are not lexically bounded (either can run
+  ;; after, or outside, the scope that wrote it) and stay refused.
   (cond
     *lifting-lazy-thunk?* "a lazy thunk"
-    (= :loop *abort-lexical-context*) "a loop/doseq/dotimes body"
     (= :fn *abort-lexical-context*) "a fn literal"))
 
 (defn- try-clause-parts
@@ -3682,6 +3690,262 @@
   (doseq [value (mapcat #(tree-seq coll? seq %) forms)]
     (when (reserved-binding-name? value)
       (reject! "symbol uses the reserved __kotoba_ prefix" value))))
+
+;; ---------------------------------------------------------------------------
+;; Library heads: surface names whose meaning is a Kotoba function this
+;; frontend supplies (superproject adr-2609242330, the selfhost builtin gaps,
+;; 2026-09-25). kotoba-lang `lang/guest-grammar.edn` `:library-heads` is the
+;; contract; this is its implementation.
+;;
+;; WHY A FUNCTION AND NOT A SLOT. Each of these is expressible over operations
+;; every backend already runs (`string-code-point-at`, `vector-alloc`,
+;; `vector-assoc!`, `bytes-from-vector-i64`, the parametric result/option
+;; constructors), so writing it once in Kotoba gives one meaning on the
+;; reference, ESM, Wasm and both native ISAs by construction -- no new KIR
+;; operation, no loader slot, no verifier widening. A slot would be a second
+;; implementation per backend of a decision (what is a digit, when does a
+;; decimal overflow) that has to agree everywhere.
+;;
+;; HOW. When a module's source calls one of these heads and does NOT define a
+;; function of that name itself, the call head is renamed to the helper below
+;; and the helper's definitions are appended to the module as private `defn-`s
+;; under the reserved `__kotoba_intrinsic_` prefix -- after
+;; `reject-reserved-source-symbols!`, so source cannot name or shadow them. A
+;; module that mentions none of the heads is returned UNCHANGED (identical
+;; forms), so no existing definition CID can move. The helpers are excluded
+;; from the implicit export set (see `intrinsic-helper-name?`).
+;;
+;; The helper source is TEXT read by `read-forms`, the reader user source goes
+;; through: an i64 literal past 2^53 read by a ClojureScript host as a quoted
+;; form would arrive as a rounded double.
+;;
+;;   (string-to-utf8 s)    -> :bytes, the UTF-8 encoding of S. Total: every
+;;                            string is canonical UTF-8, and a string is at
+;;                            most 65536 bytes, which is also the bytes limit.
+;;                            One `string-code-point-at` per code point into a
+;;                            `vector-alloc` of the byte length, then one copy.
+;;                            Byte access on a string is `(bytes-at
+;;                            (string-to-utf8 s) i)` with the conversion
+;;                            hoisted -- O(n) once, O(1) per byte.
+;;   (string-parse-i64 s)  -> [:result :i64 :keyword]: an optional `+` or `-`,
+;;                            then one or more ASCII digits 0-9, nothing else
+;;                            (no whitespace, no `_`, no other script's
+;;                            digits). err :parse/malformed for any other
+;;                            text, err :parse/out-of-range for a well-formed
+;;                            decimal outside [-2^63, 2^63-1]. Malformed wins:
+;;                            the whole text is scanned before a range verdict.
+;;                            Never wraps: the magnitude accumulates NEGATIVE
+;;                            so -2^63 is representable, with the overflow test
+;;                            BEFORE each multiply.
+;;   (parse-long s)        -> [:option :i64]: `string-parse-i64`'s ok value,
+;;                            or none for either error -- Clojure's
+;;                            `parse-long` (nil for malformed and out of range)
+;;                            on ASCII input. Where they differ: the JVM's
+;;                            Long/valueOf also accepts non-ASCII decimal
+;;                            digits (Character/digit), this refuses them; and
+;;                            ClojureScript's parse-long answers nil past 2^53,
+;;                            this answers the exact i64.
+(def ^:private intrinsic-helper-source
+  "(defn- __kotoba_intrinsic_subvec [v :vector-i64 start :i64 end :i64] :vector-i64
+     (let [tail (vector-drop v start)
+           n (- end start)]
+       (do (vector-drop tail (- (vector-count tail) n))
+           (loop [i 0 out (vector-alloc n)]
+             (if (= i n)
+               (vector-drop out 0)
+               (recur (+ i 1) (vector-assoc! out i (vector-at tail i))))))))
+   (defn- __kotoba_intrinsic_subvec_from [v :vector-i64 start :i64] :vector-i64
+     (vector-drop v start))
+   (defn- __kotoba_intrinsic_string_to_utf8 [s :string] :bytes
+     (let [n (string-byte-length s)]
+       (loop [i 0 v (vector-alloc n)]
+         (if (>= i n)
+           (bytes-from-vector-i64 v)
+           (let [c (string-code-point-at s i)]
+             (if (< c 128)
+               (recur (+ i 1) (vector-assoc! v i c))
+               (if (< c 2048)
+                 (recur (+ i 2)
+                        (vector-assoc! (vector-assoc! v i (+ 192 (quot c 64)))
+                                       (+ i 1) (+ 128 (bit-and c 63))))
+                 (if (< c 65536)
+                   (recur (+ i 3)
+                          (vector-assoc! (vector-assoc! (vector-assoc! v i (+ 224 (quot c 4096)))
+                                                        (+ i 1) (+ 128 (bit-and (quot c 64) 63)))
+                                         (+ i 2) (+ 128 (bit-and c 63))))
+                   (recur (+ i 4)
+                          (vector-assoc! (vector-assoc! (vector-assoc! (vector-assoc! v i (+ 240 (quot c 262144)))
+                                                                       (+ i 1) (+ 128 (bit-and (quot c 4096) 63)))
+                                                        (+ i 2) (+ 128 (bit-and (quot c 64) 63)))
+                                         (+ i 3) (+ 128 (bit-and c 63))))))))))))
+   (defn- __kotoba_intrinsic_ex_info [msg :string data :document] :document
+     (document-map (document-keyword :message) (document-string msg)
+                   (document-keyword :data) data))
+   (defn- __kotoba_intrinsic_ex_message [e :document] :string
+     (option-or (document-string-value
+                 (option-or (document-get e (document-keyword :message)) (document-null)))
+                \"\"))
+   (defn- __kotoba_intrinsic_ex_data [e :document] :document
+     (option-or (document-get e (document-keyword :data)) (document-null)))
+   (defn- __kotoba_intrinsic_parse_i64 [s :string] [:result :i64 :keyword]
+     (let [n (string-byte-length s)
+           c0 (if (> n 0) (string-code-point-at s 0) -1)
+           negative (= c0 45)
+           start (if (or (= c0 45) (= c0 43)) 1 0)]
+       (if (>= start n)
+         (result-err-of [:result :i64 :keyword] :parse/malformed)
+         (loop [i start acc 0 over false]
+           (if (>= i n)
+             (if over
+               (result-err-of [:result :i64 :keyword] :parse/out-of-range)
+               (if negative
+                 (result-ok-of [:result :i64 :keyword] acc)
+                 (if (= acc -9223372036854775808)
+                   (result-err-of [:result :i64 :keyword] :parse/out-of-range)
+                   (result-ok-of [:result :i64 :keyword] (- 0 acc)))))
+             (let [c (string-code-point-at s i)]
+               (if (or (< c 48) (> c 57))
+                 (result-err-of [:result :i64 :keyword] :parse/malformed)
+                 (let [d (- c 48)]
+                   (if (or over
+                           (< acc -922337203685477580)
+                           (and (= acc -922337203685477580) (> d 8)))
+                     (recur (+ i 1) acc true)
+                     (recur (+ i 1) (- (* acc 10) d) false))))))))))
+   (defn- __kotoba_intrinsic_parse_long [s :string] [:option :i64]
+     (let [r (__kotoba_intrinsic_parse_i64 s)]
+       (if (result-ok?-of [:result :i64 :keyword] r)
+         (option-some-of [:option :i64] (result-value-of [:result :i64 :keyword] r 0))
+         (option-none-of [:option :i64]))))")
+
+(def ^:private intrinsic-helper-heads
+  "Surface head -> [helper it calls, every helper definition it needs, in
+  source order]."
+  '{subvec [__kotoba_intrinsic_subvec [__kotoba_intrinsic_subvec]]
+    string-to-utf8 [__kotoba_intrinsic_string_to_utf8 [__kotoba_intrinsic_string_to_utf8]]
+    ;; not a surface head: the arity-2 half of `subvec`, recorded by the
+    ;; renaming so its one helper is appended.
+    subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]]
+    ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]]
+    ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]]
+    ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]]
+    string-parse-i64 [__kotoba_intrinsic_parse_i64 [__kotoba_intrinsic_parse_i64]]
+    parse-long [__kotoba_intrinsic_parse_long
+                [__kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]]})
+
+(def ^:private intrinsic-helper-order
+  '[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from
+    __kotoba_intrinsic_string_to_utf8
+    __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data
+    __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long])
+
+(def ^:private intrinsic-helper-forms
+  (delay (into {} (map (fn [form] [(second form) form]))
+               (read-forms intrinsic-helper-source))))
+
+(defn- intrinsic-helper-name?
+  "Is NAME one of the frontend-supplied library-head helpers?"
+  [name]
+  (and (symbol? name)
+       (let [s (str name)]
+         (= "__kotoba_intrinsic_" (subs s 0 (min 19 (count s)))))))
+
+(defn- ex-info-data-argument
+  "`(ex-info msg data)`'s arguments with a MAP LITERAL `data` written as the
+  `:document` it is: `{:phase :read :path p}` -> `(document-map
+  (document-keyword :phase) (__kotoba_document_of :read) ...)`. A map literal
+  is otherwise a constant document, and a local inside one does not compile
+  (lang/conformance/abort/ex_info_round_trip.kotoba). Keys must be keywords;
+  each value is typed later by `__kotoba_document_of`. Any other `data` is
+  passed through and must already be a `:document`. The one- and
+  three-argument arities are refused: a cause is another Throwable, and there
+  is none here to be one."
+  [args form]
+  (when-not (= 2 (count args))
+    (reject! "ex-info takes a message and a data document; the cause arity has no Throwable to name"
+             form :kotoba.error/library-head-shape))
+  (let [[msg data] args]
+    (if (map? data)
+      (do (when-not (every? keyword? (keys data))
+            (reject! "ex-info data map keys must be keywords" form :kotoba.error/library-head-shape))
+          [msg (apply list 'document-map
+                      (mapcat (fn [[k v]] [(list 'document-keyword k) (list '__kotoba_document_of v)])
+                              (sort-by (comp str key) data)))])
+      args)))
+
+(defn- implicit-export-exclusions
+  "Names the IMPLICIT export set (no :export clause, no defn-) leaves out
+  that it did not have to before 2026-09-25: the library-head helpers, the
+  loop helpers made from THEIR loops, and a loop helper that aborts (a throw
+  in a loop body, lang/abort-ability.edn :loop-body -- its interface is
+  [:result T E], which no export carries). Every other function is exported
+  exactly as before, so a module that uses none of these exports the same
+  names."
+  [functions abort-error-types]
+  (let [by-name (into {} (map (juxt :name identity)) functions)
+        calls (fn [f] (into #{} (keep #(when (and (seq? %) (symbol? (first %))) (first %)))
+                            (tree-seq coll? seq (:body f))))
+        loop-helper? (fn [n] (:loop-helper? (get by-name n)))
+        owned (loop [frontier (into #{} (comp (filter #(intrinsic-helper-name? (:name %)))
+                                               (mapcat calls) (filter loop-helper?))
+                                    functions)
+                     seen #{}]
+                (if (empty? frontier)
+                  seen
+                  (let [seen (into seen frontier)]
+                    (recur (into #{} (comp (mapcat #(calls (get by-name %)))
+                                           (filter loop-helper?) (remove seen))
+                                 frontier)
+                           seen))))]
+    (fn [name]
+      (or (intrinsic-helper-name? name)
+          (contains? owned name)
+          (and (loop-helper? name) (contains? abort-error-types name))))))
+
+(defn- expand-intrinsic-helper-forms
+  "Rename every call to a library head the module does not define itself, and
+  append the helpers those calls need. FORMS unchanged when there are none."
+  [forms]
+  (let [defined (into #{} (keep (fn [f] (when (and (seq? f) (contains? '#{defn defn-} (first f)))
+                                          (second f))))
+                      forms)
+        heads (apply dissoc intrinsic-helper-heads defined)
+        used (volatile! #{})
+        rename (fn rename [form]
+                 (cond
+                   (and (seq? form) (= 'quote (first form))) form
+                   (seq? form)
+                   (let [[op & args] form
+                         helper (when (symbol? op) (first (get heads op)))
+                         ;; `(subvec v start)` is the one arity that names a
+                         ;; different helper.
+                         helper (if (and (= helper '__kotoba_intrinsic_subvec) (= 2 (count args)))
+                                  '__kotoba_intrinsic_subvec_from
+                                  helper)]
+                     (when helper (vswap! used conj (if (= helper '__kotoba_intrinsic_subvec_from)
+                                                      'subvec-from op)))
+                     (with-meta (apply list (if helper
+                                              (with-meta helper {:kotoba.diag/source-head op})
+                                              (rename op))
+                                       (map rename (if (= helper '__kotoba_intrinsic_ex_info)
+                                                     (ex-info-data-argument args form)
+                                                     args)))
+                       (meta form)))
+                   (vector? form) (with-meta (mapv rename form) (meta form))
+                   (map? form) (with-meta (into {} (map (fn [[k v]] [(rename k) (rename v)])) form)
+                                 (meta form))
+                   (set? form) (with-meta (into #{} (map rename) form) (meta form))
+                   :else form))
+        mentions? (fn [form] (first-truthy #(and (seq? %) (symbol? (first %)) (contains? heads (first %)))
+                                            (tree-seq coll? seq form)))]
+    (if-not (and (seq heads) (first-truthy mentions? forms))
+      forms
+      (let [renamed (mapv rename forms)
+            needed (into #{} (mapcat #(second (get heads %))) @used)]
+        (into renamed
+              (keep (fn [helper] (when (contains? needed helper)
+                                   (get @intrinsic-helper-forms helper))))
+              intrinsic-helper-order)))))
 
 (defn- desugar-and
   "`(and a b c ...)` -> nested `let`/`if`, ported from kotoba-lang/kotoba's
@@ -9028,6 +9292,52 @@
                              (assoc data :kotoba.error/use-site (cons op args))))
              (throw error))))))
 
+;; `true?` / `integer?` (superproject adr-2609242330, 2026-09-25). Clojure's
+;; answers are questions about a value's TYPE -- `(true? x)` is "x is the
+;; boolean true", `(integer? x)` "x is an integer" -- and here that type is
+;; static. So each is decided by the operand's type:
+;;   (true? b)     b :bool           -> b itself
+;;   (integer? n)  n :i64            -> true
+;;   either, on a statically different type -> false, as Clojure answers for
+;;                 a value of that type ((true? 1) and (integer? 1.5) are
+;;                 false); the operand is still evaluated.
+;;   either, on a :document          -> REFUSED by name: its answer depends on
+;;                 the value, which is `document-kind`'s question.
+(def ^:private library-predicate-heads '#{true? integer?})
+
+(def ^:private library-predicate-true-type '{true? :bool integer? :i64})
+
+(def ^:private document-of-constructors
+  "`__kotoba_document_of` (written only by `ex-info-data-argument`): the
+  document constructor for a value of each scalar type."
+  '{:i64 document-i64 :string document-string :keyword document-keyword
+    :bool document-bool :f64 document-f64})
+
+(defn- document-of-constructor!
+  "The constructor that makes a value of TYPE a document, `:identity` for a
+  document, or a refusal naming the type."
+  [type operand]
+  (cond (= :document type) :identity
+        (contains? document-of-constructors type) (get document-of-constructors type)
+        :else (reject! (str "ex-info data value " (pr-str operand) " has type " (pr-str type)
+                            ", which has no document form here: a data map value must be an "
+                            "i64, string, keyword, bool, f64 or document")
+                       operand :kotoba.error/library-head-document)))
+
+(defn- library-predicate-answer!
+  "What `(op x)` is for an operand of TYPE: :operand, true, or false."
+  [op type operand]
+  (cond
+    (= :document type)
+    (reject! (str op " on a :document depends on the value, not the type: ask "
+                  "(document-kind d) -- "
+                  (if (= op 'true?)
+                    "(and (= (document-kind d) :bool) (document-bool-value d))"
+                    "(= (document-kind d) :i64)"))
+             (list op operand) :kotoba.error/library-head-document)
+    (= type (get library-predicate-true-type op)) (if (= op 'true?) :operand true)
+    :else false))
+
 (defn- infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -9063,7 +9373,11 @@
         (do (numeric-operand-type! op args types) :bool)
         (do (when-not (= (first types) (second types))
               (reject! "equality operands must have the same value type" args))
-            (when-not (or (contains? #{:i64 :keyword :bool :option-i64 :result-i64 :vector-i64} (first types))
+            ;; `:string` joined 2026-09-25 (superproject adr-2609242330): two
+            ;; `:string` operands are `string=?` -- byte equality, the head
+            ;; that already lowers everywhere -- and `rewrite-record-projection`
+            ;; writes it so before any backend sees `=`.
+            (when-not (or (contains? #{:i64 :keyword :bool :option-i64 :result-i64 :vector-i64 :string} (first types))
                           (parametric-result-type? (first types)))
               (reject! (str "equality type is outside the safe value profile"
                             (condp = (first types)
@@ -9678,6 +9992,28 @@
           (doseq [[arg actual wanted] (map vector args types expected)]
             (require-expression-type! actual wanted arg)))
         result)
+
+      ;; `conj` onto a bounded vector is that vector (`rewrite-record-projection`
+      ;; writes `vector-conj` / `vector-f64-conj`), and onto a typed set that
+      ;; set. Typed HERE because a loop exit is typed before that rewrite runs:
+      ;; without this arm `(conj v x)` as a loop exit fell to
+      ;; `unknown-operation!`, the exit typing swallowed it, and the helper kept
+      ;; its `:i64` placeholder -- `expected vector-i64, got i64` at the loop
+      ;; (measured 2026-09-25, adr-2609242330 S5).
+      (and (contains? set-operations op) (seq (rest args))
+           (or (and (= op 'conj) (contains? #{:vector-i64 :vector-f64} (first types)))
+               (typed-set-type? (first types))))
+      (first types)
+
+      (= op '__kotoba_document_of)
+      (do (document-of-constructor! (first types) (first args)) :document)
+
+      (contains? library-predicate-heads op)
+      (do (when-not (= 1 (count args))
+            (reject! (str op " requires exactly one operand") (cons op args)
+                     :kotoba.error/library-head-shape))
+          (library-predicate-answer! op (first types) (first args))
+          :bool)
 
       :else (unknown-operation! op op signatures))))
 
@@ -11791,6 +12127,34 @@
         ;; derivable, so the author writes one spelling. Variadic and chained
         ;; comparison forms have already been desugared to binary calls, so
         ;; `(< a b c)` on f64 reaches this as two `<` forms.
+        ;; `=` on two `:string` operands is `string=?` (see the `=` arm of
+        ;; `infer-call-type-impl`, adr-2609242330). Every other `=` falls
+        ;; through to the numeric resolution below, unchanged.
+        (and (= op '=) (= 2 (count args))
+             (every? #(= :string (try (infer-expression-type % locals signatures)
+                                      (catch #?(:clj Exception :cljs :default) _ nil)))
+                     args))
+        (with-meta (apply list 'string=?
+                          (map #(rewrite-record-projection % locals signatures schemas) args))
+          {:kotoba.diag/source-head '=})
+
+        ;; `true?` / `integer?` (adr-2609242330): see
+        ;; `library-predicate-answer!`. A module's own
+        ;; function of the same name wins, as it does in inference.
+        (= op '__kotoba_document_of)
+        (let [operand (rewrite-record-projection (first args) locals signatures schemas)
+              constructor (document-of-constructor!
+                           (infer-expression-type operand locals signatures) operand)]
+          (if (= :identity constructor) operand (list constructor operand)))
+
+        (and (contains? library-predicate-heads op) (not (contains? signatures op)))
+        (let [operand (rewrite-record-projection (first args) locals signatures schemas)
+              answer (library-predicate-answer!
+                      op (infer-expression-type operand locals signatures) operand)]
+          ;; A constant answer still evaluates the operand (it may be a call
+          ;; that traps); `do` keeps it, and keeps the result a form.
+          (if (= :operand answer) operand (list 'do operand answer)))
+
         (contains? type-directed-numeric-heads op)
         (let [rewritten (mapv #(rewrite-record-projection % locals signatures schemas) args)
               operand-type (fn [arg] (try (infer-expression-type arg locals signatures)
@@ -12537,7 +12901,7 @@
   precondition and in the same words."
   [{:keys [source-name loop-helper? lazy-thunk?]}]
   (when-not source-name
-    (cond loop-helper? "a loop/doseq/dotimes body"
+    (cond loop-helper? nil
           lazy-thunk? "a lazy thunk"
           :else "a fn literal")))
 
@@ -12871,6 +13235,37 @@
         (if (= next-known known)
           {:functions fs :abort-error-types known}
           (recur next-known fs))))))
+
+(defn- check-no-abort-before-recur!
+  "lang/abort-ability.edn :loop-body :not-before-recur. A throw or an aborting
+  call inside a loop body is admitted on a path that EXITS the loop. On a path
+  that goes on to `recur`, its elaboration puts the recur inside the call's
+  `result-match-of` arm -- a tail position the reference interpreter runs as
+  a loop but that ESM, Wasm and native run as a real call (measured
+  2026-09-25: ESM `budget/frames` and the Wasm host `unreachable` after tens
+  to hundreds of iterations where the reference answered; osaho refuses it
+  `loop-helper self-call outside tail position`). Refused here, by name,
+  before any backend can disagree."
+  [functions]
+  (doseq [{:keys [name body loop-helper?]} functions
+          :when loop-helper?]
+    (letfn [(walk [form under-match?]
+              (when (seq? form)
+                (let [[op & args] form]
+                  (cond
+                    (and (= op name) under-match?)
+                    (reject! (str "a throw or a call to an aborting function before recur on the same "
+                                  "path is not admitted: its result match would take the recur out of "
+                                  "tail position; abort only on a path that exits the loop, or move the "
+                                  "call out of the loop")
+                             form :kotoba.error/abort-position)
+                    (= op 'result-match-of)
+                    (let [[_ value _ ok-body _ err-body] args]
+                      (walk value under-match?)
+                      (walk ok-body true)
+                      (walk err-body true))
+                    :else (doseq [a args] (walk a under-match?))))))]
+      (walk body false))))
 
 (defn- elaborate-aborts
   "Lower every `throw`/`try` to result values, and every aborting function to
@@ -13911,14 +14306,21 @@
   (doseq [{:keys [name source-name abort-error-type abort-own-throw? abort-catches?]} functions
           :when (or abort-error-type abort-catches?)]
     (let [row (get function-effects name #{})
-          facet-effects (filter #(and (vector? %) (contains? dataspace-capability-ids (second %))) row)]
+          ;; A row's wire id is a BigInt on ClojureScript and the registry's
+          ;; a Number, and `contains?` compares them unequal -- so until
+          ;; 2026-09-25 this guard never fired on the nbb route: a throw in a
+          ;; facet scope was ADMITTED there and refused only on the JVM
+          ;; (measured on lang/conformance/abort/negative/throw_in_facet_scope
+          ;; through `kotoba.sema/analyze` under nbb). Compare as numbers.
+          wire-id (fn [id] #?(:clj id :cljs (js/Number id)))
+          facet-effects (filter #(and (vector? %) (contains? dataspace-capability-ids (wire-id (second %)))) row)]
       (when (seq facet-effects)
         (reject! (str (cond abort-own-throw? "throw"
                             abort-error-type "abort"
                             :else "try")
                       " in function " (or source-name name)
                       " whose effect row has a dataspace facet operation "
-                      (pr-str (into #{} (map #(get capability-id->name (second %))) facet-effects))
+                      (pr-str (into #{} (map #(get capability-id->name (wire-id (second %)))) facet-effects))
                       " is not admitted in abort slice 1: precondition "
                       ":checked-lexical-facet-unwind is not met")
                  name :kotoba.error/abort-precondition)))))
@@ -17516,6 +17918,9 @@
             (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
+        ;; Library heads (adr-2609242330): after the reserved-prefix check,
+        ;; because the helpers it appends use the reserved prefix.
+        forms (expand-intrinsic-helper-forms forms)
         ;; State ability, slice 1: after the reserved-prefix check, because
         ;; what it writes uses the reserved prefix. `defhandler` becomes
         ;; private defns; the state spellings become reserved heads.
@@ -18033,6 +18438,7 @@
         _ (check-state-abort-interaction! parsed state-clones abort-error-types)
         parsed (a-normalize-aborts parsed abort-error-types "abort_operand")
         parsed (elaborate-aborts parsed abort-error-types)
+        _ (check-no-abort-before-recur! parsed)
         ;; State ability, slice 1: lower by state passing, now that every
         ;; result type is known and abort's lowering is done.
         parsed (thread-state-abilities parsed state-clones @*state-handlers*)
@@ -18064,8 +18470,15 @@
                   ;; narrows the implicit export set to the public ones. Was
                   ;; `(some #(= 'defn- (first %)) defs)`, which read the
                   ;; head and would have exported a `^:private` function.
-                  (first-truthy (complement :public?) def-parts) (vec (mapcat expand-export source-public))
-                  :else (mapv :name parsed))
+                  ;; The library-head helpers (`intrinsic-helper-name?`) are
+                  ;; private but do not narrow: a module that wrote no defn-
+                  ;; exports what it exported before it called one.
+                  (first-truthy #(and (not (:public? %))
+                                      (not (intrinsic-helper-name? (:source-name %))))
+                                def-parts)
+                  (vec (mapcat expand-export source-public))
+                  :else (vec (remove (implicit-export-exclusions parsed abort-error-types)
+                                     (map :name parsed))))
         entry (when (contains? signatures 'main) 'main)]
     (when (seq (set/intersection (set (keys constants)) (set source-names)))
       (reject! "constant and function names must be disjoint" forms))

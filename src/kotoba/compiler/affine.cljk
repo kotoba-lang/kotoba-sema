@@ -149,7 +149,14 @@
 (def reading
   "Operations that observe without consuming."
   '#{vector-count vector-f64-count vector-at vector-f64-at
-     vector-get vector-f64-get nth})
+     vector-get vector-f64-get nth
+     ;; A COPY into a `:bytes` value (superproject adr-2609242330): every
+     ;; backend copies (native slot 360, ESM, Wasm host, the reference), so
+     ;; the vector stays the caller's and nothing written to it later is
+     ;; visible through the bytes. Read, not consumed -- which is what lets a
+     ;; loop that fills a `vector-alloc` with `vector-assoc!` hand back
+     ;; `(bytes-from-vector-i64 v)` as its exit (`string-to-utf8`).
+     bytes-from-vector-i64})
 
 
 (defn- let-form?
@@ -449,6 +456,29 @@
         (join (into [s] (map #(walk % target tail? s) arms)))))
 
     (contains? deferred (first form)) ::refused
+
+    ;; A `loop` that BINDS `target` (2026-09-25, superproject adr-2609242330).
+    ;; Each iteration's `target` is the handle the previous iteration's
+    ;; `recur` handed over, so the body is walked ONCE from a fresh handle,
+    ;; exactly as `linear-parameter?` walks the helper the loop becomes: a
+    ;; `recur` is a call that consumes the handle through the update in its
+    ;; slot, and the exit must read it, not hand it out. The init must OWN a
+    ;; handle (`producing`, as a let binding's must), and no init may mention
+    ;; the name -- that would be the outer binding, a shadowing refused as
+    ;; `let` refuses it. The outer state is unchanged: the loop's handle is
+    ;; its own. Without this arm a loop that fills a `vector-alloc` with
+    ;; `vector-assoc!` was refused, and the only admitted shape was explicit
+    ;; recursion -- one interpreter frame per item, where a loop is one frame
+    ;; (lang/limits.edn :frames).
+    (and (= 'loop (first form)) (vector? (second form))
+         (first-truthy #(= target %) (take-nth 2 (second form))))
+    (let [pairs (partition 2 (second form))
+          init (second (first-truthy #(when (= target (first %)) %) pairs))]
+      (cond
+        (first-truthy #(occurs? % target) (map second pairs)) ::refused
+        (not (and (seq? init) (contains? producing (first init)))) ::refused
+        (= ::refused (walk-seq (drop 2 form) target false :live)) ::refused
+        :else state))
 
     (contains? repeating (first form))
     (let [s (walk-seq (rest form) target false state)]

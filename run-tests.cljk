@@ -22,6 +22,9 @@
             [kotoba.compiler.line-slots-test]
             [kotoba.compiler.range-slots-test]
             [kotoba.compiler.bytes-value-test]
+            ;; the selfhost builtin gaps: library heads, type-decided
+            ;; predicates, string =, conj at a loop exit, throw in a loop
+            [kotoba.compiler.library-heads-test]
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
@@ -203,6 +206,7 @@
              'kotoba.compiler.line-slots-test
              'kotoba.compiler.range-slots-test
              'kotoba.compiler.bytes-value-test
+             'kotoba.compiler.library-heads-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
              'kotoba.compiler.defn-body-sequences-test
