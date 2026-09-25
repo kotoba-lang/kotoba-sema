@@ -185,13 +185,19 @@
   "True when `form` calls a proved linear-returning function with `target` in
   the parameter position that was proved."
   [form target]
+  ;; Every fn VALUE in this module binds its destructuring inside the body,
+  ;; not in the parameter vector: a fn value takes plain-symbol parameters
+  ;; only (frontend `lift-lambda`; a defn's parameters may destructure), and
+  ;; this module is on the compiler's own selfhost path (superproject
+  ;; adr-2609242330). Same pairs, same order, same answers.
   (and (seq? form)
        (symbol? (first form))
        (boolean
-        (first-truthy (fn [[name index]]
-                (and (= name (first form))
-                     (= target (nth form (inc index) ::none))))
-              *linear-returning*))))
+        (first-truthy (fn [pair]
+                        (let [[name index] pair]
+                          (and (= name (first form))
+                               (= target (nth form (inc index) ::none)))))
+                      *linear-returning*))))
 
 (defn- consuming-call?
   [form target]
@@ -274,7 +280,10 @@
 
     (seq? form) (apply list (map expand-threads form))
     (vector? form) (mapv expand-threads form)
-    (map? form) (into {} (map (fn [[k v]] [(expand-threads k) (expand-threads v)])) form)
+    (map? form) (into {} (map (fn [entry]
+                                       (let [[k v] entry]
+                                         [(expand-threads k) (expand-threads v)])))
+                          form)
     (set? form) (into #{} (map expand-threads) form)
     :else form))
 
@@ -365,11 +374,12 @@
   [form target]
   (if (and (contains? consuming (first form)) (= target (second form)))
     1
-    (first-truthy (fn [[name index]]
-            (when (and (= name (first form))
-                       (= target (nth form (inc index) ::none)))
-              (inc index)))
-          *linear-returning*)))
+    (first-truthy (fn [pair]
+                    (let [[name index] pair]
+                      (when (and (= name (first form))
+                                 (= target (nth form (inc index) ::none)))
+                        (inc index))))
+                  *linear-returning*)))
 
 (defn- without-index [xs i]
   (concat (take i xs) (drop (inc i) xs)))
@@ -672,7 +682,8 @@
   catch that -- the caller wrote no bang."
   [functions name index assumed]
   (every?
-   (fn [{caller :name :keys [params body]}]
+   (fn [function]
+     (let [{caller :name :keys [params body]} function]
      (every?
       (fn [call]
         (let [argument (nth call (inc index) ::none)
@@ -698,7 +709,7 @@
                      (first-truthy (fn [index]
                              (contains? assumed [caller index]))
                            (keep-indexed #(when (= %2 argument) %1) params)))))))
-      (calls-to (cons 'do body) name)))
+      (calls-to (cons 'do body) name))))
    functions))
 
 (defn module-linear-returning
@@ -726,8 +737,9 @@
       (let [surviving
             (binding [*linear-returning* assumed]
               (set (filter
-                    (fn [[name index]]
-                      (let [{:keys [params body]}
+                    (fn [pair]
+                      (let [[name index] pair
+                            {:keys [params body]}
                             (first (filter #(= name (:name %)) functions))
                             target (nth params index ::none)]
                         (and (not= target ::none)
