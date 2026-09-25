@@ -46,6 +46,35 @@
   (testing "the attr-map may stand beside a clause it does not duplicate"
     (is (= '[main] (:exports (sema/analyze (str "(ns t {:kotoba/export [main]} (:schemas {}))" body)))))))
 
+(deftest a-quoted-attr-map-value-is-the-unquoted-one
+  ;; JVM Clojure's `ns` EVALUATES the attr-map: `{:kotoba/export [main]}`
+  ;; throws `Unable to resolve symbol: main` there, `'[main]` loads. The
+  ;; quoted spelling must therefore mean exactly the bare one.
+  (testing "export: the same result as the clause and as the bare vector"
+    (let [clause (sema/analyze (str "(ns t (:export [main other]))" body))
+          quoted (sema/analyze (str "(ns t {:kotoba/export '[main other]})" body))]
+      (is (= '[main other] (:exports quoted)))
+      (is (= (dissoc clause :entry) (dissoc quoted :entry)))))
+  (testing "after a docstring, and for :kotoba/capabilities"
+    (is (= '[main] (:exports (sema/analyze (str "(ns t \"doc\" {:kotoba/export '[main]})" body)))))
+    ;; an unused capability is refused -- with the SET named, the same
+    ;; refusal as the bare spelling, so the quote was unwrapped first
+    (is (= (refusal (str "(ns t {:kotoba/export [main] :kotoba/capabilities #{:clock/now}})" body))
+           (refusal (str "(ns t {:kotoba/export '[main] :kotoba/capabilities '#{:clock/now}})" body))
+           {:message "namespace :capabilities declares a capability never used via cap-call: #{:clock/now}"
+            :code :kotoba.error/subset-reject})))
+  (testing "the quoted value is validated by the same clause path"
+    (is (= {:message "namespace exports must be unique bounded function names"
+            :code :kotoba.error/namespace-exports}
+           (refusal (str "(ns t {:kotoba/export '[main main]})" body))))
+    (is (= {:message "only a bounded :export vector is admitted in namespace clauses"
+            :code :kotoba.error/namespace-export-clause}
+           (refusal (str "(ns t {:kotoba/export 'main})" body)))
+        "a quoted symbol is still not a vector"))
+  (testing "a quoted declaration beside its clause is still declared twice"
+    (is (= :kotoba.error/namespace-clause-duplicate
+           (:code (refusal (str "(ns t {:kotoba/export '[main]} (:export [main]))" body)))))))
+
 (deftest the-attr-map-value-is-validated-by-the-clause-path
   ;; The message is the CLAUSE spelling's message, verbatim: proof that the
   ;; value was checked by the existing loop, not by a second copy of it.

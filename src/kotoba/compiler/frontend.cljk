@@ -2426,6 +2426,23 @@
 ;; The keys are namespaced on purpose. An `{:author "..."}` or `{:doc "..."}`
 ;; attr-map in the wild must not silently become an export, and a namespaced
 ;; key nobody declared is not a comment either -- it is refused by name.
+;;
+;; A QUOTED value -- `{:kotoba/export '[main]}`, read as `(quote [main])` --
+;; means exactly the unquoted one (2026-09-25). Correction of the paragraph
+;; above: SCI's `ns` stores the map unevaluated, but JVM Clojure's `ns`
+;; EVALUATES it (the expansion is `(.resetMeta (Namespace/find 'n) {...})`,
+;; run right after `in-ns`, before anything is referred), so a bare vector of
+;; symbols fails to load there with `Unable to resolve symbol: <first name>`
+;; (measured on clojure 1.12.4: `(ns a {:kotoba/export [foo]})` throws,
+;; `(ns a {:kotoba/export '[foo]})` loads and the namespace meta holds
+;; `[foo]`). The quote is the spelling all three hosts accept; it is
+;; unwrapped HERE, once, so the clause loop validates the same value either
+;; way. Only a one-argument `(quote v)` is unwrapped -- any other list goes
+;; to the clause loop as written and is refused there.
+(defn- unquote-attr-value
+  [v]
+  (if (and (seq? v) (= 'quote (first v)) (= 2 (count v))) (second v) v))
+
 (def namespace-attr-map-keys
   "attr-map key -> the namespace clause head it stands for."
   {:kotoba/export :export
@@ -2437,8 +2454,9 @@
   "Rewrite the optional namespace ATTR-MAP into the clauses it stands for,
   refusing what it must: an unknown key (named), and a key whose clause is
   also spelled explicitly (declared twice). Returns the synthetic clauses
-  FOLLOWED by the explicit ones, in source order within each group. The
-  values are not validated here -- the caller's clause loop does that, once,
+  FOLLOWED by the explicit ones, in source order within each group. A
+  value spelled `'v` (`(quote v)`, the spelling JVM Clojure's `ns` can
+  evaluate) stands for `v`. The values are not validated here -- the caller's clause loop does that, once,
   for both spellings. `reject-fn` is called with (message data code)."
   [attr-map explicit-clauses reject-fn]
   (let [explicit-heads (into #{} (keep #(when (seq? %) (first %))) explicit-clauses)]
@@ -2453,7 +2471,7 @@
           (reject-fn (str "namespace declares " (pr-str head) " twice: attr-map "
                           (pr-str k) " and clause (" (pr-str head) " ...)")
                      attr-map :kotoba.error/namespace-clause-duplicate))))
-    (into (mapv (fn [[k v]] (list (get namespace-attr-map-keys k) v)) attr-map)
+    (into (mapv (fn [[k v]] (list (get namespace-attr-map-keys k) (unquote-attr-value v))) attr-map)
           explicit-clauses)))
 
 ;; Clause heads the namespace form refuses BY NAME (kotoba-lang
