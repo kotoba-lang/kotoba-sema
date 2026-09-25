@@ -4155,25 +4155,27 @@
     (= payload-type :f32) 0.0
     :else 0))
 
-(defn- desugar-some-thread [args form last?]
+(defn- desugar-some-thread
+  "`(some-> x s1 s2)` threads while each value is present (ADR 0353 floor
+  :absence). A step whose value is an `[:option T]` stops the thread when it
+  is absent and passes its payload on; a step whose value is not an option is
+  always present. The result is always an option: the last step's value
+  wrapped in `option-some-of` unless it already is one, absent if any step
+  was. Types decide all three, so this emits the markers
+  `__kotoba_some_bind` / `__kotoba_some_last` / `__kotoba_present` and
+  `rewrite-record-projection` resolves them once the steps have types."
+  [args form last?]
   (when (empty? args)
     (reject! (if last? "some->> requires an initial option" "some-> requires an initial option") form))
-  (letfn [(lower [option-form steps]
+  (letfn [(lower [value-form steps]
             (if (empty? steps)
-              (desugar-expr option-form)
+              (list '__kotoba_some_last (desugar-expr value-form))
               (let [tmp (if *loop-counter*
                           (symbol (str "some-thread__" (vswap! *loop-counter* inc)))
                           (synthetic "some-thread"))
-                    option-type (or (resolve-option-type option-form) [:option :i64])
-                    payload-type (when (and (vector? option-type) (= :option (first option-type)))
-                                   (second option-type))
-                    payload (list 'option-value-of option-type tmp
-                                  (option-payload-fallback payload-type))
-                    threaded (thread-form payload (first steps) last?)]
-                (list 'let [tmp (desugar-expr option-form)]
-                      (list 'if (list 'option-some?-of option-type tmp)
-                            (lower threaded (rest steps))
-                            (list 'option-none-of option-type))))))]
+                    threaded (thread-form (list '__kotoba_present tmp) (first steps) last?)]
+                (list 'let [tmp (desugar-expr value-form)]
+                      (list '__kotoba_some_bind tmp (lower threaded (rest steps)))))))]
     (lower (first args) (rest args))))
 
 (defn- desugar-binding-if [args form when?]
@@ -4190,9 +4192,16 @@
                       (if (= 1 (count bodies)) (first bodies) (cons 'do bodies))
                       (first bodies))
           else-form (if when? 0 (if (= 2 (count bodies)) (second bodies) 0))]
+      ;; ADR 0353 floor :absence: over an `[:option T]` the test is presence
+      ;; and the pattern binds the payload. Which one this is is known only
+      ;; once the value has a type, so `rewrite-record-projection` resolves
+      ;; `if` and `__kotoba_present` from the inferred type of `tmp`; over a
+      ;; `:bool` both are what they always were.
       (desugar-expr
        (list 'let [tmp (desugar-bool-expr value)]
-             (list 'if tmp (list 'let [pattern tmp] then-form) else-form))))))
+             (list 'if tmp
+                   (list 'let [pattern (list '__kotoba_present tmp)] then-form)
+                   else-form))))))
 
 (defn- desugar-binding-some [args form when?]
   (let [[binding & bodies] args]
@@ -4353,7 +4362,9 @@
   '{typed-map-new :map
     typed-set-new :set
     record-new :record
-    hetero-vector-new :vector})
+    hetero-vector-new :vector
+    option-some-of :option
+    option-none-of :option})
 
 (defn- map-literal-value-type
   "The value type a literal's VALUE expression determines ON ITS OWN, or `nil`
@@ -4564,15 +4575,21 @@
   * more than `max-record-fields` entries -- the bound `defrecord` has."
   [form entries]
   (let [typed (mapv (fn [[k v]] [k (map-literal-record-field-type v)]) entries)]
+    ;; ADR 0353 floor :absence -- `nil` as a value SPELLS a record: it makes
+    ;; that field an absent `[:option T]`, so a literal holding one is never
+    ;; the i64 pair map (where `nil` used to lower to a legacy `option-i64`
+    ;; and fail as `expected i64`). With no record type in context, T is
+    ;; unknown, and that is refused by name: the literal's own source does not
+    ;; say what the field holds when it is present.
+    (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
+      (reject! (str "map literal value at key "
+                    (map-literal-key-description-for-message k)
+                    " is nil, which makes the field an absent [:option T], and "
+                    "nothing here says T: give the literal a record type from "
+                    "context (a declared record result, or a record field) or "
+                    "write (option-none-of [:option T])")
+               form :kotoba.error/map-literal-value))
     (when (first-truthy (fn [[_ t]] (and (some? t) (not= :i64 t))) typed)
-      (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
-        (reject! (str "map literal with keyword keys and a non-i64 value lowers "
-                      "to a closed record, and the value at key "
-                      (map-literal-key-description-for-message k)
-                      " is nil, which has no value type; an absent field is an "
-                      "[:option T] -- write (option-none) under a declared "
-                      "[:option T] field, or leave the key out")
-                 form :kotoba.error/map-literal-value))
       (when (> (count entries) max-record-fields)
         (reject! (str "map literal with keyword keys and a non-i64 value lowers "
                       "to a closed record and exceeds the record field limit: "
@@ -4595,6 +4612,45 @@
             (map-literal-record-type fields)
             :map)
           [:map kind (map-literal-item-type kind entries)])))))
+
+(declare desugar-expected-value)
+
+(defn- desugar-map-against-record
+  "ADR 0353 floor :absence (narrows ADR 0028's \"no truthiness\" to presence).
+  A keyword-keyed literal whose context already names a record lowers to THAT
+  record, in its field order, instead of an anonymous one read off the
+  literal. This is where `nil` gets its meaning: a field whose declared type
+  is `[:option T]` and whose literal value is `nil` -- or whose key is left
+  out -- is absent, `(option-none-of [:option T])`. Every other field is
+  checked against its declared type as the value it is.
+
+  Refused by name, because each is a different mistake: a key the record does
+  not have, and a non-option field that is `nil` or left out (only an option
+  can be absent -- `nil` is never a number, string or record)."
+  [form record]
+  (let [fields (nth record 2)
+        field-names (set (map first fields))
+        record-name (second record)]
+    (when-let [extra (first (remove field-names (sort-by str (keys form))))]
+      (reject! (str "map literal key " (map-literal-key-description-for-message extra)
+                    " is not a field of record " record-name)
+               form :kotoba.error/map-literal-value))
+    (list* 'record-new record
+           (map (fn [[field field-type]]
+                  (let [value (get form field ::absent)]
+                    (if (or (= ::absent value) (nil? value))
+                      (if (generic-option-type? field-type)
+                        (list 'option-none-of field-type)
+                        (reject! (str "map literal field "
+                                      (map-literal-key-description-for-message field)
+                                      " of record " record-name " is "
+                                      (pr-str field-type)
+                                      ", which is not an option, so it cannot be absent"
+                                      (if (= ::absent value) " (the key is left out)" " (its value is nil)")
+                                      "; only an [:option T] field is absent")
+                                 form :kotoba.error/map-literal-value))
+                      (desugar-expected-value field-type value))))
+                fields))))
 
 (defn- desugar-map
   "Lower a bounded literal into an owned map KIR operation.
@@ -4641,12 +4697,22 @@
   `kotoba.kir.value` is the same order the runtime keeps the entry chain in),
   so the KIR is reproducible without hashing identity. A key kind with no
   portable identity is refused BY NAME rather than falling through a generic
-  arm, because `1.5` and `:a` fail here for entirely different reasons."
-  [form]
+  arm, because `1.5` and `:a` fail here for entirely different reasons.
+
+  A keyword-keyed literal in a position whose type is already a record (a
+  declared record result, a record field) lowers against THAT record; see
+  `desugar-map-against-record`."
+  ([form] (desugar-map form nil))
+  ([form contextual-type]
   (when (> (count form) max-list-items)
     (reject! "map entry count exceeds admission limit" form))
-  (let [kinds (into #{} (map map-literal-key-kind) (keys form))]
+  (let [kinds (into #{} (map map-literal-key-kind) (keys form))
+        context-record (let [t (canonical-closure-result-type contextual-type)]
+                         (when (record-type? t) t))]
     (cond
+      (and context-record (= #{:keyword} kinds))
+      (desugar-map-against-record form context-record)
+
       (contains? kinds nil)
       (let [offender (first (remove map-literal-key-kind (keys form)))]
         (if (f64-literal-key? offender)
@@ -4684,7 +4750,7 @@
                             " keys exceeds the typed map entry limit")
                        form :kotoba.error/map-literal-key))
             (apply list 'typed-map-new [:map kind item-type]
-                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries))))))))
+                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)))))))))
 
 (defn- document-reader-f64-form?
   "The JVM reader represents an f64 literal as a Double. The JVM-free reader
@@ -5660,7 +5726,7 @@
     (keyword? form) form
     (boolean? form) form
     (nil? form) '(option-none)
-    (map? form) (desugar-map form)
+    (map? form) (desugar-map form contextual-result-type)
     ;; Top-level constants admit only bounded, non-empty keyword sets. Lower
     ;; them into the typed-set profile in canonical order so raw set iteration
     ;; order is never observable in KIR or an artifact.
@@ -10791,6 +10857,29 @@
 
       :else (cons op operands))))
 
+(defn- option-presence-test
+  "TEST as a `:bool` presence test when its type is an option, else TEST."
+  [test test-type]
+  (cond
+    (option-vector-type? test-type) (list 'option-some?-of test-type test)
+    (= :option-i64 test-type) (list 'option-some? test)
+    :else test))
+
+(defn- option-present-value
+  "The payload of VALUE when its type is an option (only reached under a
+  presence test, so the fallback is never the answer), else VALUE."
+  [value value-type form]
+  (cond
+    (option-vector-type? value-type)
+    (list 'option-value-of value-type value
+          (or (closure-default-value-expr (second value-type))
+              (reject! (str "an absent " (pr-str value-type) " has no payload "
+                            "inhabitant to stand in the unreachable branch; bind "
+                            "it with option-match instead")
+                       form :kotoba.error/option-type-unresolved)))
+    (= :option-i64 value-type) (list 'option-value value 0)
+    :else value))
+
 (defn- rewrite-record-projection
   "Type-directed rewrite: `(record-get value :field)` -> the canonical
   `(record-get SCHEMA value :field)`, recovering SCHEMA from the value's
@@ -10856,6 +10945,50 @@
                       [[] locals]
                       (partition 2 bindings))]
           (list 'let (vec pairs) (rewrite-record-projection body locals' signatures schemas)))
+
+        ;; ADR 0353 floor :absence. Truthiness exists on `:bool` and on
+        ;; `[:option T]` only: an option test is presence. `when`, `if-not`,
+        ;; `when-not`, `not`, `cond`, `cond->` and `if-let` / `when-let` all
+        ;; reach here as `if`. Any other test type is left for inference to
+        ;; refuse ("if test must be bool or legacy i64").
+        (= op 'if)
+        (let [[test & branches] (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              test-type (try (infer-expression-type test locals signatures)
+                             (catch #?(:clj Exception :cljs :default) _ nil))]
+          (list* 'if (option-presence-test test test-type) branches))
+
+        (= op '__kotoba_present)
+        (let [value (rewrite-record-projection (first args) locals signatures schemas)
+              value-type (try (infer-expression-type value locals signatures)
+                              (catch #?(:clj Exception :cljs :default) _ nil))]
+          (option-present-value value value-type form))
+
+        (= op '__kotoba_some_last)
+        (let [value (rewrite-record-projection (first args) locals signatures schemas)
+              value-type (try (infer-expression-type value locals signatures)
+                              (catch #?(:clj Exception :cljs :default) _ nil))]
+          (cond
+            (or (option-vector-type? value-type) (= :option-i64 value-type)) value
+            (nil? value-type)
+            (reject! "some-> step has no inferable type, so its result cannot be made an option"
+                     form :kotoba.error/option-type-unresolved)
+            :else (list 'option-some-of [:option value-type] value)))
+
+        (= op '__kotoba_some_bind)
+        (let [[tmp body] args
+              body (rewrite-record-projection body locals signatures schemas)
+              tmp-type (get locals tmp)
+              body-type (try (infer-expression-type body locals signatures)
+                             (catch #?(:clj Exception :cljs :default) _ nil))]
+          (if (or (option-vector-type? tmp-type) (= :option-i64 tmp-type))
+            (list 'if (option-presence-test tmp tmp-type)
+                  body
+                  (cond
+                    (option-vector-type? body-type) (list 'option-none-of body-type)
+                    (= :option-i64 body-type) '(option-none)
+                    :else (reject! "some-> result has no option type"
+                                   form :kotoba.error/option-type-unresolved)))
+            body))
 
         (= op 'option-or)
         (let [[value fallback] args

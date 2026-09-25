@@ -159,11 +159,13 @@
 ;; --- 4. refusals by name -----------------------------------------------------
 
 (deftest a-nil-value-is-refused-by-name
-  (is (= {:message (str "map literal with keyword keys and a non-i64 value "
-                        "lowers to a closed record, and the value at key :b "
-                        "is nil, which has no value type; an absent field is "
-                        "an [:option T] -- write (option-none) under a "
-                        "declared [:option T] field, or leave the key out")
+  ;; ADR 0353 floor :absence: nil makes the field an absent [:option T]; with
+  ;; no record type in context nothing says T, and that is the refusal.
+  (is (= {:message (str "map literal value at key :b is nil, which makes the "
+                        "field an absent [:option T], and nothing here says T: "
+                        "give the literal a record type from context (a "
+                        "declared record result, or a record field) or write "
+                        "(option-none-of [:option T])")
           :code :kotoba.error/map-literal-value}
          (refusal ":i64" "(:a {:a \"x\" :b nil})"))))
 
