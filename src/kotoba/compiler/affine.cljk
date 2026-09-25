@@ -517,6 +517,37 @@
   [form target tail?]
   (not= ::refused (walk form target tail? :live)))
 
+;; The two walks below were a named `(fn walk ...)` closing over an atom. They
+;; are plain recursive defns now: a fn value cannot be named or `swap!` an atom
+;; (kotoba-sema frontend), and this module is on the compiler's own selfhost
+;; path (superproject adr-2609242330). Same visit order (a let's own pairs, then
+;; its children, maps as their flattened entries), same collected values.
+
+(defn- let-children [form]
+  (if (map? form) (apply concat form) form))
+
+(defn- let-initialisers
+  "The initialiser of every `let` binding of `target` anywhere in `form`."
+  [form target]
+  (let [here (if (let-form? form)
+               (mapv second (filter #(= target (first %)) (partition 2 (second form))))
+               [])]
+    (if (coll? form)
+      (into here (mapcat #(let-initialisers % target) (let-children form)))
+      here)))
+
+(defn- producing-let-names
+  "Every name a `let` anywhere in `form` binds from a `producing` head."
+  [form]
+  (let [here (if (let-form? form)
+               (mapv first (filter #(and (seq? (second %))
+                                         (contains? producing (first (second %))))
+                                   (partition 2 (second form))))
+               [])]
+    (if (coll? form)
+      (into here (mapcat producing-let-names (let-children form)))
+      here)))
+
 (defn- owned-binding?
   "True unless `target` is bound from something that may still hold it.
 
@@ -529,14 +560,8 @@
   head added to the language later is unsafe by default rather than silently
   admitted."
   [form target]
-  (let [initialisers (atom [])]
-    ((fn walk [f]
-       (when (let-form? f)
-         (doseq [[n init] (partition 2 (second f))]
-           (when (= n target) (swap! initialisers conj init))))
-       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
-     form)
-    (every? #(and (seq? %) (contains? producing (first %))) @initialisers)))
+  (every? #(and (seq? %) (contains? producing (first %)))
+          (let-initialisers form target)))
 
 (defn linear-returning?
   "True when `target` is linear in `form` EXCEPT that `form` hands it back.
@@ -653,15 +678,7 @@
   body owns or a name from somewhere it cannot see. A parameter is the other
   legitimate source and is checked beside this."
   [form]
-  (let [found (atom #{})]
-    ((fn walk [f]
-       (when (let-form? f)
-         (doseq [[n init] (partition 2 (second f))]
-           (when (and (seq? init) (contains? producing (first init)))
-             (swap! found conj n))))
-       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
-     form)
-    @found))
+  (set (producing-let-names form)))
 
 (defn- caller-gives-it-up?
   "True when every call to `[name index]` hands over an argument the caller
