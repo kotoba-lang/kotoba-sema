@@ -6658,6 +6658,22 @@
         dissoc (do (when-not (>= (count args) 2)
                      (reject! "dissoc requires a map and at least one key" form))
                    (list* 'dissoc (mapv desugar-expr args)))
+        ;; ADR 0353 floor :row-operations. Both are row operations on a
+        ;; record (`rewrite-record-projection` elaborates them), so they keep
+        ;; the authored head until the receiver's type is known. select-keys
+        ;; names the fields it keeps, and a record's fields are static: the
+        ;; key vector is a literal of keywords, spread into the form.
+        select-keys (do (when-not (and (= 2 (count args)) (vector? (second args))
+                                       (every? keyword? (second args)))
+                          (reject! (str "select-keys requires a record and a literal vector of "
+                                        "keyword fields: a record's fields are static, so the "
+                                        "fields it keeps are written, not computed")
+                                   form :kotoba.error/row-operation-shape))
+                        (list* 'select-keys (desugar-expr (first args)) (second args)))
+        merge (do (when-not (>= (count args) 2)
+                    (reject! "merge requires a record and at least one record or map literal to merge onto it"
+                             form :kotoba.error/row-operation-shape))
+                  (list* 'merge (mapv desugar-expr args)))
         ;; `some` here is the OPTION CONSTRUCTOR (`(some x)` -> `[:option
         ;; i64]`), not clojure.core/some. The two-argument spelling is
         ;; Clojure's predicate-over-a-collection, and it is a name collision
@@ -9271,7 +9287,174 @@
 
     :else nil))
 
-(declare infer-call-type-impl)
+(declare infer-call-type-impl use-site-text)
+
+;; --- row operations (ADR 0353 floor :row-operations) ----------------------
+;;
+;; assoc / dissoc / merge / select-keys on a RECORD are row operations: the
+;; result is a record type read off the receiver's fields and the operation,
+;; never the keyword->i64 pair map. A field assoc'ed that the record has keeps
+;; the record's type, and the value must be that field's type (no coercion);
+;; a field it does not have EXTENDS the record; dissoc and select-keys SHRINK
+;; it and name only fields it has; merge assoc's every field of each right
+;; operand (a record, or a keyword-keyed map literal), and a field both sides
+;; have is one type. A result whose fields differ from the receiver's is the
+;; anonymous closed record a map literal with those fields lowers to
+;; (`map-literal-record-type`, fields in key order), so `(assoc {:a "x"} :b 1)`
+;; and `{:a "x" :b 1}` are one type. `rewrite-record-projection` elaborates
+;; each to record-new / record-get / record-assoc: nothing new reaches KIR or
+;; a backend.
+
+(def ^:private row-operation-heads '#{map-assoc dissoc select-keys merge})
+
+(def ^:dynamic *row-op-schemas*
+  "The module's schemas for the whole analysis: `*schemas*` is bound only
+  around some passes, and a row operation is typed and elaborated in others."
+  nil)
+
+(defn- row-op-record
+  "The record descriptor TYPE is (a declared `[:ref ..]` resolved), or nil."
+  [type]
+  (let [record (if (and (schema-ref-type? type) (not (get *schemas* (second type))))
+                 (get (some-> *row-op-schemas* deref) (second type) type)
+                 (resolve-ref-type type))]
+    (when (record-type? record) record)))
+
+(defn- row-op-name [type]
+  (second (row-op-record type)))
+
+(defn- row-op-field-type [fields field]
+  (first-truthy (fn [[k t]] (when (= k field) t)) fields))
+
+(defn- row-op-key! [op type key form]
+  (when-not (keyword? key)
+    (reject! (str op " on record " (row-op-name type) " needs keyword literal fields: "
+                  "a record's fields are static; " (use-site-text key) " is not a keyword literal")
+             form :kotoba.error/row-operation-shape)))
+
+(defn- row-op-field! [op type fields key form]
+  (row-op-key! op type key form)
+  (when-not (row-op-field-type fields key)
+    (reject! (str op " names field " key ", which record " (row-op-name type)
+                  " does not have: a row shrinks only by fields it has")
+             form :kotoba.error/row-field-missing
+             {:kotoba.error/field key :kotoba.error/actual type})))
+
+(defn- row-op-assoc-fields
+  "FIELDS with every `[key type form]` of ENTRIES assoc'ed: an existing field
+  keeps its type and the value must be it; a new one is appended."
+  [fields entries]
+  (reduce (fn [fields [key type form]]
+            (if-let [existing (row-op-field-type fields key)]
+              (do (require-expression-type! type existing form) fields)
+              (conj fields [key type])))
+          fields entries))
+
+(defn- row-op-literal-entries
+  "`[[key value] ...]` of a keyword-keyed map literal as desugared
+  (`(map-new :k v ...)`), or nil."
+  [form]
+  (when (and (seq? form) (= 'map-new (first form))
+             (every? keyword? (take-nth 2 (rest form))))
+    (mapv vec (partition 2 (rest form)))))
+
+(defn- row-op-fields
+  "The fields of the record OP makes from ARGS, whose types are TYPES; the
+  first is a record."
+  [op args types locals signatures form]
+  (let [receiver-type (first types)
+        fields (vec (nth (row-op-record receiver-type) 2))]
+    (case op
+      map-assoc
+      (row-op-assoc-fields
+       fields
+       (map (fn [[key value] [_ value-type]]
+              (row-op-key! "assoc" receiver-type key form)
+              [key value-type value])
+            (partition 2 (rest args)) (partition 2 (rest types))))
+      (dissoc select-keys)
+      (let [keys (rest args)]
+        (doseq [key keys] (row-op-field! op receiver-type fields key form))
+        (let [kept (if (= op 'dissoc)
+                     (remove (fn [[k _]] (first-truthy #{k} keys)) fields)
+                     (filter (fn [[k _]] (first-truthy #{k} keys)) fields))]
+          (when (empty? kept)
+            (reject! (str op " leaves record " (row-op-name receiver-type)
+                          " with no field, and a record has at least one")
+                     form :kotoba.error/row-operation-shape))
+          (vec kept)))
+      merge
+      (reduce (fn [fields [arg type]]
+                (if-let [entries (row-op-literal-entries arg)]
+                  (row-op-assoc-fields
+                   fields (map (fn [[k v]] [k (infer-expression-type v locals signatures) v])
+                               entries))
+                  (if-let [record (row-op-record type)]
+                    (row-op-assoc-fields fields (map (fn [[k t]] [k t arg]) (nth record 2)))
+                    (reject! (str "merge onto record " (row-op-name receiver-type)
+                                  " takes records and keyword-keyed map literals; "
+                                  (use-site-text arg) " is "
+                                  (if (keyword? type) (name type) (pr-str type)))
+                             form :kotoba.error/row-operation-shape
+                             {:kotoba.error/actual type}))))
+              fields (map vector (rest args) (rest types))))))
+
+(defn- row-op-result-type
+  "RECEIVER-TYPE itself when FIELDS are its fields, else the anonymous closed
+  record of FIELDS."
+  [receiver-type fields]
+  (if (= (set (nth (row-op-record receiver-type) 2)) (set fields))
+    receiver-type
+    (map-literal-record-type (vec (sort-by first (map-literal-key-order :keyword) fields)))))
+
+(defn- row-op-not-record! [op receiver type form]
+  (reject! (str op " is a row operation on a record; " (use-site-text receiver) " is "
+                (if (keyword? type) (name type) (pr-str type)))
+           form :kotoba.error/row-operation-receiver
+           {:kotoba.error/actual type}))
+
+(defn- row-op-elaborate
+  "`(op receiver ...)` on a record, as record-new / record-get / record-assoc.
+  Every operand is bound in source order before the record is built."
+  [op args types locals signatures form]
+  (let [receiver-type (first types)
+        record (row-op-record receiver-type)
+        result-type (row-op-result-type
+                     receiver-type (row-op-fields op args types locals signatures form))]
+    (if (and (= op 'map-assoc) (= result-type receiver-type))
+      (reduce (fn [acc [key value]] (list 'record-assoc record acc key value))
+              (first args) (partition 2 (rest args)))
+      (let [result (row-op-record result-type)
+            receiver (synthetic "row_receiver")
+            projected (fn [record local]
+                        (into {} (map (fn [[k _]] [k (list 'record-get record local k)]))
+                              (nth record 2)))
+            [bindings sources]
+            (reduce (fn [[bindings sources] [arg type]]
+                      (cond
+                        (= op 'map-assoc)
+                        (let [local (synthetic "row_value")]
+                          [(conj bindings local (second arg)) (assoc sources (first arg) local)])
+                        (row-op-literal-entries arg)
+                        (reduce (fn [[bindings sources] [k v]]
+                                  (let [local (synthetic "row_value")]
+                                    [(conj bindings local v) (assoc sources k local)]))
+                                [bindings sources] (row-op-literal-entries arg))
+                        :else
+                        (let [local (synthetic "row_operand")]
+                          [(conj bindings local arg)
+                           (merge sources (projected (row-op-record type) local))])))
+                    [[receiver (first args)] (projected record receiver)]
+                    (case op
+                      map-assoc (map (fn [pair] [(vec pair) nil]) (partition 2 (rest args)))
+                      merge (map vector (rest args) (rest types))
+                      []))]
+        (list 'let bindings
+              (list* 'record-new result (map (fn [[k _]] (get sources k)) (nth result 2))))))))
+
+(defn- row-op-rewrite [op args locals signatures form]
+  (row-op-elaborate op args (mapv #(infer-expression-type % locals signatures) args)
+                    locals signatures form))
 
 (defn- infer-call-type
   "`infer-call-type-impl`, with the call named on any refusal it raises about
@@ -9968,6 +10151,16 @@
           (require-expression-type! (nth types 1) :keyword (nth args 1))
           (require-expression-type! (nth types 2) :i64 (nth args 2))
           :i64)
+
+      ;; ADR 0353 floor :row-operations: on a record receiver these are row
+      ;; operations, typed here because a function's result is inferred
+      ;; before `rewrite-record-projection` elaborates them.
+      (and (contains? row-operation-heads op) (row-op-record (first types)))
+      (row-op-result-type (first types)
+                          (row-op-fields op args types locals signatures (cons op args)))
+
+      (contains? '#{select-keys merge} op)
+      (row-op-not-record! op (first args) (first types) (cons op args))
 
       (= op 'map-assoc)
       (do (require-expression-type! (first types) :map (first args))
@@ -11670,14 +11863,17 @@
                            (canonical-typed-map-type? value-type) value-type
                            retyped-key [:map retyped-key retyped-item]
                            :else nil)]
-          (if descriptor
+          (cond
+            (row-op-record value-type)
+            (row-op-rewrite op rewritten-args locals signatures form)
+            descriptor
             (reduce (fn [accumulated [key item]]
                       (list 'typed-map-assoc descriptor accumulated key item))
                     (if (canonical-typed-map-type? value-type)
                       receiver
                       (list 'typed-map-new descriptor))
                     (partition 2 pairs))
-            (cons 'map-assoc rewritten-args)))
+            :else (cons 'map-assoc rewritten-args)))
 
         (= op 'contains?)
         (let [rewritten-args
@@ -11710,15 +11906,30 @@
                             (catch #?(:clj Exception :cljs :default) e {:refusal e}))
               _ (when-let [refusal (:refusal inferred)] (throw refusal))
               value-type (:type inferred)]
-          (when-not (canonical-typed-map-type? value-type)
-            (reject! (str "dissoc requires a canonical typed map "
+          (cond
+            ;; ADR 0353 floor :row-operations: dissoc on a record shrinks it.
+            (row-op-record value-type)
+            (row-op-rewrite op rewritten-args locals signatures form)
+            (not (canonical-typed-map-type? value-type))
+            (reject! (str "dissoc requires a record or a canonical typed map "
                           "[:map key-type value-type]; got " (pr-str value-type)
                           ". A typed set answers to typed-set-disj, and the "
                           "bounded keyword map has no removal primitive at all")
-                     form :kotoba.error/map-dissoc-receiver))
-          (reduce (fn [accumulated key]
-                    (list 'typed-map-dissoc value-type accumulated key))
-                  receiver keys))
+                     form :kotoba.error/map-dissoc-receiver)
+            :else
+            (reduce (fn [accumulated key]
+                      (list 'typed-map-dissoc value-type accumulated key))
+                    receiver keys)))
+
+        ;; ADR 0353 floor :row-operations: select-keys and merge exist only
+        ;; as row operations on a record.
+        (contains? '#{select-keys merge} op)
+        (let [rewritten-args
+              (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              receiver-type (infer-expression-type (first rewritten-args) locals signatures)]
+          (if (row-op-record receiver-type)
+            (row-op-rewrite op rewritten-args locals signatures form)
+            (row-op-not-record! op (first rewritten-args) receiver-type form)))
 
         ;; `conj` and `disj` on a typed set. The receiver carries the item
         ;; type, so neither head assumes `:keyword` -- a `typed-set-new [:set
@@ -12442,11 +12653,16 @@
 ;; unchanged to another function's row parameter (a fixed point over the
 ;; call graph). A parameter the body rebinds is left as it was.
 ;;
-;; Cut of this slice, each keeping the refusal it had: loop helpers and fn
-;; literals are not generic (a loop over a row parameter), a parameter that is
-;; only returned beside a row (`(if c m n)`) is not unified into it, and
-;; assoc / dissoc / merge / select-keys are not yet row operations (floor
-;; :row-operations). A specialization's definition CID is its own KIR's, which
+;; A parameter a row operation uses -- assoc / dissoc / select-keys on it, or
+;; merge of it -- is a row too (floor :row-operations, `row-operated?`); the
+;; fields dissoc / select-keys name are fields it reads.
+;;
+;; Cut of this slice, each keeping the refusal it had (floor
+;; :row-unification): loop helpers and fn literals are not generic (a loop
+;; over a row parameter), a parameter that is only returned beside a row
+;; (`(if c m n)`) is not unified into it, and a keyword map literal passed to
+;; a row is still the keyword->i64 map, not that row's record. A
+;; specialization's definition CID is its own KIR's, which
 ;; already seals the record it was specialized at (floor
 ;; :specialization-identity derives it from the generic's).
 
@@ -12472,14 +12688,35 @@
     (tree-seq coll? seq form))))
 
 (defn- row-field-reads
-  "The fields FORM reads off PARAM with a descriptor-less `(record-get PARAM :k)`."
+  "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`,
+  and the fields `(dissoc PARAM :k ..)` / `(select-keys PARAM :k ..)` name
+  (floor :row-operations: a row shrinks only by fields it has)."
   [param form]
   (into (sorted-set)
-        (keep (fn [x]
-                (when (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
-                           (= param (second x)) (keyword? (nth x 2)))
-                  (nth x 2))))
+        (mapcat (fn [x]
+                  (cond
+                    (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
+                         (= param (second x)) (keyword? (nth x 2)))
+                    [(nth x 2)]
+                    (and (seq? x) (contains? '#{dissoc select-keys} (first x))
+                         (= param (second x)))
+                    (filter keyword? (drop 2 x))
+                    :else nil)))
         (tree-seq coll? seq form)))
+
+(defn- row-operated?
+  "Is PARAM the receiver of a row operation in FORM, or merged by one (ADR
+  0353 floor :row-operations)? Either makes it a row even when no field is
+  read off it: `(defn- f [m] (assoc m :d 1))`."
+  [param form]
+  (boolean
+   (first-truthy
+    (fn [x]
+      (and (seq? x)
+           (or (and (contains? '#{map-assoc dissoc select-keys merge} (first x))
+                    (= param (second x)))
+               (and (= 'merge (first x)) (first-truthy #{param} (rest x))))))
+    (tree-seq coll? seq form))))
 
 (defn- row-pass-through
   "`[[callee index] ...]` for every call in FORM that passes PARAM itself as an
@@ -12496,13 +12733,20 @@
   "The field keys of record type T (`[:ref :ns/name]` naming a :record schema),
   or nil when T is not a record."
   [t]
-  (when (and (vector? t) (= :ref (first t)) (keyword? (second t)))
+  (cond
+    (and (vector? t) (= :ref (first t)) (keyword? (second t)))
     (let [schema (get *schemas* (second t))]
       (when (and (vector? schema) (= :record (first schema)))
-        (into #{} (map first) (nth schema 2))))))
+        (into #{} (map first) (nth schema 2))))
+    ;; An anonymous record -- a record literal, or the result of a row
+    ;; operation (floor :row-operations) -- satisfies a row the same way.
+    (record-type? t) (into #{} (map first) (nth t 2))
+    :else nil))
 
 (defn- row-text [fields]
-  (str "{" (str/join " " (map #(str % " T") fields)) " | r}"))
+  (if (empty? fields)
+    "{| r}"
+    (str "{" (str/join " " (map #(str % " T") fields)) " | r}")))
 
 (defn- row-name-part [t]
   (apply str (map (fn [c] (let [s (str c)]
@@ -12542,6 +12786,7 @@
                                                          (not (annotated-record-use?
                                                                (row-pass-through p body))))
                                                 [i {:reads (row-field-reads p body)
+                                                    :operated? (row-operated? p body)
                                                     :passes (row-pass-through p body)}]))))
                                     (sort param-types-inferred))])))
               functions)]
@@ -12550,8 +12795,8 @@
             (into {}
                   (keep (fn [[fname slots]]
                           (let [rows (into (sorted-map)
-                                           (keep (fn [[i {:keys [reads passes]}]]
-                                                   (when (or (seq reads)
+                                           (keep (fn [[i {:keys [reads operated? passes]}]]
+                                                   (when (or (seq reads) operated?
                                                              (some (fn [[callee j]]
                                                                      (contains? (get known callee) j))
                                                                    passes))
@@ -17923,6 +18168,7 @@
                        per-module first pass. User source still cannot invent
                        those names — each module was checked before link.)"
   [source-forms opts]
+  (binding [*row-op-schemas* (volatile! nil)]
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
@@ -17991,6 +18237,7 @@
                               :schemas merged-schemas
                               :schema-identities
                               (when merged-schemas (schema/identities merged-schemas)))
+        _ (vreset! *row-op-schemas* merged-schemas)
         def-declarations (mapv (fn [form]
                                  (let [{:keys [name] :as parts}
                                        (guarding-definition 'def form #(def-parts form))]
@@ -18709,7 +18956,7 @@
         ;; W1: semantic ability/operation names after elaboration (no numeric IDs).
         :named-operations named-operations
         :language-profile language-profile
-        :functions functions}))))
+        :functions functions})))))
 
 (defn- analyze-forms*
   "`analyze-forms**` with this analysis's state handler table bound: a probe
