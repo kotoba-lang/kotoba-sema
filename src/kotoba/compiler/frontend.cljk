@@ -3325,6 +3325,23 @@
   (if (= :nil (second marker)) '(option-none) 0))
 
 
+(defn- realized-lowering
+  "Realize every lazy seq inside a lowered form, and answer the form.
+
+  Desugaring builds its output with `map` / `map-indexed` under `list*` in
+  many places, so part of a lowered body is a lazy seq that runs the
+  desugarer when it is first walked. Walked after the `binding` it was built
+  under has ended, it runs with the dynamic context gone: a `fn` literal
+  stored as a map-literal value or a `record-new` field was lowered with
+  `*lambda-counter*` nil and the program got `internal compiler error`
+  (`vswap!` on nil) -- amu ADR 0352 point 5, `(let [m {:f (fn [x] (+ x 1))
+  :n \"a\"}] ((:f m) 1))`. A lambda body realized outside its own `binding`
+  would also have seen the enclosing function's lexical bindings, not its
+  own. Every body is realized where it was desugared, once, here."
+  [form]
+  (dorun (tree-seq coll? seq form))
+  form)
+
 (defn- lift-lambda [form]
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
@@ -3426,11 +3443,11 @@
                                              *local-option-types*)]
                                    (if-let [result (or clause-result expected-result)]
                                      (binding [*absence-mode* :legacy]
-                                       (desugar-result-expr result body))
+                                       (realized-lowering (desugar-result-expr result body)))
                                      ;; gap 1: a fn literal with no declared
                                      ;; result answers absence as an option
                                      (binding [*absence-mode* :none]
-                                       (desugar-expr body))))}))
+                                       (realized-lowering (desugar-expr body)))))}))
                         clauses)
           captures (vec (sort-by str
                                  (apply set/union #{}
@@ -19239,9 +19256,10 @@
                                                      ;; gap 1: a declared result keeps the
                                                      ;; i64 stand-in for a missing else
                                                      *absence-mode* (if result-inferred? :none :legacy)]
-                                             (if (closure-result-type? result (:schemas namespace-info))
-                                               (desugar-result-expr result source-body)
-                                               (desugar-expr source-body)))]
+                                             (realized-lowering
+                                              (if (closure-result-type? result (:schemas namespace-info))
+                                                (desugar-result-expr result source-body)
+                                                (desugar-expr source-body))))]
                              (into [(cond-> {:name name :source-name source-name
                                              :params params :param-types param-types
                                              :result result :effects #{}

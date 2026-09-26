@@ -183,6 +183,9 @@
             [kotoba.compiler.uefi-boundary-test]
             [kotoba.compiler.f32-literal-test]
             [kotoba.compiler.eager-recursive-let-binding-test]
+            ;; a fn literal stored as a map-literal value or record-new field
+            ;; is lowered inside its binding, not as a lazy seq after it
+            [kotoba.compiler.stored-closure-lowering-test]
             ;; an export that is a def / a defn- / undefined names which; the
             ;; rewrite prints the literal, which is a BigInt here
             [kotoba.compiler.export-names-constant-test]
@@ -261,5 +264,6 @@
              'kotoba.compiler.uefi-boundary-test
              'kotoba.compiler.f32-literal-test
              'kotoba.compiler.eager-recursive-let-binding-test
+             'kotoba.compiler.stored-closure-lowering-test
              'kotoba.compiler.export-names-constant-test
              'kotoba.compiler.zero-multiply-lint-test)
