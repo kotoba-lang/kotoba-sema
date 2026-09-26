@@ -13552,6 +13552,105 @@
                   (into final (subvec @spec-functions n)))
                 (recur fs' (dec budget))))))))))
 
+(defn- literal-item-type
+  "The inferred type of one literal item, or nil when nothing here knows it."
+  [form locals table]
+  (try (infer-expression-type form locals table)
+       (catch #?(:clj Exception :cljs :default) _ nil)))
+
+(defn- type-literal
+  "ADR 0353 floor :literal-typing. One literal whose items were lowered
+  before any type was inferred, typed now that its items' types are known.
+
+  A keyword-keyed pair map `(map-new :a x :b y)` is the anonymous closed
+  record of its fields, each typed by its value -- the record a literal with
+  a spelled non-i64 value already lowered to (`keyword-map-literal-record-
+  fields`) -- wherever the literal is written, so a `let` binding that is
+  later passed to a row is that row's record. The keyword->i64 pair map is
+  no longer what a literal is: reading a key it lacks is refused, not 0.
+
+  A vector literal `(vector-new a b)` whose items are not all `:i64` is a
+  typed vector: `[:list T]` when every item is one type T (so `nth` with any
+  index answers a T and `count` counts it), the heterogeneous `[:vector
+  [T ...]]` a closed literal of mixed item types already is otherwise.
+
+  A literal an item of which has no type known here is returned unchanged
+  (and refused downstream as it was)."
+  [form locals table]
+  (let [[op & args] form]
+    (cond
+      (and (= 'map-new op) (seq args) (even? (count args))
+           (every? keyword? (take-nth 2 args)))
+      (let [entries (partition 2 args)
+            types (mapv #(literal-item-type (second %) locals table) entries)]
+        (if (every? some? types)
+          (do (when (> (count entries) max-record-fields)
+                (reject! (str "map literal with keyword keys lowers to a closed record and "
+                              "exceeds the record field limit: " (count entries)
+                              " entries, at most " max-record-fields)
+                         form :kotoba.error/map-literal-value))
+              (list* 'record-new
+                     (map-literal-record-type (mapv (fn [[k _] t] [k t]) entries types))
+                     (map second entries)))
+          form))
+
+      (and (= 'vector-new op) (seq args))
+      (let [types (mapv #(literal-item-type % locals table) args)]
+        (cond
+          (or (not (every? some? types)) (every? #{:i64} types)) form
+          (apply = types) (list* 'typed-list-new [:list (first types)] args)
+          :else (list* 'hetero-vector-new [:vector types] args)))
+
+      :else form)))
+
+(defn- type-literals
+  "Run `type-literal` over every function body, innermost literal first, with
+  the locals a `let` binds typed as they are bound. Rounds to a fixed point,
+  because a function whose result was a literal changes type with it."
+  [functions]
+  (let [signatures (fn [fs]
+                     (into {} (map (fn [{:keys [name params param-types result]}]
+                                     [name {:params params :param-types param-types
+                                            :result result}]))
+                           fs))
+        ;; A rebuilt form keeps the metadata later passes read (spans, and
+        ;; the markers absence and predicate elaboration leave on forms).
+        keep-meta (fn [form rebuilt] (if (= form rebuilt) form (with-meta rebuilt (meta form))))
+        rewrite
+        (fn rw [form locals table]
+          (cond
+            (and (seq? form) (seq form))
+            (let [[op & args] form]
+              (cond
+                (= op 'quote) form
+                (and (= op 'let) (vector? (first args)))
+                (let [[bindings locals]
+                      (reduce (fn [[out locals] [b v]]
+                                (let [v (rw v locals table)
+                                      t (literal-item-type v locals table)]
+                                  [(conj out b v)
+                                   (if (and t (simple-symbol? b)) (assoc locals b t) (dissoc locals b))]))
+                              [[] locals] (partition 2 (first args)))]
+                  (keep-meta form (apply list 'let (with-meta bindings (meta (first args)))
+                                         (map #(rw % locals table) (rest args)))))
+                (contains? row-binding-heads op)
+                (let [inner (apply dissoc locals (row-symbols-in (drop 3 form)))]
+                  (keep-meta form (apply list op (map #(rw % inner table) args))))
+                :else
+                (let [rebuilt (keep-meta form (apply list op (map #(rw % locals table) args)))
+                      typed (type-literal rebuilt locals table)]
+                  (if (identical? typed rebuilt) rebuilt (with-meta typed (meta form))))))
+            (vector? form) (keep-meta form (mapv #(rw % locals table) form))
+            :else form))]
+    (loop [fs functions budget 8]
+      (let [table (signatures fs)
+            fs' (mapv (fn [{:keys [params param-types] :as f}]
+                        (update f :body rewrite (zipmap params param-types) table))
+                      fs)]
+        (if (or (zero? budget) (= fs' fs))
+          fs'
+          (recur fs' (dec budget)))))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -19260,6 +19359,10 @@
         ;; and its function exists only as its specializations. Before
         ;; parameter inference, so a specialization's row parameter is
         ;; already its record when anything else reasons about it.
+        ;; ADR 0353 floor :literal-typing: a map or vector literal lowered
+        ;; before any type was inferred is typed by its items, before rows
+        ;; read it (a let-bound literal passed to a row is its record).
+        parsed (type-literals parsed)
         parsed (binding [*schemas* (:schemas namespace-info)]
                  (specialize-row-parameters
                   parsed
