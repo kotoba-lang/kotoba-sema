@@ -254,8 +254,11 @@
   Advanced 2026-09-26 to `407357fd` (superproject adr-2609242330, gap 1 of
   the selfhost foundation): `:sugar :expression-absence` -- a missing else
   and a literal nil are absence, typed by the present branch -- implemented
-  by this frontend's absence markers in the same commit."
-  "407357fdcdb52777e24d98b550a673e0e88b762f8ba91245c4b369919d82dedc")
+  by this frontend's absence markers in the same commit.
+  Advanced 2026-09-26 to `b70bb39e` (kotoba-gmir ADR 0031, aiueos ADR-0222):
+  the admitted kernel head `kernel-dequant-dot-ptq1-0`, with this frontend's
+  arity and base-position rows in the same commit."
+  "b70bb39ee06aa4bf7e7124c58978b5387af729aa4c1b3d407411ae10936e23e0")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

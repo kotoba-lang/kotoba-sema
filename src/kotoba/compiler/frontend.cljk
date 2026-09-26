@@ -418,7 +418,9 @@
     ;; 32 elements in Q8_0). Both spans are derived from it downstream.
     kernel-dequant-dot-q8-0 5
     kernel-dequant-dot-q4-k 5
-    kernel-dequant-dot-q6-k 5})
+    kernel-dequant-dot-q6-k 5
+    ;; PTQ1_0 (kotoba-gmir ADR 0031): 28 bytes carry 128 elements.
+    kernel-dequant-dot-ptq1-0 5})
 
 ;; slice-value: the CARRIED form of the slice family (amu ADR 0285).
 ;;
@@ -470,7 +472,8 @@
     ;; dequant: the packed row at 0, the activations at 2.
     kernel-dequant-dot-q8-0 [0 2]
     kernel-dequant-dot-q4-k [0 2]
-    kernel-dequant-dot-q6-k [0 2]})
+    kernel-dequant-dot-q6-k [0 2]
+    kernel-dequant-dot-ptq1-0 [0 2]})
 
 (defn kernel-base-argument-positions
   "The argument positions of OP that name a region. Every operation in

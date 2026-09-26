@@ -14,7 +14,8 @@
             [kotoba.sema :as sema]))
 
 (def ^:private heads
-  '[kernel-dequant-dot-q8-0 kernel-dequant-dot-q4-k kernel-dequant-dot-q6-k])
+  '[kernel-dequant-dot-q8-0 kernel-dequant-dot-q4-k kernel-dequant-dot-q6-k
+    kernel-dequant-dot-ptq1-0])
 
 (defn- beside-main [src] (str src "\n(defn main [] 0)"))
 
@@ -41,7 +42,7 @@
            (sema/analyze
             (beside-main (str "(defn p [w wl x xl n] (" head " w wl x xl n 0))"))))
           (str head " long"))))
-  (is (= 3 (count heads)) "SCANNED formats"))
+  (is (= 4 (count heads)) "SCANNED formats"))
 
 (deftest the-answer-is-an-i64-word
   ;; The result is the binary32 pattern of the sum, sign-extended -- the
