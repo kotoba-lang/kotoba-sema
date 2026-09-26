@@ -32,10 +32,50 @@
 
 (deftest true?-and-integer?-are-decided-by-the-static-type
   (is (= 10101 (w (run "(defn main [] :i64 (+ (if (true? (= 1 1)) 1 0) (if (true? 5) 10 0) (if (integer? 5) 100 0) (if (integer? \"x\") 1000 0) (if (integer? (string-byte-length \"ab\")) 10000 0)))"))))
-  (is (= "true? on a :document depends on the value, not the type: ask (document-kind d) -- (and (= (document-kind d) :bool) (document-bool-value d))"
-         (refusal "(defn main [] :i64 (if (true? (document-bool true)) 1 0))")))
-  (is (= "integer? on a :document depends on the value, not the type: ask (document-kind d) -- (= (document-kind d) :i64)"
-         (refusal "(defn main [] :i64 (if (integer? (document-i64 1)) 1 0))"))))
+  (testing "on a :document they ask the node's kind (gap 3, 2026-09-26; refused by name until then)"
+    (is (= 1 (w (run "(defn main [] :i64 (if (true? (document-bool true)) 1 0))"))))
+    (is (= 1 (w (run "(defn main [] :i64 (if (integer? (document-i64 1)) 1 0))"))))))
+
+(def ^:private kind-probe
+  "Fifteen predicates as the bits of one i64, so one run reads every answer."
+  (str "(defn- k [d :document] :i64 (+ (if (map? d) 1 0) (if (vector? d) 2 0) "
+       "(if (keyword? d) 4 0) (if (string? d) 8 0) (if (integer? d) 16 0) "
+       "(if (true? d) 32 0) (if (false? d) 64 0) (if (nil? d) 128 0) "
+       "(if (coll? d) 256 0) (if (some? d) 512 0) (if (set? d) 1024 0) "
+       "(if (seq? d) 2048 0) (if (symbol? d) 4096 0) (if (boolean? d) 8192 0) "
+       "(if (list? d) 16384 0)))\n"))
+
+(defn- kinds [document]
+  (w (run (str kind-probe "(defn main [] :i64 (k " document "))"))))
+
+(deftest type-predicates-on-a-document-ask-its-kind
+  (testing "admitted: every predicate reads the node's run-time kind"
+    (is (= (+ 128) (kinds "(document-null)")))
+    (is (= (+ 32 512 8192) (kinds "(document-bool true)")))
+    (is (= (+ 64 512 8192) (kinds "(document-bool false)")))
+    (is (= (+ 16 512) (kinds "(document-i64 7)")))
+    (is (= (+ 8 512) (kinds "(document-string \"s\")")))
+    (is (= (+ 4 512) (kinds "(document-keyword :x)")))
+    (is (= (+ 2 256 512) (kinds "(document-vector (document-i64 1))")))
+    (is (= (+ 256 512 2048 16384) (kinds "(document-list (document-i64 1))")))
+    (is (= (+ 256 512 1024) (kinds "(document-set (document-i64 1))")))
+    (is (= (+ 1 256 512) (kinds "(document-map :a (document-i64 1))"))))
+  (testing "admitted: on a static type the answer is the type's, the operand still runs"
+    (is (= 1111 (w (run (str "(defn main [] :i64 (+ (if (string? \"x\") 1 0) (if (keyword? :a) 10 0) "
+                             "(if (vector? (vector-i64 1 2)) 100 0) (if (false? (= 1 2)) 1000 0) "
+                             "(if (map? \"x\") 10000 0) (if (coll? 5) 100000 0)))"))))))
+  (testing "admitted: on [:option T] a predicate T answers true for is presence"
+    (is (= 1 (w (run (str "(defn main [] :i64 (let [o (option-some-of [:option :string] \"s\") "
+                          "n (option-none-of [:option :string])] (+ (if (string? o) 1 0) "
+                          "(if (string? n) 10 0) (if (integer? o) 100 0))))"))))))
+  (testing "refused: an option whose payload's answer depends on the value"
+    (is (= "true? on [:option :bool] depends on the value, not the type: bind the payload first (when-let / if-let) and ask the payload"
+           (refusal "(defn main [] :i64 (if (true? (option-some-of [:option :bool] true)) 1 0))")))
+    (is (= "map? on [:option :document] depends on the value, not the type: bind the payload first (when-let / if-let) and ask the payload"
+           (refusal "(defn main [] :i64 (if (map? (option-none-of [:option :document])) 1 0))"))))
+  (testing "refused: nil? / some? ask absence, and a string has none"
+    (is (= "expression type mismatch: expected option-i64, got string"
+           (refusal "(defn main [] :i64 (if (nil? \"s\") 1 0))")))))
 
 (deftest subvec-is-drop-then-copy-and-traps-out-of-range
   (let [src "(defn main [] :i64 0) (defn f [n :i64] :i64 (let [v (subvec (vector-i64 10 20 30 40 50) 1 n)] (+ (* 1000 (vector-count v)) (vector-at v 0))))

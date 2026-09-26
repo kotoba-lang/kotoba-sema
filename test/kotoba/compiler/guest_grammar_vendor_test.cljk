@@ -246,8 +246,12 @@
   selfhost builtin gaps): `:library-heads` and the `:string-equality` /
   `:true?` / `:integer?` sugar, implemented by this frontend's
   `expand-intrinsic-helper-forms` and type-directed rewrite in the same
-  commit; the `:throw` note admits a loop body."
-  "5e71ffedfdd9c9e151f46f45e54aaee9b9ae56790152c51bfc722851470d5ab1")
+  commit; the `:throw` note admits a loop body.
+  Advanced 2026-09-26 to `e2a90a2a` (superproject adr-2609242330, gap 3 of
+  the selfhost foundation): `:sugar` `:type-predicates` -- the predicates ask
+  a :document its kind -- implemented by this frontend's type-directed
+  rewrite in the same commit."
+  "e2a90a2a651b410245f6f00266c7623dd9782b454aa9e80243b877e74bbe2864")
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 

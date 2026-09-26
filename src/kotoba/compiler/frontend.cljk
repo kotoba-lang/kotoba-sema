@@ -6687,10 +6687,16 @@
                               "some requires one i64 operand")
                             form))
                  (list 'option-some (desugar-expr (first args))))
+        ;; The source head rides on the form so the option-some? arm of
+        ;; `rewrite-record-projection` can answer these two, and only these
+        ;; two, on a :document (its :null kind); an authored option-some?
+        ;; stays an option question.
         some? (do (when-not (= 1 (count args)) (reject! "some? requires one option operand" form))
-                  (list 'option-some? (desugar-expr (first args))))
+                  (with-meta (list 'option-some? (desugar-expr (first args)))
+                    {:kotoba.diag/source-head 'some?}))
         nil? (do (when-not (= 1 (count args)) (reject! "nil? requires one option operand" form))
-                 (list 'bool-not (list 'option-some? (desugar-expr (first args)))))
+                 (list 'bool-not (with-meta (list 'option-some? (desugar-expr (first args)))
+                                   {:kotoba.diag/source-head 'nil?})))
         vector-i64 (do (when (> (count args) value/vector-literal-item-limit)
                          (reject! "vector-i64 exceeds item limit" form))
                        (apply list 'vector-new (map desugar-expr args)))
@@ -9475,20 +9481,59 @@
                              (assoc data :kotoba.error/use-site (cons op args))))
              (throw error))))))
 
-;; `true?` / `integer?` (superproject adr-2609242330, 2026-09-25). Clojure's
-;; answers are questions about a value's TYPE -- `(true? x)` is "x is the
-;; boolean true", `(integer? x)` "x is an integer" -- and here that type is
-;; static. So each is decided by the operand's type:
-;;   (true? b)     b :bool           -> b itself
-;;   (integer? n)  n :i64            -> true
-;;   either, on a statically different type -> false, as Clojure answers for
-;;                 a value of that type ((true? 1) and (integer? 1.5) are
-;;                 false); the operand is still evaluated.
-;;   either, on a :document          -> REFUSED by name: its answer depends on
-;;                 the value, which is `document-kind`'s question.
-(def ^:private library-predicate-heads '#{true? integer?})
+;; Type predicates (superproject adr-2609242330). Clojure's answers are
+;; questions about a value's TYPE -- `(true? x)` is "x is the boolean true",
+;; `(integer? x)` "x is an integer", `(map? x)` "x is a map" -- and here a
+;; value's type is static EXCEPT inside a `:document`, the one value whose
+;; shape is decided at run time. So:
+;;   on a static type  -> decided here, as Clojure answers for a value of that
+;;                 type: `(true? b)` on :bool is b, `(false? b)` is (not b),
+;;                 every other type answers a constant; the operand is still
+;;                 evaluated (2026-09-25, true? / integer?).
+;;   on [:option T]    -> presence when T answers true, false when T answers
+;;                 false (nil is none of these types); refused by name when
+;;                 T's own answer depends on the value (:bool, :document).
+;;   on a :document    -> the node's run-time kind, `(document-kind d)`, which
+;;                 every backend that has documents already answers
+;;                 (2026-09-26, gap 3 of the selfhost foundation; this was
+;;                 refused by name until then). `nil?` / `some?` on a
+;;                 document are the :null kind (see the option-some? arm of
+;;                 `rewrite-record-projection`).
+;; A module's own function of the same name wins, in inference and rewrite.
+(def ^:private library-predicate-heads
+  '#{true? false? integer? boolean? string? keyword? symbol?
+     map? vector? set? list? seq? coll?})
 
-(def ^:private library-predicate-true-type '{true? :bool integer? :i64})
+(def ^:private library-predicate-document-kinds
+  "The `document-kind` answers each predicate is true for (true? / false?
+  read the bool payload instead)."
+  '{true? #{:bool} false? #{:bool} integer? #{:i64} boolean? #{:bool}
+    string? #{:string} keyword? #{:keyword} symbol? #{:symbol}
+    map? #{:map} vector? #{:vector} set? #{:set} list? #{:list} seq? #{:list}
+    coll? #{:vector :list :set :map}})
+
+(defn- library-predicate-static-answer
+  "What `(op x)` is for a value of the static, non-document TYPE: :operand
+  (the bool itself), :negated, true or false."
+  [op type]
+  (let [map-type? (or (record-type? type) (canonical-typed-map-type? type) (= :map type))
+        vector-type? (or (heterogeneous-vector-type? type)
+                         (contains? #{:vector-i64 :vector-f64} type))
+        set-type? (typed-set-type? type)
+        list-type? (canonical-list-type? type)]
+    (case op
+      true? (if (= :bool type) :operand false)
+      false? (if (= :bool type) :negated false)
+      boolean? (= :bool type)
+      integer? (= :i64 type)
+      string? (= :string type)
+      keyword? (= :keyword type)
+      symbol? (= :symbol type)
+      map? map-type?
+      vector? vector-type?
+      set? set-type?
+      (list? seq?) list-type?
+      coll? (or map-type? vector-type? set-type? list-type?))))
 
 (def ^:private document-of-constructors
   "`__kotoba_document_of` (written only by `ex-info-data-argument`): the
@@ -9508,18 +9553,38 @@
                        operand :kotoba.error/library-head-document)))
 
 (defn- library-predicate-answer!
-  "What `(op x)` is for an operand of TYPE: :operand, true, or false."
+  "What `(op x)` is for an operand of TYPE: :operand, :negated, true, false,
+  :document (ask its kind) or :present (ask an option's presence)."
   [op type operand]
   (cond
-    (= :document type)
-    (reject! (str op " on a :document depends on the value, not the type: ask "
-                  "(document-kind d) -- "
-                  (if (= op 'true?)
-                    "(and (= (document-kind d) :bool) (document-bool-value d))"
-                    "(= (document-kind d) :i64)"))
+    (= :document type) :document
+    (and (schema-ref-type? type) (contains? '#{map? coll?} op))
+    (reject! (str op " on " (pr-str type) " is not decided here: a schema reference "
+                  "names a record or a variant, and only a record is a map; project "
+                  "the value through its declared type")
              (list op operand) :kotoba.error/library-head-document)
-    (= type (get library-predicate-true-type op)) (if (= op 'true?) :operand true)
-    :else false))
+    (or (option-vector-type? type) (= :option-i64 type))
+    (let [payload (if (= :option-i64 type) :i64 (second type))]
+      (if (or (= :document payload) (= :bool payload))
+        (reject! (str op " on " (pr-str type) " depends on the value, not the type: "
+                      "bind the payload first (when-let / if-let) and ask the payload")
+                 (list op operand) :kotoba.error/library-head-document)
+        (if (true? (library-predicate-static-answer op payload)) :present false)))
+    :else (library-predicate-static-answer op type)))
+
+(defn- library-predicate-document-test
+  "The `:bool` form asking OP of the document bound to TMP."
+  [op tmp]
+  (let [kinds (get library-predicate-document-kinds op)
+        kind-test (fn [kind] (list '= (list 'document-kind tmp) kind))]
+    (case op
+      ;; document-bool-value is [:option :bool], absent unless the node is a
+      ;; bool, so the payload with the right fallback is the whole answer.
+      true? (list 'option-value-of [:option :bool] (list 'document-bool-value tmp) false)
+      false? (list 'bool-not (list 'option-value-of [:option :bool]
+                                   (list 'document-bool-value tmp) true))
+      (reduce (fn [else kind] (list 'if (kind-test kind) true else))
+              false (reverse (sort kinds))))))
 
 (defn- infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
@@ -11581,9 +11646,19 @@
         (let [value (rewrite-record-projection (first args) locals signatures schemas)
               option-type (try (infer-expression-type value locals signatures)
                                (catch #?(:clj Exception :cljs :default) _ nil))]
-          (if (option-vector-type? option-type)
+          (cond
+            (option-vector-type? option-type)
             (list 'option-some?-of option-type value)
-            (list 'option-some? value)))
+            ;; `some?` / `nil?` on a :document ask its run-time kind (gap 3,
+            ;; adr-2609242330): absent is the :null node.
+            (and (= :document option-type)
+                 (contains? '#{some? nil?} (:kotoba.diag/source-head (meta form))))
+            (let [tmp (synthetic "type-predicate")]
+              (list 'let [tmp value]
+                    (rewrite-record-projection
+                     (list 'bool-not (list '= (list 'document-kind tmp) :null))
+                     (assoc locals tmp :document) signatures schemas)))
+            :else (list 'option-some? value)))
 
         (= op 'option-value)
         (let [value (rewrite-record-projection (first args) locals signatures schemas)
@@ -12360,11 +12435,21 @@
 
         (and (contains? library-predicate-heads op) (not (contains? signatures op)))
         (let [operand (rewrite-record-projection (first args) locals signatures schemas)
-              answer (library-predicate-answer!
-                      op (infer-expression-type operand locals signatures) operand)]
+              operand-type (infer-expression-type operand locals signatures)
+              answer (library-predicate-answer! op operand-type operand)]
           ;; A constant answer still evaluates the operand (it may be a call
-          ;; that traps); `do` keeps it, and keeps the result a form.
-          (if (= :operand answer) operand (list 'do operand answer)))
+          ;; that traps); `do` keeps it, and keeps the result a form. A
+          ;; document is bound once and asked its kind.
+          (case answer
+            :operand operand
+            :negated (list 'bool-not operand)
+            :present (option-presence-test operand operand-type)
+            :document (let [tmp (synthetic "type-predicate")]
+                        (list 'let [tmp operand]
+                              (rewrite-record-projection
+                               (library-predicate-document-test op tmp)
+                               (assoc locals tmp :document) signatures schemas)))
+            (list 'do operand answer)))
 
         (contains? type-directed-numeric-heads op)
         (let [rewritten (mapv #(rewrite-record-projection % locals signatures schemas) args)
