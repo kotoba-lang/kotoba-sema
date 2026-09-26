@@ -10417,6 +10417,27 @@
          (infer-expression-type-impl form locals signatures))
        (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
 
+(defn- record-get-default-type
+  "`(get r :k d)` / `(:k r d)` on a record (ADR 0353 floor :literal-typing).
+  A record is closed, so whether it has :k is known here: a field it lacks
+  answers the default (lowered `(do r d)`), a field it has answers the field
+  and the default must be the field's type -- no coercion. The default of a
+  field that is present is never evaluated, so it must be a literal or a
+  local: anything else is refused by name rather than silently dropped."
+  [descriptor key default form locals signatures]
+  (let [default-type (infer-expression-type default locals signatures)]
+    (if-let [field-type (record-field-type descriptor key)]
+      (do (require-expression-type! default-type field-type default)
+          (when-not (or (symbol? default) (keyword? default) (string? default)
+                        (boolean? default) (kotoba-integer? default)
+                        (value/f64-value? default))
+            (reject! (str "the default of " (pr-str key) " on record " (second descriptor)
+                          " is never evaluated, because the record has that field:"
+                          " write the default as a literal or a local")
+                     form :kotoba.error/record-projection-unresolved))
+          field-type)
+      default-type)))
+
 (defn- infer-expression-type-impl [form locals signatures]
   (cond
     (kotoba-integer? form) :i64
@@ -10797,6 +10818,9 @@
                    (nth value-type 2) default)
                   (nth value-type 2))
                 [:option (nth value-type 2)]))
+
+            (and (record-type? descriptor) (= 3 (count args)) (keyword? key))
+            (record-get-default-type descriptor key default form locals signatures)
 
             (record-type? descriptor)
             (do
@@ -12257,6 +12281,12 @@
               (if (= 3 (count rewritten-args))
                 (list 'option-value-of [:option (nth value-type 2)] lookup default)
                 lookup))
+
+            (and (record-type? descriptor) (= 3 (count rewritten-args)) (keyword? key))
+            (do (record-get-default-type descriptor key default form locals signatures)
+                (if (record-field-type descriptor key)
+                  (list 'record-get descriptor value key)
+                  (list 'do value default)))
 
             (record-type? descriptor)
             (do
