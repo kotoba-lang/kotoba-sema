@@ -12657,14 +12657,18 @@
 ;; merge of it -- is a row too (floor :row-operations, `row-operated?`); the
 ;; fields dissoc / select-keys name are fields it reads.
 ;;
-;; Cut of this slice, each keeping the refusal it had (floor
-;; :row-unification): loop helpers and fn literals are not generic (a loop
-;; over a row parameter), a parameter that is only returned beside a row
-;; (`(if c m n)`) is not unified into it, and a keyword map literal passed to
-;; a row is still the keyword->i64 map, not that row's record. A
-;; specialization's definition CID is its own KIR's, which
-;; already seals the record it was specialized at (floor
-;; :specialization-identity derives it from the generic's).
+;; Floor :row-unification: a loop helper (and so a fn literal a reduce / map
+;; lowers to one) is generic with its function; two parameters that are the
+;; branches of one `if` are one row (`row-joins`), and a call passing them two
+;; record types is refused by name; a keyword map literal WRITTEN as a row
+;; argument is that row's record (`row-map-literal-record`); a slot's reads
+;; include what the rows it is passed on to read, so a missing field is
+;; refused at the outermost call. A literal bound by `let` before it is passed
+;; is still the keyword->i64 map, and a vector literal of records is still
+;; typed from its source alone (floor :literal-typing). A specialization's
+;; definition CID is its own KIR's, which already seals the record it was
+;; specialized at (floor :specialization-identity derives it from the
+;; generic's).
 
 (def ^:private row-binding-heads
   "Desugared heads that bind names in their arguments. Inside them the walk
@@ -12687,6 +12691,31 @@
                     (contains? (row-symbols-in (drop 3 x)) param)))))
     (tree-seq coll? seq form))))
 
+(defn- row-if-branches
+  "The bare symbols FORM may evaluate to through `if` branches: `(if c m (if d
+  n o))` is #{m n o}. Anything else is itself when a symbol."
+  [form]
+  (cond
+    (simple-symbol? form) #{form}
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (into (row-if-branches (nth form 2)) (row-if-branches (nth form 3)))
+    :else #{}))
+
+(defn- row-joins
+  "The parameters PARAM is joined with in FORM: another parameter among
+  PARAMS that is a branch of the same `if` (`(if c m n)` joins m and n --
+  both branches have one type, so a parameter returned beside a row is that
+  row, floor :row-unification)."
+  [param params form]
+  (let [params (set params)]
+    (into #{}
+          (mapcat (fn [x]
+                    (when (and (seq? x) (= 'if (first x)) (= 4 (count x)))
+                      (let [branches (row-if-branches x)]
+                        (when (contains? branches param)
+                          (filter params (disj branches param)))))))
+          (tree-seq coll? seq form))))
+
 (defn- row-field-reads
   "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`,
   and the fields `(dissoc PARAM :k ..)` / `(select-keys PARAM :k ..)` name
@@ -12696,7 +12725,11 @@
         (mapcat (fn [x]
                   (cond
                     (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
-                         (= param (second x)) (keyword? (nth x 2)))
+                         (keyword? (nth x 2))
+                         (or (= param (second x))
+                             ;; `(:k (if c m n))` reads :k off both branches
+                             ;; (floor :row-unification).
+                             (contains? (row-if-branches (second x)) param)))
                     [(nth x 2)]
                     (and (seq? x) (contains? '#{dissoc select-keys} (first x))
                          (= param (second x)))
@@ -12776,7 +12809,13 @@
         (into {}
               (keep (fn [{:keys [name params param-types param-types-inferred body
                                  source-name loop-helper?]}]
-                      (when (and source-name (not loop-helper?) (seq param-types-inferred))
+                      ;; A loop helper has no written parameters at all: each
+                      ;; parameter's type was read off its one call site, so a
+                      ;; captured row parameter arrives as the provisional :i64
+                      ;; its enclosing function still has here (floor
+                      ;; :row-unification: a loop over a row parameter is
+                      ;; specialized with its function).
+                      (when (or loop-helper? (and source-name (seq param-types-inferred)))
                         [name (into {}
                                     (keep (fn [i]
                                             (let [p (nth params i)]
@@ -12787,37 +12826,74 @@
                                                                (row-pass-through p body))))
                                                 [i {:reads (row-field-reads p body)
                                                     :operated? (row-operated? p body)
-                                                    :passes (row-pass-through p body)}]))))
-                                    (sort param-types-inferred))])))
+                                                    :passes (row-pass-through p body)
+                                                    :joins (into #{}
+                                                                 (map (zipmap params (range)))
+                                                                 (row-joins p params body))}]))))
+                                    (if loop-helper?
+                                      (range (count params))
+                                      (sort param-types-inferred)))])))
               functions)]
     (loop [known {}]
       (let [next-known
             (into {}
                   (keep (fn [[fname slots]]
-                          (let [rows (into (sorted-map)
-                                           (keep (fn [[i {:keys [reads operated? passes]}]]
-                                                   (when (or (seq reads) operated?
-                                                             (some (fn [[callee j]]
-                                                                     (contains? (get known callee) j))
-                                                                   passes))
-                                                     [i reads])))
+                          (let [row? (fn [i]
+                                       (let [{:keys [reads operated? passes]} (get slots i)]
+                                         (or (seq reads) operated?
+                                             (contains? (get known fname) i)
+                                             (some (fn [[callee j]]
+                                                     (contains? (get known callee) j))
+                                                   passes))))
+                                rows (into (sorted-map)
+                                           (keep (fn [[i {:keys [reads joins]}]]
+                                                   ;; A slot joined with a row is that row, and
+                                                   ;; reads what it reads: both are one type.
+                                                   (let [joined (filter #(contains? slots %) joins)]
+                                                     (when (or (row? i) (some row? joined))
+                                                       ;; ... and what the rows it is passed on to
+                                                       ;; read, so a missing field is refused at the
+                                                       ;; outermost call, not inside a specialization.
+                                                       [i (-> reads
+                                                              (into (mapcat #(:reads (get slots %))) joined)
+                                                              (into (mapcat (fn [[callee j]]
+                                                                              (get-in known [callee j])))
+                                                                    (:passes (get slots i))))]))))
                                            slots)]
                             (when (seq rows) [fname rows]))))
                   candidates)]
         (if (= next-known known) known (recur next-known))))))
+
+(defn- row-argument-text
+  "ARG as written: a map literal the row typed (`row-map-literal-record`) is
+  shown as the literal, not as the record-new it became."
+  [arg]
+  (if (and (seq? arg) (contains? '#{record-new map-new} (first arg)))
+    (let [literal? (= 'map-new (first arg))
+          t (second arg)]
+      (if (or literal?
+              (and (record-type? t)
+                   (= map-literal-record-namespace (namespace (second t)))))
+        (str "{" (str/join " " (if literal?
+                                 (map use-site-text (rest arg))
+                                 (mapcat (fn [[k _] v] [(use-site-text k) (use-site-text v)])
+                                         (nth t 2) (drop 2 arg))))
+             "}")
+        (use-site-text arg)))
+    (use-site-text arg)))
 
 (defn- row-generic-call-refusal!
   [generic index param reads arg arg-type]
   (let [row (row-text reads)]
     (cond
       (nil? arg-type)
-      (reject! (str "argument " (use-site-text arg) " to " generic " has no type known here, and parameter "
+      (reject! (str "argument " (row-argument-text arg) " to " generic " has no type known here, and parameter "
                     param " of " generic " is the row " row
                     ": only a record satisfies a row; bind the argument to a record first")
                arg :kotoba.error/row-argument-not-record
                {:kotoba.error/function generic :kotoba.error/parameter param})
       (nil? (row-record-fields arg-type))
-      (reject! (str "argument " (use-site-text arg) " to " generic " is "
+      (reject! (str "argument " (row-argument-text arg) " to " generic " is "
                     (if (keyword? arg-type) (name arg-type) (pr-str arg-type))
                     ", and parameter " param " of " generic " is the row " row
                     ": only a record satisfies a row")
@@ -12826,12 +12902,31 @@
                 :kotoba.error/actual arg-type})
       :else
       (let [missing (first (remove (row-record-fields arg-type) reads))]
-        (reject! (str "argument " (use-site-text arg) " to " generic " is record "
+        (reject! (str "argument " (row-argument-text arg) " to " generic " is record "
                       (second arg-type) ", which has no field " missing
                       " that the row " row " of parameter " param " reads")
                  arg :kotoba.error/row-field-missing
                  {:kotoba.error/function generic :kotoba.error/parameter param
                   :kotoba.error/field missing :kotoba.error/actual arg-type})))))
+
+(defn- row-map-literal-record
+  "A keyword-keyed map literal passed to a row is that row's record, not the
+  keyword->i64 pair map (floor :row-unification): `(map-new :a 1 :b x)` in a
+  row argument is `(record-new [:record :kotoba.map-literal/a+b [[:a :i64] [:b
+  T]]] 1 x)`, T read off x. Anything else, or a literal a value of which has
+  no type known here, is returned unchanged (and refused as a map)."
+  [form type-of]
+  (if (and (seq? form) (= 'map-new (first form)) (seq (rest form))
+           (even? (count (rest form)))
+           (every? keyword? (take-nth 2 (rest form))))
+    (let [entries (partition 2 (rest form))
+          types (mapv #(type-of (second %)) entries)]
+      (if (every? some? types)
+        (list* 'record-new
+               (map-literal-record-type (mapv (fn [[k _] t] [k t]) entries types))
+               (map second entries))
+        form))
+    form))
 
 (defn- specialize-row-parameters
   "Monomorphize every row-polymorphic function at the record types its calls
@@ -12845,7 +12940,8 @@
             label (fn [g] (or (:source-name (get by-name g)) g))]
         (doseq [[g rows] generics
                 :let [f (get by-name g)]
-                :when (or (nil? exported) (contains? exported (:source-name f)))]
+                :when (and (not (:loop-helper? f))
+                           (or (nil? exported) (contains? exported (:source-name f))))]
           (let [i (ffirst rows)
                 p (nth (:params f) i)]
             (reject! (str "exported function " (label g) " has the row-polymorphic parameter " p
@@ -12911,8 +13007,14 @@
                       (let [inner (apply dissoc locals (row-symbols-in (drop 3 form)))]
                         (apply list op (map #(rw % inner table final?) args)))
                       (contains? generics op)
-                      (let [args (mapv #(rw % locals table final?) args)
-                            rows (get generics op)
+                      (let [rows (get generics op)
+                            args (vec (map-indexed
+                                       (fn [i a]
+                                         (let [a (rw a locals table final?)]
+                                           (if (contains? rows i)
+                                             (row-map-literal-record a #(arg-type % locals table))
+                                             a)))
+                                       args))
                             types (into (sorted-map)
                                         (map (fn [[i _]] [i (arg-type (nth args i) locals table)]))
                                         rows)
@@ -12920,8 +13022,29 @@
                                                (let [fields (row-record-fields t)
                                                      reads (get rows i)]
                                                  (when-not (and fields (every? fields reads)) i)))
-                                             types))]
+                                             types))
+                            params (:params (get by-name op))
+                            split (when-not bad
+                                    (first (for [[i ti] types
+                                                 j (sort (map (zipmap params (range))
+                                                              (row-joins (nth params i) params
+                                                                         (:body (get by-name op)))))
+                                                 :let [tj (get types j)]
+                                                 :when (and (< i j) tj (not= ti tj))]
+                                             [i j])))]
                         (cond
+                          (and split final?)
+                          (let [[i j] split]
+                            (reject! (str "arguments " (row-argument-text (nth args i)) " and "
+                                          (row-argument-text (nth args j)) " to " (label op)
+                                          " are " (pr-str (get types i)) " and " (pr-str (get types j))
+                                          ", and parameters " (nth params i) " and " (nth params j)
+                                          " of " (label op) " are branches of one if, so one row:"
+                                          " a row is one record type at each call")
+                                     (nth args j) :kotoba.error/row-join-mismatch
+                                     {:kotoba.error/function (label op)
+                                      :kotoba.error/parameter (nth params j)}))
+                          split (apply list op args)
                           (nil? bad) (apply list (instantiate! op types) args)
                           final? (row-generic-call-refusal!
                                   (label op) bad (nth (:params (get by-name op)) bad)
@@ -12938,8 +13061,16 @@
               infer-results (fn [fs]
                               (let [table (signatures fs)]
                                 (mapv (fn [{:keys [params param-types body result-inferred?] :as f}]
+                                        ;; The body's descriptor-less record-gets are
+                                        ;; resolved first: a specialization returning
+                                        ;; its row (`(if (> (:a m) 6) m n)`) has a
+                                        ;; record result only once `(:a m)` is typed.
                                         (if-let [t (and result-inferred?
-                                                        (arg-type body (zipmap params param-types) table))]
+                                                        (let [locals (zipmap params param-types)]
+                                                          (arg-type (try (rewrite-record-projection
+                                                                          body locals table *schemas*)
+                                                                         (catch #?(:clj Exception :cljs :default) _ body))
+                                                                    locals table)))]
                                           (assoc f :result t)
                                           f))
                                       fs)))
