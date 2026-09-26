@@ -3268,6 +3268,60 @@
     [(into (vec fixed) extras)
      (list 'let [rest-name (apply list 'list extras)] body)]))
 
+;; Absence markers (gap 1 of the selfhost foundation): see `absence-type`.
+(def ^:private absent-kind :kotoba.absence/absent)
+(def ^:private none-kind :kotoba.absence/none)
+(def ^:private nil-kind :kotoba.absence/nil)
+
+(def ^:dynamic *absence-mode*
+  "Which marker a missing else writes: :none in a function whose result is
+  inferred (an unannotated `defn`, a `fn` literal with no declared result),
+  :legacy where the author declared the result -- there a missing else beside
+  an :i64 is still the 0 it always was (`absence-type`)."
+  :legacy)
+
+(defn- absence-marker-form
+  "The marker a missing else writes here."
+  []
+  (if (= :none *absence-mode*) '(__kotoba_absent :none) '(__kotoba_absent)))
+
+(defn- absence-kind-mode [kind]
+  (get {absent-kind :legacy none-kind :none nil-kind :nil} kind))
+
+(defn- absence-marker?
+  "`(__kotoba_absent)` / `(__kotoba_absent :none)` (no else; see
+  `*absence-mode*`) or `(__kotoba_absent :nil)` (a literal nil)."
+  [form]
+  (and (seq? form) (= '__kotoba_absent (first form))))
+
+(defn- absence-kind? [type] (contains? #{absent-kind none-kind nil-kind} type))
+
+(defn- absence-in-tail?
+  "A marker in a tail position of FORM (through `if`, `let`, `do`)."
+  [form]
+  (cond
+    (absence-marker? form) true
+    (not (seq? form)) false
+    (and (= 'if (first form)) (= 4 (count form)))
+    (or (absence-in-tail? (nth form 2)) (absence-in-tail? (nth form 3)))
+    (and (= 'let (first form)) (<= 3 (count form))) (absence-in-tail? (last form))
+    (and (= 'do (first form)) (<= 2 (count form))) (absence-in-tail? (last form))
+    :else false))
+
+(defn- absence-in-body?
+  "Any absence marker anywhere in FORM."
+  [form]
+  (cond (absence-marker? form) true
+        (seq? form) (boolean (first-truthy absence-in-body? form))
+        (vector? form) (boolean (first-truthy absence-in-body? form))
+        :else false))
+
+(defn- legacy-absence
+  "What the desugar wrote before markers existed."
+  [marker]
+  (if (= :nil (second marker)) '(option-none) 0))
+
+
 (defn- lift-lambda [form]
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
@@ -3368,8 +3422,12 @@
                                                    (map vector params clause-params))
                                              *local-option-types*)]
                                    (if-let [result (or clause-result expected-result)]
-                                     (desugar-result-expr result body)
-                                     (desugar-expr body)))}))
+                                     (binding [*absence-mode* :legacy]
+                                       (desugar-result-expr result body))
+                                     ;; gap 1: a fn literal with no declared
+                                     ;; result answers absence as an option
+                                     (binding [*absence-mode* :none]
+                                       (desugar-expr body))))}))
                         clauses)
           captures (vec (sort-by str
                                  (apply set/union #{}
@@ -3983,14 +4041,17 @@
   (letfn [(lower [clauses]
             (if (empty? clauses)
               0
-              (let [[test result & remaining] clauses]
+              (let [[test result & remaining] clauses
+                    value (fn [x] (if (nil? x) '(__kotoba_absent :nil) (desugar-expr x)))]
                 (if (= :else test)
                   (do (when (seq remaining)
                         (reject! "cond :else clause must be last" form))
-                      (desugar-expr result))
+                      (value result))
                   (list 'if (desugar-bool-expr test)
-                        (desugar-expr result)
-                        (lower remaining))))))]
+                        (value result)
+                        ;; no :else is absence (`absence-type`); an empty
+                        ;; cond stays the 0 it always was
+                        (if (seq remaining) (lower remaining) (absence-marker-form)))))))]
     (lower args)))
 
 (defn- desugar-condp
@@ -4361,6 +4422,57 @@
        (= 2 (count type))
        (= :option (first type))))
 
+;; ── expression-level absence (gap 1 of the selfhost foundation) ─────────────
+;;
+;; superproject adr-2609242330, amu ladder floor :expression-absence. A `when`
+;; (or an `if` / `if-not` / `when-not` / `when-let` / `if-let` / `when-some` /
+;; `if-some` / `cond`) with no else, and a literal `nil` in a branch, answer
+;; nothing on that path. Until 2026-09-26 the desugar wrote the i64 `0` there
+;; (and `nil` was `(option-none)`, the i64 option), so every such form whose
+;; present value was not an i64 was refused -- "if branches must have the same
+;; value type", or "loop exits with two different value types: bool ... and
+;; i64 from 0", the second selfhost wall (first-truthy).
+;;
+;; The desugar now writes a MARKER and the type of the present branch decides:
+;;
+;;   present :i64, no else   -> 0, exactly as before (CID-stable; pinned by
+;;                              the :absence gate `(+ (when o 100) ...)`)
+;;   present :bool           -> false (nil and false are both logical false)
+;;   present [:option T]     -> that option's none (flattened, as Clojure's
+;;                              nil-punning reads it)
+;;   present T, anything else-> [:option T]: the present value is wrapped
+;;                              `(option-some-of [:option T] v)` and the absent
+;;                              path is `(option-none-of [:option T])`
+;;   a literal nil beside :i64 -> [:option :i64]; beside :option-i64 or
+;;                              [:option :i64] -> `(option-none)`, as before
+;;
+;; When nothing can type the present branch the marker becomes exactly what
+;; the desugar used to write (0, or `(option-none)` for a literal nil), so a
+;; program this change cannot type means what it meant before.
+(defn- absence-type
+  "The type of an `if` whose one path is absent and whose other path has type
+  PRESENT. MODE is the marker's: :legacy, :none or :nil (`absence-marker`)."
+  [present mode]
+  (cond
+    (or (nil? present) (absence-kind? present) (= abort-bottom present))
+    (if (or (= :nil mode) (= nil-kind present)) :option-i64
+        (if (or (= :none mode) (= none-kind present)) [:option :i64] :i64))
+    (= :i64 present) (if (= :legacy mode) :i64 [:option :i64])
+    (= :bool present) :bool
+    (or (option-vector-type? present) (= :option-i64 present)) present
+    :else [:option present]))
+
+(defn- lenient-branch-join
+  "Inside the present branch of an absence, `(if c v (recur ...))` joins a
+  value of type T with the loop's [:option T] answer: the value is the
+  present answer, wrapped when the marker is resolved. Nil when the two do
+  not meet that way."
+  [a b]
+  (cond
+    (and (option-vector-type? b) (= a (second b))) b
+    (and (option-vector-type? a) (= b (second a))) a
+    :else nil))
+
 (defn- resolve-option-type
   "Best-effort option type for sugar lowering (Product Value ABI v1).
 
@@ -4455,7 +4567,8 @@
           then-form (if when?
                       (if (= 1 (count bodies)) (first bodies) (cons 'do bodies))
                       (first bodies))
-          else-form (if when? 0 (if (= 2 (count bodies)) (second bodies) 0))]
+          else-form (if when? (absence-marker-form)
+                        (if (= 2 (count bodies)) (second bodies) (absence-marker-form)))]
       ;; ADR 0353 floor :absence: over an `[:option T]` the test is presence
       ;; and the pattern binds the payload. Which one this is is known only
       ;; once the value has a type, so `rewrite-record-projection` resolves
@@ -4487,7 +4600,8 @@
           then-form (if when?
                       (if (= 1 (count bodies)) (first bodies) (desugar-do bodies))
                       (first bodies))
-          else-form (if when? 0 (if (= 2 (count bodies)) (second bodies) 0))
+          else-form (if when? (absence-marker-form)
+                        (if (= 2 (count bodies)) (second bodies) (absence-marker-form)))
           payload-type (when (and (vector? option-type) (= :option (first option-type)))
                          (second option-type))
           fallback (option-payload-fallback payload-type)]
@@ -5947,6 +6061,8 @@
 
 (defn- desugar-expr* [form contextual-result-type]
   (cond
+    ;; An absence marker is already desugared (see `absence-type`).
+    (absence-marker? form) form
     ;; A closed EDN-shaped value in a :document context is already fully
     ;; typed by its consumer. Elaborate it directly so authors do not have to
     ;; wrap ordinary data in document syntax. The predicate deliberately
@@ -6189,10 +6305,14 @@
                (desugar-list args form))
         fn (binding [*contextual-closure-result-type* contextual-result-type]
              (lift-lambda form))
+        ;; A literal nil branch is absence: a marker the other branch's type
+        ;; resolves (`absence-type`). The 2-arity `if` stays refused
+        ;; (`if-parts`); `when` is the form with no else.
         if (apply list 'if
                   (map-indexed (fn [index arg]
                                  (cond
                                    (zero? index) (desugar-bool-expr arg)
+                                   (nil? arg) '(__kotoba_absent :nil)
                                    contextual-result-type
                                    (desugar-result-expr contextual-result-type arg)
                                    :else (desugar-expr arg)))
@@ -6616,10 +6736,11 @@
                      (reject! "if-not requires then and optional else expressions" form))
                    ;; Negate by swapping the branches, not by `(= test 0)` —
                    ;; the test may now be `:bool`.
-                   (let [[test then else] args]
+                   (let [[test then else] args
+                         branch (fn [x] (if (nil? x) '(__kotoba_absent :nil) (desugar-expr x)))]
                      (list 'if (desugar-bool-expr test)
-                           (if (= 3 (count args)) (desugar-expr else) 0)
-                           (desugar-expr then))))
+                           (if (= 3 (count args)) (branch else) (absence-marker-form))
+                           (branch then))))
         when-not (do (when (empty? args)
                        (reject! "when-not requires a test expression" form))
                      (let [[test & body] args
@@ -6627,15 +6748,17 @@
                                   (empty? body) 0
                                   (= 1 (count body)) (desugar-expr (first body))
                                   :else (list* 'do (mapv desugar-expr body)))]
-                       ;; Negate by swapping the branches (see if-not).
-                       (list 'if (desugar-bool-expr test) 0 then)))
+                       ;; Negate by swapping the branches (see if-not). No
+                       ;; else is absence (`absence-type`).
+                       (list 'if (desugar-bool-expr test) (absence-marker-form) then)))
         when (do (when (empty? args)
                    (reject! "when requires a test expression" form))
                  (let [[test & body] args
                        then (if (= 1 (count body))
                               (desugar-expr (first body))
                               (list* 'do (mapv desugar-expr body)))]
-                   (list 'if (desugar-bool-expr test) then 0)))
+                   ;; No else is absence (`absence-type`), not the i64 0.
+                   (list 'if (desugar-bool-expr test) then (absence-marker-form))))
         get (do (when-not (<= 2 (count args) 3)
                   (reject! "get requires a value, a key, and an optional default" form))
                 ;; Keep the authored head until the type-directed rewrite can
@@ -10277,8 +10400,18 @@
 
 (declare infer-expression-type-impl)
 
+(def ^:dynamic *absence-tail*
+  "True while inferring a tail of the present branch of an absence (see
+  `absence-type`): only there does `lenient-branch-join` apply."
+  false)
+
 (defn- infer-expression-type [form locals signatures]
-  (try (infer-expression-type-impl form locals signatures)
+  (try (if (and *absence-tail*
+                (not (and (seq? form) (contains? '#{if let do} (first form)))))
+         ;; Leniency reaches only the tail positions `if` / `let` / `do`
+         ;; thread; every other form is typed as before.
+         (binding [*absence-tail* false] (infer-expression-type-impl form locals signatures))
+         (infer-expression-type-impl form locals signatures))
        (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
 
 (defn- infer-expression-type-impl [form locals signatures]
@@ -10297,7 +10430,8 @@
         let (let [bindings (first args) body (let-body args form)]
               (loop [pairs (partition 2 bindings) current locals]
                 (if-let [[name value] (first pairs)]
-                  (let [type (infer-expression-type value current signatures)
+                  (let [type (binding [*absence-tail* false]
+                               (infer-expression-type value current signatures))
                         type (if (bounded-vector-source-binding? name)
                                (do (require-expression-type! type :vector-i64 value)
                                    :vector-i64)
@@ -10309,10 +10443,36 @@
                            (local-state-check-cell-type!
                             name type (assoc current name type) form)))
                   (infer-expression-type body current signatures))))
+        __kotoba_absent (case (first args) :nil nil-kind :none none-kind absent-kind)
+        ;; `if-let` / `when-let`'s binding before `rewrite-record-projection`
+        ;; resolves it (`option-present-value`): an option's payload, or the
+        ;; value itself. Typed here so a function whose result passes through
+        ;; one has a result before the rewrite (gap 1: `(when-let [x o] v)`).
+        __kotoba_present (let [t (infer-expression-type (first args) locals signatures)]
+                           (cond (option-vector-type? t) (second t)
+                                 (= :option-i64 t) :i64
+                                 :else t))
         if (let [[test then else] args
-                 test-type (infer-expression-type test locals signatures)
-                 then-type (infer-expression-type then locals signatures)
-                 else-type (infer-expression-type else locals signatures)]
+                 tail? *absence-tail*
+                 absent-then? (absence-in-tail? then)
+                 absent-else? (absence-in-tail? else)
+                 test-type (binding [*absence-tail* false]
+                             (infer-expression-type test locals signatures))
+                 ;; The present branch of an absence is read leniently: an
+                 ;; inner `(if c v (recur ...))` meets v's T with the loop's
+                 ;; [:option T] (`lenient-branch-join`).
+                 then-type (binding [*absence-tail* (or tail? absent-else?)]
+                             (infer-expression-type then locals signatures))
+                 else-type (binding [*absence-tail* (or tail? absent-then?)]
+                             (infer-expression-type else locals signatures))
+                 ;; ADR 0353 floor :absence: an option test is presence.
+                 ;; `rewrite-record-projection` turns it into the :bool
+                 ;; presence test (`option-presence-test`); until then it is
+                 ;; typed as the :bool it becomes, so a function whose result
+                 ;; passes through `if-let` / `when-let` has a result before
+                 ;; the rewrite and its callers can be typed against it.
+                 test-type (if (or (option-vector-type? test-type) (= :option-i64 test-type))
+                             :bool test-type)]
              ;; ADR 0353 floor :bool-predicates: numbers are never truthy.
              ;; An option test never reaches here (it is presence, rewritten
              ;; by `option-presence-test`), and no predicate answers a number
@@ -10326,11 +10486,19 @@
              ;; A branch that aborts has no value, so the other branch's type is
              ;; the `if`'s. Two aborting branches make the `if` itself bottom.
              (cond
+               (absence-kind? else-type) (absence-type then-type (absence-kind-mode else-type))
+               (absence-kind? then-type) (absence-type else-type (absence-kind-mode then-type))
                (= then-type abort-bottom) else-type
                (= else-type abort-bottom) then-type
                (= then-type else-type) then-type
+               (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
+               (lenient-branch-join then-type else-type)
                :else (reject! "if branches must have the same value type" form)))
-        do (last (mapv #(infer-expression-type % locals signatures) args))
+        do (let [tail? *absence-tail*]
+             (last (map-indexed (fn [index arg]
+                                  (binding [*absence-tail* (and tail? (= index (dec (count args))))]
+                                    (infer-expression-type arg locals signatures)))
+                                args)))
         ;; State ability, slice 1: an operation resolved to its handler has
         ;; that handler's state type; `put` takes one. A handle has its body's
         ;; type, and its initial state must be the handler's.
@@ -11295,11 +11463,35 @@
                                      [form (infer-expression-type form form-locals signatures)]))
                               (remove #(= abort-bottom (second %))))
                         (loop-exit-forms marked locals signatures))
-            first-type (second (first typed))
-            disagreeing (first (remove #(same-expression-type? (second %) first-type) typed))]
+            ;; Gap 1 (`absence-type`): an exit that answers nothing -- a
+            ;; `when` with no else, a literal nil -- is not a value to agree
+            ;; with. The others agree among themselves (a value of T beside
+            ;; the loop's own [:option T] is its present answer), and the
+            ;; absence decides the loop's type from theirs.
+            absent (filter #(absence-kind? (second %)) typed)
+            typed (if (seq absent) (vec (remove #(absence-kind? (second %)) typed)) typed)
+            present-type (when (seq absent)
+                           (reduce (fn [joined [_ type]]
+                                     (cond (nil? joined) type
+                                           (same-expression-type? type joined) joined
+                                           :else (or (lenient-branch-join joined type) joined)))
+                                   nil typed))
+            first-type (if (seq absent)
+                         (absence-type present-type
+                                       (let [kinds (set (map second absent))]
+                                         (cond (contains? kinds nil-kind) :nil
+                                               (contains? kinds none-kind) :none
+                                               :else :legacy)))
+                         (second (first typed)))
+            disagreeing (first (remove #(or (same-expression-type? (second %) first-type)
+                                            (and (seq absent)
+                                                 (or (= [:option (second %)] first-type)
+                                                     (and (option-vector-type? first-type)
+                                                          (= (second first-type) (second %))))))
+                                       typed))]
         (cond
           ;; Every tail is a `recur`: the loop has no exit to read a type from.
-          (empty? typed) nil
+          (and (empty? typed) (empty? absent)) nil
 
           disagreeing
           (reject! (str "loop exits with two different value types: "
@@ -11508,6 +11700,185 @@
     (= :option-i64 value-type) (list 'option-value value 0)
     :else value))
 
+;; ── resolving absence markers (gap 1; see `absence-type`) ────────────────────
+
+(defn- absence-none
+  "What an absent path is once the `if` is known to have TYPE."
+  [marker type]
+  (cond
+    (= :i64 type) 0
+    (= :bool type) false
+    (= :option-i64 type) '(option-none)
+    (option-vector-type? type) (list 'option-none-of type)
+    :else (legacy-absence marker)))
+
+(defn- absence-leaves
+  "FORM with each tail leaf made a value of TYPE: a marker is TYPE's none, a
+  value of T is wrapped when TYPE is [:option T], anything else is left for
+  the type check that follows."
+  [form type locals signatures]
+  (cond
+    (absence-marker? form) (absence-none form type)
+
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (nth form 1)
+                     (absence-leaves (nth form 2) type locals signatures)
+                     (absence-leaves (nth form 3) type locals signatures))
+      (meta form))
+
+    (and (seq? form) (= 'let (first form)) (= 3 (count form)) (vector? (second form)))
+    (let [locals' (reduce (fn [current [name value]]
+                            (assoc current name
+                                   (try (infer-expression-type value current signatures)
+                                          (catch #?(:clj Exception :cljs :default) _ nil))))
+                          locals (partition 2 (second form)))]
+      (with-meta (list 'let (second form) (absence-leaves (nth form 2) type locals' signatures))
+        (meta form)))
+
+    (and (seq? form) (= 'do (first form)) (<= 2 (count form)))
+    (with-meta (concat (butlast form) [(absence-leaves (last form) type locals signatures)])
+      (meta form))
+
+    (and (option-vector-type? type) (not (option-vector-type? (second type))))
+    (let [leaf-type (try (infer-expression-type form locals signatures)
+                           (catch #?(:clj Exception :cljs :default) _ nil))]
+      (if (and (some? leaf-type) (same-expression-type? leaf-type (second type)))
+        (list 'option-some-of type form)
+        form))
+
+    :else form))
+
+(defn- absence-tails-legacy
+  "FORM with each tail marker what the desugar used to write."
+  [form]
+  (cond
+    (absence-marker? form) (legacy-absence form)
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (nth form 1) (absence-tails-legacy (nth form 2))
+                     (absence-tails-legacy (nth form 3)))
+      (meta form))
+    (and (seq? form) (contains? '#{let do} (first form)) (<= 2 (count form)))
+    (with-meta (concat (butlast form) [(absence-tails-legacy (last form))]) (meta form))
+    :else form))
+
+(defn- resolve-absence-if
+  "An `if` whose children are already resolved: when one of its tails is an
+  absence marker, the `if`'s type decides every tail (`absence-type`). Left
+  as it is when nothing here can type it. STATEMENT? is true when the value is
+  dropped (a non-final `do` form): an :i64 absence there is written as it
+  always was, so a statement's code does not change."
+  ([form locals signatures] (resolve-absence-if form locals signatures false))
+  ([form locals signatures statement?]
+   (if-not (and (seq? form) (= 'if (first form)) (= 4 (count form))
+                (or (absence-in-tail? (nth form 2)) (absence-in-tail? (nth form 3))))
+     form
+     (let [type (try (infer-expression-type form locals signatures)
+                       (catch #?(:clj Exception :cljs :default) _ nil))]
+       (cond
+         (or (nil? type) (absence-kind? type) (= abort-bottom type)) form
+         (and statement? (contains? #{:i64 [:option :i64]} type)) (absence-tails-legacy form)
+         :else (absence-leaves form type locals signatures))))))
+
+(declare resolve-absences)
+
+(defn- resolve-absence-non-tails
+  "FORM, an absence root, with everything that is not one of its tails
+  resolved (a test, a `let` binding, a statement, a call's arguments)."
+  [form locals signatures]
+  (cond
+    (absence-marker? form) form
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (resolve-absences (nth form 1) locals signatures false)
+                     (resolve-absence-non-tails (nth form 2) locals signatures)
+                     (resolve-absence-non-tails (nth form 3) locals signatures))
+      (meta form))
+    (and (seq? form) (= 'let (first form)) (vector? (second form)) (= 3 (count form)))
+    (let [[pairs locals']
+          (reduce (fn [[acc current] [name value]]
+                    (let [v (resolve-absences value current signatures false)]
+                      [(conj acc name v)
+                       (assoc current name
+                              (try (infer-expression-type v current signatures)
+                                     (catch #?(:clj Exception :cljs :default) _ nil)))]))
+                  [[] locals] (partition 2 (second form)))]
+      (with-meta (list 'let pairs (resolve-absence-non-tails (nth form 2) locals' signatures))
+        (meta form)))
+    (and (seq? form) (= 'do (first form)) (<= 2 (count form)))
+    (with-meta (apply list 'do
+                      (concat (mapv #(resolve-absences % locals signatures true) (butlast (rest form)))
+                              [(resolve-absence-non-tails (last form) locals signatures)]))
+      (meta form))
+    :else (resolve-absences form locals signatures false)))
+
+(defn- resolve-absences
+  "Resolve every absence marker in FORM, innermost `if` first, threading `let`
+  locals. STATEMENT? marks FORM's tails as a dropped value. Markers nothing
+  can type are left for `rewrite-record-projection` and, after it, for
+  `retire-absence-markers`."
+  ([form locals signatures] (resolve-absences form locals signatures false))
+  ([form locals signatures statement?]
+   (cond
+     (not (seq? form)) form
+     (absence-marker? form) form
+     (and (= 'let (first form)) (vector? (second form)) (= 3 (count form)))
+     (let [[pairs locals']
+           (reduce (fn [[acc current] [name value]]
+                     (let [v (resolve-absences value current signatures false)]
+                       [(conj acc name v)
+                        (assoc current name
+                               (try (infer-expression-type v current signatures)
+                                      (catch #?(:clj Exception :cljs :default) _ nil)))]))
+                   [[] locals] (partition 2 (second form)))]
+       (with-meta (list 'let pairs (resolve-absences (nth form 2) locals' signatures statement?))
+         (meta form)))
+     (and (= 'do (first form)) (<= 2 (count form)))
+     (with-meta (apply list 'do
+                       (concat (mapv #(resolve-absences % locals signatures true) (butlast (rest form)))
+                               [(resolve-absences (last form) locals signatures statement?)]))
+       (meta form))
+     ;; An absence ROOT: the outermost `if` whose tails hold a marker. Its
+     ;; tails share one type (`(cond a :one b :two)` wraps both keywords), so
+     ;; what is not a tail is resolved first and then the root as a whole.
+     (and (= 'if (first form)) (= 4 (count form)) (absence-in-tail? form))
+     (resolve-absence-if (resolve-absence-non-tails form locals signatures)
+                         locals signatures statement?)
+     (and (= 'if (first form)) (= 4 (count form)))
+     (with-meta (list 'if (resolve-absences (nth form 1) locals signatures false)
+                      (resolve-absences (nth form 2) locals signatures statement?)
+                      (resolve-absences (nth form 3) locals signatures statement?))
+       (meta form))
+     :else
+     (with-meta (apply list (map #(resolve-absences % locals signatures false) form))
+       (meta form)))))
+
+(defn- absence-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result result}]))
+        functions))
+
+(defn- resolve-function-absences
+  "Every function body, once result inference has run (so a call's type is
+  known) and before abort elaboration moves tails into result values."
+  [functions]
+  (if-not (first-truthy #(absence-in-body? (:body %)) functions)
+    functions
+    (let [signatures (absence-signatures functions)]
+      (mapv (fn [{:keys [params param-types] :as f}]
+              (update f :body resolve-absences
+                      (zipmap params (or param-types (repeat nil))) signatures))
+            functions))))
+
+(defn- retire-absence-markers
+  "A marker nothing could type means what the desugar used to write (0, or
+  `(option-none)` for a literal nil), so the type check that follows refuses
+  or admits the program exactly as before markers existed."
+  [form]
+  (cond
+    (absence-marker? form) (legacy-absence form)
+    (seq? form) (with-meta (apply list (map retire-absence-markers form)) (meta form))
+    (vector? form) (with-meta (mapv retire-absence-markers form) (meta form))
+    :else form))
+
 (defn- rewrite-record-projection
   "Type-directed rewrite: `(record-get value :field)` -> the canonical
   `(record-get SCHEMA value :field)`, recovering SCHEMA from the value's
@@ -11584,7 +11955,8 @@
         (let [[test & branches] (mapv #(rewrite-record-projection % locals signatures schemas) args)
               test-type (try (infer-expression-type test locals signatures)
                              (catch #?(:clj Exception :cljs :default) _ nil))]
-          (list* 'if (option-presence-test test test-type) branches))
+          (resolve-absence-if (list* 'if (option-presence-test test test-type) branches)
+                              locals signatures))
 
         (= op '__kotoba_present)
         (let [value (rewrite-record-projection (first args) locals signatures schemas)
@@ -18731,7 +19103,10 @@
                                                                      [(nth params index) contract]))
                                                            callable-param-contracts)
                                                      *expected-callable-contract*
-                                                     callable-result-contract]
+                                                     callable-result-contract
+                                                     ;; gap 1: a declared result keeps the
+                                                     ;; i64 stand-in for a missing else
+                                                     *absence-mode* (if result-inferred? :none :legacy)]
                                              (if (closure-result-type? result (:schemas namespace-info))
                                                (desugar-result-expr result source-body)
                                                (desugar-expr source-body)))]
@@ -18913,6 +19288,9 @@
         {parsed :functions abort-error-types :abort-error-types}
         (infer-abort-error-types parsed)
         _ (check-state-abort-interaction! parsed state-clones abort-error-types)
+        ;; Gap 1 (`absence-type`): every result type is known now, and abort
+        ;; elaboration has not yet moved tails into result values.
+        parsed (resolve-function-absences parsed)
         parsed (a-normalize-aborts parsed abort-error-types "abort_operand")
         parsed (elaborate-aborts parsed abort-error-types)
         _ (check-no-abort-before-recur! parsed)
@@ -18921,6 +19299,7 @@
         parsed (thread-state-abilities parsed state-clones @*state-handlers*)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
+        parsed (mapv #(update % :body retire-absence-markers) parsed)
         ;; `option-or` intentionally survives syntactic desugaring until the
         ;; rewrite above can infer its payload descriptor from locals and
         ;; function signatures. Re-run absent-result inference now that the

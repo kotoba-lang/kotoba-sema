@@ -25,6 +25,9 @@
             ;; the selfhost builtin gaps: library heads, type-decided
             ;; predicates, string =, conj at a loop exit, throw in a loop
             [kotoba.compiler.library-heads-test]
+            ;; gap 1 of the selfhost foundation: a missing else and a literal
+            ;; nil are absence, typed by the present branch
+            [kotoba.compiler.expression-absence-test]
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
@@ -207,6 +210,7 @@
              'kotoba.compiler.range-slots-test
              'kotoba.compiler.bytes-value-test
              'kotoba.compiler.library-heads-test
+             'kotoba.compiler.expression-absence-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
              'kotoba.compiler.defn-body-sequences-test
