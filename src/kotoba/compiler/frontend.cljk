@@ -19016,7 +19016,11 @@
 (defn- erase-callable-field-types [x]
   (letfn [(walk [x]
             (cond
-              (and (record-type? x) (first-truthy (comp callable-type? second) (nth x 2)))
+              ;; a descriptor, not a `variant-match` arm `[:record p body]`:
+              ;; its name is a keyword and its fields a vector of pairs
+              (and (record-type? x) (keyword? (second x)) (vector? (nth x 2))
+                   (every? #(and (vector? %) (= 2 (count %))) (nth x 2))
+                   (first-truthy (comp callable-type? second) (nth x 2)))
               (assoc x 2 (mapv (fn [[field type]]
                                  [field (if (callable-type? type) :i64 (walk type))])
                                (nth x 2)))
