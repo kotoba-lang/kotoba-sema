@@ -175,7 +175,13 @@
     ;; supervisor's Vulkan mechanism. Its own capability -- not a form of
     ;; :fs/app-data though MAP/PIPELINE name a path: the grant is "run compute
     ;; and read back", and a file grant must not carry that.
-    :gpu/compute 42})
+    :gpu/compute 42
+    ;; net/listen .. net/write (kotoba-lang, root ADR-2609261900 stage B):
+    ;; native TCP, wires 43..47, one authority per direction (as
+    ;; :stream/accept / :stream/send). `:string -> :string`; the kexe loader
+    ;; answers them as a broker -- its supervisor owns the sockets and the
+    ;; guest's sandbox is not widened.
+    :net/listen 43 :net/accept 44 :net/dial 45 :net/read 46 :net/write 47})
 
 (defn- load-capability-catalog []
   #?(:clj
