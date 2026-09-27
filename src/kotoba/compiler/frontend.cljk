@@ -3103,9 +3103,18 @@
 
 (defn- desugar-expected-value [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
-    (if (closure-result-type? result-type {})
+    (cond
+      (closure-result-type? result-type {})
       (desugar-result-expr result-type form)
-      (desugar-expr form))))
+      ;; ADR 0353 floor :function-values: a `fn` written where a `[:fn ...]`
+      ;; record field is declared is lifted under that contract -- its
+      ;; parameters take the clause's types and it joins that dispatcher
+      ;; family, exactly as a `fn` argument in a contract-typed parameter
+      ;; position does (`desugar-ordinary-call`).
+      (and (callable-type? result-type) (seq? form) (= 'fn (first form)))
+      (binding [*expected-callable-contract* result-type]
+        (desugar-expr form))
+      :else (desugar-expr form))))
 
 (defn- desugar-tail-expressions [result-type forms]
   (let [last-index (dec (count forms))]
@@ -9296,6 +9305,22 @@
                form :kotoba.error/subset-reject
                {:kotoba.error/expected expected :kotoba.error/actual actual}))))
 
+(defn- closure-literal-form?
+  "The shape a lifted `fn` lowers to, `(pair <lambda-id> <captures>)`. Only
+  the shape: `infer-closure-refinements`, which knows the module's lambda
+  ids, refuses a `[:fn ...]` field given anything that is not a closure."
+  [form]
+  (and (seq? form) (= 'pair (first form)) (= 3 (count form))
+       (kotoba-integer? (second form))))
+
+(defn- require-field-value-type!
+  "A record field's value against the field's declared type. A `[:fn ...]`
+  field takes a fn literal, whose word is the i64 closure handle (ADR 0353
+  floor :function-values)."
+  [actual expected item form]
+  (when-not (and (callable-type? expected) (= :i64 actual) (closure-literal-form? item))
+    (require-expression-type! actual expected form)))
+
 (declare infer-expression-type)
 
 (def ^:dynamic *numeric-resolution-final*
@@ -11080,8 +11105,8 @@
               fields (nth type 2)]
           (validate-value-type! type)
           (doseq [[[field field-type] item] (map vector fields values)]
-            (require-expression-type! (infer-expression-type item locals signatures)
-                                      field-type field))
+            (require-field-value-type! (infer-expression-type item locals signatures)
+                                       field-type item field))
           type)
         record-get
         (let [[type value field] args
@@ -11090,7 +11115,9 @@
                                (nth type 2))]
           (validate-value-type! type)
           (require-expression-type! (infer-expression-type value locals signatures) type value)
-          field-type)
+          ;; a `[:fn ...]` field is read as the closure handle it holds; the
+          ;; closure analysis (`infer-closure-refinements`) knows it is one
+          (if (callable-type? field-type) :i64 field-type))
         record-assoc
         (let [[type value field replacement] args
               field-type (first-truthy (fn [[declared-field declared-type]]
@@ -11098,8 +11125,8 @@
                                (nth type 2))]
           (validate-value-type! type)
           (require-expression-type! (infer-expression-type value locals signatures) type value)
-          (require-expression-type! (infer-expression-type replacement locals signatures)
-                                    field-type replacement)
+          (require-field-value-type! (infer-expression-type replacement locals signatures)
+                                     field-type replacement replacement)
           type)
         record-equal
         (let [[type left right] args]
@@ -15329,6 +15356,46 @@
        (re-matches #"__kotoba_invoke(?:_.+)?\$arity[0-4]"
                    (str function-name)))))
 
+(defn- callable-field-read?
+  "`(record-get T v :f)` where T declares :f as `[:fn ...]`."
+  [form]
+  (and (seq? form) (= 'record-get (first form)) (= 4 (count form))
+       (let [type (canonical-closure-result-type (second form))]
+         (and (record-type? type)
+              (callable-type? (record-field-type type (nth form 3)))))))
+
+(defn- callable-field-values
+  "The values a `record-new` / `record-assoc` form stores in `[:fn ...]`
+  fields."
+  [form]
+  (when (seq? form)
+    (let [[op type & args] form
+          type (when (contains? '#{record-new record-assoc} op)
+                 (canonical-closure-result-type type))]
+      (when (record-type? type)
+        (case op
+          record-new (keep (fn [[[_ field-type] value]]
+                             (when (callable-type? field-type) value))
+                           (map vector (nth type 2) args))
+          record-assoc (let [[_ field replacement] args]
+                         (when (callable-type? (record-field-type type field))
+                           [replacement])))))))
+
+(defn- generated-empty-test?
+  "`(= __kotoba_... 0)`: the empty test a lazy sequence's desugaring writes."
+  [form]
+  (and (seq? form) (= '= (first form)) (= 3 (count form))
+       (let [[a b] (rest form)
+             generated? #(and (symbol? %) (str/starts-with? (str %) "__kotoba_"))
+             zero? #(and (kotoba-integer? %) (zero? %))]
+         (or (and (generated? a) (zero? b)) (and (zero? a) (generated? b))))))
+
+(def ^:private closure-number-operations
+  "The operations that read a word as a number, which a closure handle is not
+  (ADR 0353 floor :function-values)."
+  (into (set/union arithmetic comparisons)
+        (concat (keys i64-operations) (keys i32-operations))))
+
 (defn- infer-closure-refinements
   "Infer checked closure positions without adding a public closure value type.
 
@@ -15450,6 +15517,10 @@
                         :unknown))
 
                     (and (= op 'quot) (= args '(1 0))) :trap
+
+                    ;; a `[:fn ...]` record field holds a closure (ADR 0353
+                    ;; floor :function-values)
+                    (callable-field-read? form) :closure
 
                     :else
                     (let [arg-statuses (mapv #(expression-status
@@ -15588,6 +15659,53 @@
                   (reject! "closure refinement inference did not converge"
                            {:iterations iteration})
                   :else (recur next-facts (inc iteration)))))]
+        ;; ADR 0353 floor :function-values: a closure is a function, not a
+        ;; number. Its word stays the one-word i64 handle every dispatcher
+        ;; takes, so the refusal is made where the analysis above knows the
+        ;; word is a closure: a let-bound fn, a call whose result is one
+        ;; (a `[:fn ...]` result contract), a `[:fn ...]` record field.
+        (letfn [(refuse-closure-operands! [function-name form env param-indexes]
+                  (when (seq? form)
+                    (let [[op & args] form]
+                      (if (= op 'let)
+                        (let [bindings (first args) body (let-body args form)]
+                          (loop [pairs (partition 2 bindings) current env]
+                            (if-let [[name value] (first pairs)]
+                              (do (refuse-closure-operands! function-name value current
+                                                            param-indexes)
+                                  (recur (next pairs)
+                                         (assoc current name {:form value :env current})))
+                              (refuse-closure-operands! function-name body current
+                                                        param-indexes))))
+                        (do
+                          (doseq [item (callable-field-values form)]
+                            (when-not (closure-literal? item)
+                              (reject! (str "a [:fn ...] record field takes a fn literal; "
+                                            "this value is not a closure (ADR 0353)")
+                                       form :kotoba.error/function-value-field)))
+                          ;; The one exemption is generated: a lazy sequence is
+                          ;; a closure or 0 (empty), and its desugaring tests
+                          ;; `(= __kotoba_lazy_seq_N 0)`. `__kotoba_` is
+                          ;; reserved, so no source program reaches this.
+                          (when (and (contains? closure-number-operations op)
+                                     (not (generated-empty-test? form)))
+                            (doseq [arg args]
+                              (when (= :closure (expression-status function-name arg env
+                                                                   param-indexes facts #{}))
+                                (if (= '= op)
+                                  (reject! (str "a function value has no equality: (= f g) would "
+                                                "compare two closure handles, and equality over "
+                                                "handles stays refused (ADR 0353)")
+                                           form :kotoba.error/function-value-equality)
+                                  (reject! (str "a function value is not a number: " op
+                                                " over a closure is refused; call it instead"
+                                                " (ADR 0353)")
+                                           form :kotoba.error/function-value-arithmetic)))))
+                          (doseq [arg args]
+                            (refuse-closure-operands! function-name arg env
+                                                      param-indexes)))))))]
+          (doseq [{:keys [name params body]} functions]
+            (refuse-closure-operands! name body {} (zipmap params (range)))))
         (mapv
          (fn [{:keys [name param-types result] :as function}]
            (let [indexes (vec (sort (get-in facts [name :params] #{})))
@@ -18888,6 +19006,31 @@
   ([source] (analyze* source nil))
   ([source opts] (analyze-forms* (read-forms source) opts)))
 
+;; ADR 0353 floor :function-values. A `[:fn ...]` record field is the
+;; closure handle word below the language, as a `[:fn ...]` result or
+;; parameter contract already is (`:callable-result-contract`): the checker
+;; and `infer-closure-refinements` have used the contract, and KIR, which has
+;; no function type, receives the field as `:i64`. Returns its argument
+;; itself when nothing changed, so a module with no such field keeps its HIR
+;; -- and its definition CIDs -- exactly.
+(defn- erase-callable-field-types [x]
+  (letfn [(walk [x]
+            (cond
+              (and (record-type? x) (first-truthy (comp callable-type? second) (nth x 2)))
+              (assoc x 2 (mapv (fn [[field type]]
+                                 [field (if (callable-type? type) :i64 (walk type))])
+                               (nth x 2)))
+              (map? x) (let [y (reduce-kv (fn [m k v] (let [w (walk v)]
+                                                        (if (identical? w v) m (assoc m k w))))
+                                          x x)]
+                         y)
+              (vector? x) (let [y (mapv walk x)]
+                            (if (every? true? (map identical? x y)) x (with-meta y (meta x))))
+              (seq? x) (let [y (map walk x)]
+                         (if (every? true? (map identical? x y)) x (with-meta (apply list y) (meta x))))
+              :else x))]
+    (walk x)))
+
 (defn- analyze-forms**
   "Analyze already-read Kotoba source forms into HIR. `analyze*` is the
   text entry; `fold-def-value!` calls this one directly with the probe
@@ -19680,7 +19823,7 @@
                               true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?
                                            :state-handler :state-handler-clause)
                               (not typed-values?) (dissoc :param-types)))
-                          parsed)
+                          (mapv erase-callable-field-types parsed))
           main-result (some->> parsed (first-truthy #(when (= 'main (:name %)) (:result %))))
           named-operations (cond-> (into (sorted-set) @used-capabilities)
                              ;; The elaboration adds nothing to the effect row
@@ -19695,7 +19838,7 @@
       (hir/validate!
        {:format (if typed-values? :kotoba.hir/v3 :kotoba.hir/v2)
         :namespace (:namespace namespace-info)
-        :schemas (:schemas namespace-info)
+        :schemas (erase-callable-field-types (:schemas namespace-info))
         :schema-identities (:schema-identities namespace-info)
         :entry entry :exports (vec exports)
         :result (when entry main-result)
