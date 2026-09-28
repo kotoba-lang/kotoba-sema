@@ -11658,6 +11658,28 @@
             (round next-fs true)
             (recur next-fs (inc rounds))))))))
 
+(defn- resolve-loop-helper-signatures
+  "Settle capture parameter types and loop result types together.
+
+  A loop can return a vector which a later loop captures. In the first pass,
+  that captured call sees the earlier loop's provisional i64 result. Repeating
+  only result inference leaves the later helper's capture incorrectly typed.
+  Each pass can settle one more dependent loop; stop when signatures stabilize."
+  [functions shapes]
+  (let [helper-count (count (filter :loop-helper? functions))]
+    (loop [current functions remaining (+ helper-count 1)]
+      (let [next (-> current
+                     (resolve-loop-helper-param-types shapes)
+                     (infer-loop-helper-results shapes))
+            signature (fn [fs] (mapv (juxt :param-types :result) fs))]
+        (if (= (signature next) (signature current))
+          next
+          (if (zero? remaining)
+            (reject! "loop helper signature inference did not converge"
+                     (:body (first (filter :loop-helper? functions)))
+                     :kotoba.error/loop-signature-inference)
+            (recur next (dec remaining))))))))
+
 (defn- check-loop-recur-argument-types!
   "A `recur` argument must have the type of the binding it rebinds.
 
@@ -19547,12 +19569,7 @@
         ;; the `:param-types` defaulting above because it reads them.
         slice-parameter-functions (volatile! #{})
         parsed (erase-slice-values parsed slice-parameter-functions)
-        parsed (resolve-loop-helper-param-types parsed @loop-helper-shapes)
-        ;; ADR 0027: and then the loop-helper's RESULT, from the exits of the
-        ;; loop it was made from. Immediately after its parameter types and
-        ;; before anything reads its signature, so no later pass ever sees the
-        ;; `:i64` placeholder the desugar had to write.
-        parsed (infer-loop-helper-results parsed @loop-helper-shapes)
+        parsed (resolve-loop-helper-signatures parsed @loop-helper-shapes)
         parsed (check-loop-recur-argument-types! parsed @loop-helper-shapes)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
