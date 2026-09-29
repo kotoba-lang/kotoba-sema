@@ -170,21 +170,17 @@
          (refusal ":i64" "(:a {:a \"x\" :b nil})"))))
 
 (deftest the-field-count-is-bounded-the-way-a-defrecord-is
-  ;; Two bounds, both the language's own. The record descriptor is a value
-  ;; type and pays `max-type-nodes` (64): 3 + 3F for F scalar fields, so 20
-  ;; fields admit and 21 are refused `value type exceeds node limit` --
-  ;; measured 2026-09-11, `(defrecord R [k0 .. k20])` is refused at exactly
-  ;; the same count. Past `max-record-fields` (32) the literal refuses by its
-  ;; own name before a descriptor is built at all.
+  ;; The record descriptor is a value type and pays `max-type-nodes` (512):
+  ;; 3 + 3F for F scalar fields. `max-record-fields` (32) is the tighter bound
+  ;; now -- 99 nodes at 32 fields -- so the literal refuses by the field-limit's
+  ;; own name before the node budget is reached. (Under the old 64-node bound
+  ;; 20 fields admitted and 21 were refused by the node limit; ADR 0355 raised
+  ;; the budget.)
   (let [literal (fn [n] (str "(:k0 {:a \"x\""
                              (apply str (map #(str " :k" % " " %) (range n)))
                              "})"))]
-    (testing "20 fields admit"
-      (is (= 0 (run-i64 (literal 19)))))
-    (testing "21 fields are refused by the type-node budget, as a defrecord's are"
-      (is (= {:message "value type exceeds node limit"
-              :code :kotoba.error/value-type-node-limit}
-             (refusal ":i64" (literal 20)))))
+    (testing "32 fields admit"
+      (is (= 0 (run-i64 (literal 31)))))
     (testing "more than max-record-fields is refused by name"
       (is (= {:message (str "map literal with keyword keys and a non-i64 value "
                             "lowers to a closed record and exceeds the record "
@@ -198,18 +194,19 @@
          (refusal ":i64" "(:a {:a \"x\" 1 2})"))))
 
 (deftest nesting-past-the-type-depth-limit-is-refused-by-name
-  ;; `max-type-depth` moved 8 -> 12 on 2026-09-24 (kotoba-lang lang/limits.edn,
-  ;; adr-2609242100 P1). A keyword-map record costs about five descriptor nodes
-  ;; per level, so this 13-deep literal now meets the 64-node bound before the
-  ;; depth bound -- still refused, by the node limit's own name.
-  (is (= :kotoba.error/value-type-node-limit
-         (:code (refusal ":i64" (str "(let [m {:a \"x\" :b {:c {:d {:e {:f {:g {:h {:i"
-                                     " {:j {:k {:l {:m {:n \"deep\"}}}}}}}}}}}}}] 1)")))))
-  ;; The depth bound itself, on a type thin enough to reach it: 12 admitted,
-  ;; 13 refused by the depth limit's name.
+  ;; `max-type-depth` is 32 (amu ADR 0355; 12 from 2026-09-24, 8 before). A
+  ;; keyword-map record costs about five descriptor nodes per level, so a
+  ;; 33-deep literal (~165 nodes) stays under the 512-node bound and is refused
+  ;; by the depth limit's own name.
+  (let [nest (fn [n] (str "(let [m " (apply str (repeat n "{:a \"x\" :b "))
+                          "\"deep\"" (apply str (repeat n "}")) "] 1)"))]
+    (is (= :kotoba.error/value-type-depth-limit
+           (:code (refusal ":i64" (nest 33))))))
+  ;; The depth bound itself, on a type thin enough to reach it: 32 admitted,
+  ;; 33 refused by the depth limit's name.
   (let [thin (fn [n] (nth (iterate (fn [t] [:option t]) :i64) n))
         check #(try (do (#'kotoba.compiler.frontend/validate-value-type! (thin %)) :ok)
                     (catch #?(:clj Throwable :cljs :default) e
                       (:kotoba.error/code (ex-data e))))]
-    (is (= :ok (check 12)))
-    (is (= :kotoba.error/value-type-depth-limit (check 13)))))
+    (is (= :ok (check 32)))
+    (is (= :kotoba.error/value-type-depth-limit (check 33)))))
