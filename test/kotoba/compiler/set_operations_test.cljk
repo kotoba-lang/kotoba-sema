@@ -129,17 +129,21 @@
 
 ;; --- the heterogeneous set literal -----------------------------------------
 
-(deftest a-set-literal-is-keyword-only-and-the-refusal-says-so
-  (testing "a computed non-keyword item -- the shape the authority's own fixture used"
+(deftest a-set-literal-takes-its-item-type-from-its-items-and-the-refusal-says-so
+  (testing "a computed non-keyword item mixed with keywords -- the shape the authority's own fixture used"
     (let [r (refusal "(typed-set-count [:set :keyword] #{:a (+ 1 1)})")]
       (is (some? r))
       (is (re-find #"set item type mismatch" (:message r)))
-      (is (re-find #"always \[:set :keyword\]" (:message r)))
+      (is (re-find #"\[:set :keyword\], \[:set :string\] or \[:set :i64\]" (:message r))
+          "the refusal names the literal's rule")
       (is (re-find #"typed-set-new" (:message r))
           "the refusal must name what the caller should write instead")))
-  (testing "a literal non-keyword item, homogeneous"
-    (let [r (refusal "(typed-set-count [:set :i64] #{1 2})")]
-      (is (some? r))
-      (is (re-find #"always \[:set :keyword\]" (:message r)))))
+  (testing "a homogeneous literal of integers or strings is a set of that item type (was refused: the literal was always [:set :keyword])"
+    (is (nil? (refusal "(typed-set-count [:set :i64] #{1 2})")))
+    (is (= 2 (run "(typed-set-count [:set :i64] #{1 2})")))
+    (is (= 3 (run "(typed-set-count [:set :string] #{\"a\" \"b\" \"c\"})"))))
+  (testing "a literal mixing integer and string items is outside the profile"
+    (let [r (refusal "(typed-set-count [:set :keyword] #{1 \"a\"})")]
+      (is (some? r))))
   (testing "and the keyword literal itself still runs"
     (is (= 2 (run "(typed-set-count [:set :keyword] #{:a :b})")))))

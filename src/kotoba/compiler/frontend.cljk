@@ -6190,8 +6190,18 @@
     ;; Top-level constants admit only bounded, non-empty keyword sets. Lower
     ;; them into the typed-set profile in canonical order so raw set iteration
     ;; order is never observable in KIR or an artifact.
-    (set? form) (list* 'typed-set-new [:set :keyword]
-                       (sort-by pr-str form))
+    ;; The item type is read off the literal: all strings is `[:set :string]`,
+    ;; all integers `[:set :i64]`. It was hard-coded `[:set :keyword]`, which made
+    ;; `#{"eval" "exec"}` -- ordinary Clojure, and how the compiler's own sources
+    ;; write a set of names to test membership in -- unwritable. A literal that
+    ;; mixes kinds (or is empty) keeps `[:set :keyword]` and is refused by name
+    ;; at the item that does not fit.
+    (set? form) (let [item-type (cond
+                                  (and (seq form) (every? string? form)) :string
+                                  (and (seq form) (every? kotoba-integer? form)) :i64
+                                  :else :keyword)]
+                  (list* 'typed-set-new [:set item-type]
+                         (sort-by pr-str form)))
     ;; Vector literals now enter the owned bounded vector-i64 profile rather
     ;; than the legacy untagged pair arena. Binding and parameter vectors are
     ;; consumed by their enclosing forms and never reach this branch.
@@ -9500,9 +9510,9 @@
       (reject! (str "set item type mismatch: this set is " (pr-str type)
                     ", so every item must be " (pr-str expected)
                     "; this one is " (pr-str actual)
-                    ". A `#{...}` literal is always [:set :keyword]: a set "
-                    "literal of another item type, and one mixing item types, "
-                    "are both outside the bounded profile. Write "
+                    ". A `#{...}` literal is [:set :keyword], [:set :string] or "
+                    "[:set :i64] by its items; one mixing item types is outside "
+                    "the bounded profile. Write "
                     "(typed-set-new [:set item-type] item ...) for any other "
                     "item type.")
                item :kotoba.error/subset-reject
