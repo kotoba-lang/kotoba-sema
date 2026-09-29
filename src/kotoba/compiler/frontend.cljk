@@ -12416,13 +12416,21 @@
                             (catch #?(:clj Exception :cljs :default) e {:refusal e}))
               _ (when-let [refusal (:refusal inferred)] (throw refusal))
               value-type (:type inferred)]
-          (when-not (canonical-typed-map-type? value-type)
+          (cond
+            ;; `(contains? s x)` on a typed set is Clojure's membership test;
+            ;; the receiver's type already says which primitive answers.
+            (typed-set-type? value-type)
+            (list 'typed-set-contains value-type receiver key)
+
+            (canonical-typed-map-type? value-type)
+            (list 'typed-map-contains value-type receiver key)
+
+            :else
             (reject! (str "contains? requires a canonical typed map "
-                          "[:map key-type value-type]; got " (pr-str value-type)
-                          ". A typed set answers to typed-set-contains, and the "
-                          "bounded keyword map has no presence primitive at all")
-                     form :kotoba.error/map-presence-receiver))
-          (list 'typed-map-contains value-type receiver key))
+                          "[:map key-type value-type] or a typed set [:set item-type]; got "
+                          (pr-str value-type)
+                          ". The bounded keyword map has no presence primitive at all")
+                     form :kotoba.error/map-presence-receiver)))
 
         (= op 'dissoc)
         (let [rewritten-args
