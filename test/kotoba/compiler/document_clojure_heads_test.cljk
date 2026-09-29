@@ -1,0 +1,39 @@
+(ns kotoba.compiler.document-clojure-heads-test
+  "The Clojure map heads on a `:document` (a dynamic EDN map): `assoc`, `dissoc`,
+  `contains?`, `count` and `get` (with a default) elaborate to the document
+  primitives, the way they already do on a typed map and a typed set. The
+  compiler's own passes hold HIR, policies and effect rows as maps with no fixed
+  shape; this is the spelling that lets them be written over a document. Run to
+  a value on the KIR interpreter."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(def ^:private prog
+  "(ns m.probe {:kotoba/export [a b c d e]})
+(defn a [] :i64
+  (count (assoc (document-map) :k (document-i64 5) :j (document-i64 7))))
+(defn b [] :i64
+  (if (contains? (assoc (document-map) :k (document-i64 5)) :k) 1 0))
+(defn c [] :i64
+  (count (dissoc (assoc (document-map) :k 1 :j 2) :k)))
+(defn d [] :i64
+  (let [v (get (assoc (document-map) :k 41) :k (document-i64 0))]
+    (match-option (document-i64-value v) [:option :i64] (none -1) (some x (+ x 1)))))
+(defn e [] :i64
+  (let [v (get (document-map) :absent (document-i64 9))]
+    (match-option (document-i64-value v) [:option :i64] (none -1) (some x x))))")
+
+(def ^:private lowered (delay (kir/lower (sema/analyze prog))))
+
+(defn- run [f]
+  (let [v (kir/execute @lowered f [] {})]
+    #?(:clj (long v) :cljs (js/Number v))))
+
+(deftest the-clojure-heads-answer-on-a-document
+  (is (= 2 (run 'a)) "assoc adds two keys; count sees them")
+  (is (= 1 (run 'b)) "contains? finds the key")
+  (is (= 1 (run 'c)) "dissoc removes one of two keys")
+  (is (= 42 (run 'd)) "get returns the stored value")
+  (is (= 9 (run 'e)) "get returns the default for an absent key"))

@@ -9804,6 +9804,30 @@
   '{:i64 document-i64 :string document-string :keyword document-keyword
     :bool document-bool :f64 document-f64})
 
+(defn- as-document-form
+  "FORM as a `:document` expression, for the Clojure heads (`assoc`, `get` with a
+  default, ...) applied to a document receiver. A document stays as it is; a
+  scalar is wrapped in its document constructor. Anything else is left alone so
+  the type checker reports the mismatch at the operand."
+  [form locals signatures]
+  (let [t (try (infer-expression-type form locals signatures)
+               (catch #?(:clj Exception :cljs :default) _ nil))]
+    (cond
+      (= :document t) form
+      (contains? document-of-constructors t)
+      (list (get document-of-constructors t) form)
+      :else form)))
+
+(defn- as-document-key
+  "A document map key: a keyword or a document, as `document-get` and friends
+  require. A string key becomes a document string."
+  [form locals signatures]
+  (let [t (try (infer-expression-type form locals signatures)
+               (catch #?(:clj Exception :cljs :default) _ nil))]
+    (if (contains? #{:keyword :document} t)
+      form
+      (as-document-form form locals signatures))))
+
 (defn- document-of-constructor!
   "The constructor that makes a value of TYPE a document, `:identity` for a
   document, or a refusal naming the type."
@@ -12428,6 +12452,16 @@
                            (get schemas (second value-type))
                            value-type)]
           (cond
+            ;; `get` on a `:document` (a dynamic EDN map): the document lookup,
+            ;; which answers an option; with a default, the option's value or
+            ;; the default (as a document).
+            (= :document value-type)
+            (let [lookup (list 'document-get value (as-document-key key locals signatures))]
+              (if (= 3 (count rewritten-args))
+                (list 'option-value-of [:option :document] lookup
+                      (as-document-form default locals signatures))
+                lookup))
+
             (canonical-typed-map-type? value-type)
             (let [lookup (list 'typed-map-get value-type value key)]
               (if (= 3 (count rewritten-args))
@@ -12498,6 +12532,13 @@
           (cond
             (row-op-record value-type)
             (row-op-rewrite op rewritten-args locals signatures form)
+            ;; `assoc` on a `:document`: one `document-assoc` per pair.
+            (= :document value-type)
+            (reduce (fn [accumulated [key item]]
+                      (list 'document-assoc accumulated
+                            (as-document-key key locals signatures)
+                            (as-document-form item locals signatures)))
+                    receiver (partition 2 pairs))
             descriptor
             (reduce (fn [accumulated [key item]]
                       (list 'typed-map-assoc descriptor accumulated key item))
@@ -12526,6 +12567,9 @@
             (typed-set-type? value-type)
             (list 'typed-set-contains value-type receiver key)
 
+            (= :document value-type)
+            (list 'document-contains receiver (as-document-key key locals signatures))
+
             (canonical-typed-map-type? value-type)
             (list 'typed-map-contains value-type receiver key)
 
@@ -12550,6 +12594,11 @@
             ;; ADR 0353 floor :row-operations: dissoc on a record shrinks it.
             (row-op-record value-type)
             (row-op-rewrite op rewritten-args locals signatures form)
+            (= :document value-type)
+            (reduce (fn [accumulated key]
+                      (list 'document-dissoc accumulated
+                            (as-document-key key locals signatures)))
+                    receiver keys)
             (not (canonical-typed-map-type? value-type))
             (reject! (str "dissoc requires a record or a canonical typed map "
                           "[:map key-type value-type]; got " (pr-str value-type)
@@ -12767,6 +12816,7 @@
             (heterogeneous-vector-type? value-type)
             (list 'hetero-vector-count value-type receiver)
             (typed-set-type? value-type) (list 'typed-set-count value-type receiver)
+            (= :document value-type) (list 'document-count receiver)
             (canonical-typed-map-type? value-type)
             (list 'typed-map-count value-type receiver)
             ;; `vector-count` walks a `[:list T]` carrier, for any item type,
