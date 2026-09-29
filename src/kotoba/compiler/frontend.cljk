@@ -1707,11 +1707,17 @@
           (#{\) \] \}} ch) (recur (inc index) (max 0 (dec depth)) false false false)
           :else (recur (inc index) depth false false false))))))
 
+(def max-source-bytes
+  "`:max-source-bytes` from lang/guest-grammar.edn's `:admission-limits`.
+   1 MiB until 2026-09-29 (amu ADR 0356); 8 MiB now, the same bound the project
+   linker puts on a linked closure."
+  8388608)
+
 (defn read-forms [source]
   (when-not (string? source)
     (throw (ex-info "source must be a string" {:phase :read})))
-  (when (> (count source) (* 1024 1024))
-    (throw (ex-info "source exceeds 1 MiB admission limit" {:phase :read})))
+  (when (> (count source) max-source-bytes)
+    (throw (ex-info "source exceeds 8 MiB admission limit" {:phase :read})))
   ;; `#=` (reader evaluation) is refused by the READER's dispatch arm, not by a
   ;; textual scan: the scan matched the two characters anywhere -- inside a
   ;; string, a comment, or the very regex that spelled it -- and so refused
