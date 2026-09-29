@@ -7336,13 +7336,13 @@
         (do (when-not (= 1 (count args))
               (reject! "string-from-i64 requires one i64" form))
             (list string-from-i64-helper-name (desugar-expr (first args))))
-        ;; T4.2: bounded multi-part join → nested string-concat (max 8 parts).
+        ;; T4.2: multi-part join → nested string-concat. The 8-part cap of ADR 0162
+        ;; was the size of the unrolled expansion, not a semantic bound; the
+        ;; expression-node and lowered-node limits already bound it.
         ;; Works on every backend that already has string-concat (wasm/KIR/js).
         string-join
         (do (when (zero? (count args))
               (reject! "string-join requires a separator string" form))
-            (when (> (count (rest args)) 8)
-              (reject! "string-join exceeds max 8 parts" form))
             (let [sep (desugar-result-expr :string (first args))
                   parts (mapv #(desugar-result-expr :string %) (rest args))]
               (cond
@@ -10102,8 +10102,6 @@
       (= op 'string-join)
       (do (when (zero? (count args))
             (reject! "string-join requires a separator string" args))
-          (when (> (count (rest args)) 8)
-            (reject! "string-join exceeds max 8 parts" args))
           (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :string arg))
           :string)
