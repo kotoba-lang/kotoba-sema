@@ -1296,7 +1296,9 @@
   ;; max-typed-set-items, osaho typed-set-item-limit, ESM) enforced 32; the
   ;; value is lang/limits.edn :language/static :typed-set-items (adr-2609242100 P1).
   :max-set-items 32
-  :max-source-bytes 1048576
+  ;; The bounded input may contain many independently admitted definitions.
+  :max-source-bytes 8388608
+  :max-definition-source-bytes 1048576
   :max-reader-depth 512
   ;; 2026-09-11: the bound on `(:params [...])` in a template module. Eight is
   ;; a bound, not a measurement -- kotoba.set's twelve templates each need one.
