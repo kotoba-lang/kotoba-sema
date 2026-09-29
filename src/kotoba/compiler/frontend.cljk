@@ -7426,6 +7426,14 @@
                                                    (list 'vector-at v i)))
                                        acc))))))
             (let [[f-form init-form coll-form] args
+                  ;; A parameter declared `[:list T]` is folded through
+                  ;; `typed-list-nth`; every other collection is the
+                  ;; vector-i64 fold below. The type is the one the function
+                  ;; declared for that parameter (a wrong guess is refused
+                  ;; later, by `typed-list-nth`'s own type check).
+                  list-type (when (and (symbol? coll-form) (map? *local-types*))
+                              (let [t (get *local-types* coll-form)]
+                                (when (canonical-list-type? t) t)))
                   ;; A closed, pure unary map chain can be consumed directly by
                   ;; a pure primitive fold.  The ordinary eager map lowering
                   ;; remains the fallback for callbacks whose effects are not
@@ -7434,7 +7442,8 @@
                   ;; order.  `inc` and `dec` are total i64 arithmetic sugar, so
                   ;; composing them at the vector read is semantics-preserving.
                   map-chain
-                  (when (and (symbol? f-form)
+                  (when (and (nil? list-type)
+                             (symbol? f-form)
                              (not (contains? *lexical-bindings* f-form))
                              (contains? '#{+ - * bit-and bit-or bit-xor} f-form))
                     (loop [candidate coll-form callbacks []]
@@ -7451,10 +7460,12 @@
                            ;; innermost map to the outermost map.
                            :callbacks (vec (reverse callbacks))}))))
                   init* (desugar-expr init-form)
-                  coll* (desugar-vector-i64-source
-                         (if map-chain
-                           (:collection map-chain)
-                           coll-form))
+                  coll* (if list-type
+                          (desugar-expr coll-form)
+                          (desugar-vector-i64-source
+                           (if map-chain
+                             (:collection map-chain)
+                             coll-form)))
                   v (synthetic "reduce_v")
                   i (synthetic "reduce_i")
                   acc (synthetic "reduce_acc")
@@ -7465,12 +7476,14 @@
                   stored? (not (or primitive? named?
                                    (and (seq? f-form) (= 'fn (first f-form)))))
                   callback (when stored? (synthetic "reduce_callback"))
-                  item (reduce (fn [value callback-name]
-                                 (case callback-name
-                                   inc (list '+ value 1)
-                                   dec (list '- value 1)))
-                               (list 'vector-at v i)
-                               (:callbacks map-chain))
+                  item (if list-type
+                         (list 'typed-list-nth list-type v i)
+                         (reduce (fn [value callback-name]
+                                   (case callback-name
+                                     inc (list '+ value 1)
+                                     dec (list '- value 1)))
+                                 (list 'vector-at v i)
+                                 (:callbacks map-chain)))
                   step
                   (cond
                     primitive?
@@ -7499,7 +7512,7 @@
                     :else
                     (list (invoke-dispatcher-name 2) callback acc item))]
               ;; Re-enter desugar so loop → __kotoba_loop_N under *pending-loop-helpers*.
-              (binding [*loop-known-types* (cond-> {i :i64 v :vector-i64}
+              (binding [*loop-known-types* (cond-> {i :i64 v (or list-type :vector-i64)}
                                              callback (assoc callback :i64))]
                 (desugar-expr
                  (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
@@ -10528,10 +10541,18 @@
                 (if-let [[name value] (first pairs)]
                   (let [type (binding [*absence-tail* false]
                                (infer-expression-type value current signatures))
-                        type (if (bounded-vector-source-binding? name)
+                        type (cond
+                               ;; a `reduce` over a `[:list T]` parameter binds
+                               ;; the list itself, not a vector-i64
+                               (and (bounded-vector-source-binding? name)
+                                    (canonical-list-type? type))
+                               type
+
+                               (bounded-vector-source-binding? name)
                                (do (require-expression-type! type :vector-i64 value)
                                    :vector-i64)
-                               type)]
+
+                               :else type)]
                     (recur (next pairs)
                            ;; local-state slice 1: a cell binding carries the
                            ;; cell's identity in its name, so every rebinding

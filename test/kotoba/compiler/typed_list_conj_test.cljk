@@ -48,3 +48,17 @@
   (is (some? (refusal "(ns m.probe)
 (defn main [] :i64
   (vector-count (typed-list-conj :i64 (typed-list-new [:list :i64]) 1)))"))))
+
+(deftest reduce-folds-a-list-parameter
+  ;; A parameter declared [:list T] is folded through typed-list-nth; the
+  ;; fold was vector-i64 only, so a list could be built (typed-list-conj) but
+  ;; not summed. Run to a value, not merely admitted.
+  (let [prog "(ns m.probe)
+(defn build [n :i64 acc [:list :i64]] [:list :i64]
+  (if (<= n 0) acc (build (- n 1) (conj acc n))))
+(defn total [xs [:list :i64]] :i64 (reduce (fn [acc x] (+ acc x)) 0 xs))
+(defn lens [xs [:list :string]] :i64
+  (reduce (fn [acc s] (+ acc (string-byte-length s))) 0 xs))\n"]
+    (is (= 15 (run (str prog "(defn main [] :i64 (total (build 5 (typed-list-new [:list :i64]))))"))))
+    (is (= 0 (run (str prog "(defn main [] :i64 (total (typed-list-new [:list :i64])))"))))
+    (is (= 5 (run (str prog "(defn main [] :i64 (lens (typed-list-new [:list :string] \"ab\" \"cde\" \"\")))"))))))
