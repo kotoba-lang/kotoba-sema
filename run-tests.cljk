@@ -69,6 +69,9 @@
             ;; fwstore: writing to pages the firmware allocated
             [kotoba.compiler.firmware-store-test]
             [kotoba.compiler.host-nesting-test]
+            ;; Source admission is bounded per definition so a compiler module
+            ;; may exceed 1 MiB without making any one definition unbounded.
+            [kotoba.compiler.definition-admission-test]
             ;; a `let` body is an implicit `do`; the value is the last form
             [kotoba.compiler.let-body-test]
             [kotoba.compiler.kernel-xgetbv-test]
