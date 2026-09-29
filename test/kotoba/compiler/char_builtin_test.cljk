@@ -1,0 +1,30 @@
+(ns kotoba.compiler.char-builtin-test
+  "`(char n)` is the one-code-point string for code point n (this language has no
+  char type; the compiler's own sources already treat a character as a
+  one-character string). Run on the KIR interpreter over the 1-, 2-, 3- and
+  4-byte UTF-8 ranges, and a surrogate traps by name instead of producing a
+  wrong string."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(def ^:private prog
+  "(ns m.probe {:kotoba/export [c len]})
+(defn c [n :i64] :string (char n))
+(defn len [n :i64] :i64 (string-byte-length (char n)))")
+
+(def ^:private lowered (delay (kir/lower (sema/analyze prog))))
+
+(defn- call [f n] (kir/execute @lowered f [n] {}))
+
+(deftest char-encodes-every-utf-8-width
+  (doseq [[cp expected width] [[65 "A" 1] [127 "\u007f" 1] [128 "\u0080" 2] [233 "é" 2]
+                               [2047 "߿" 2] [2048 "ࠀ" 3] [12354 "あ" 3]
+                               [65535 "￿" 3] [65536 "𐀀" 4] [128512 "😀" 4]]]
+    (testing (str cp)
+      (is (= expected (call 'c cp)))
+      (is (= width #?(:clj (long (call 'len cp)) :cljs (js/Number (call 'len cp))))))))
+
+(deftest a-surrogate-is-not-a-character
+  (is (thrown? #?(:clj Throwable :cljs :default) (call 'c 55296))))

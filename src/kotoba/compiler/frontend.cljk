@@ -5339,6 +5339,45 @@
             (string-concat "-" (__kotoba_string_from_i64_nat (- 0 n)))
             (__kotoba_string_from_i64_nat n))})
 
+(def ^:private char-helper-name '__kotoba_char)
+
+(def ^:private char-helper
+  "`(char n)`: the one-code-point string for code point N (Clojure's char, read
+  as a string because this language has no char type; the compiler's own sources
+  already use one-character strings for characters). N is UTF-8 encoded into a
+  byte vector and decoded by `string-from-utf8`, so a surrogate or an out-of-range
+  code point traps by name (`:utf8/*`) instead of producing a wrong string."
+  {:name char-helper-name
+   :params '[n]
+   :param-types [:i64]
+   :result :string
+   :effects #{}
+   :body '(string-from-utf8
+           (bytes-from-vector-i64
+            (if (< n 128)
+              (vector-conj (vector-alloc 0) n)
+              (if (< n 2048)
+                (vector-conj (vector-conj (vector-alloc 0)
+                                          (+ 192 (quot n 64)))
+                             (+ 128 (- n (* (quot n 64) 64))))
+                (if (< n 65536)
+                  (vector-conj (vector-conj (vector-conj (vector-alloc 0)
+                                                         (+ 224 (quot n 4096)))
+                                            (+ 128 (- (quot n 64) (* (quot n 4096) 64))))
+                               (+ 128 (- n (* (quot n 64) 64))))
+                  (vector-conj (vector-conj (vector-conj (vector-conj (vector-alloc 0)
+                                                                      (+ 240 (quot n 262144)))
+                                                         (+ 128 (- (quot n 4096) (* (quot n 262144) 64))))
+                                            (+ 128 (- (quot n 64) (* (quot n 4096) 64))))
+                               (+ 128 (- n (* (quot n 64) 64)))))))))})
+
+(defn- uses-char? [form]
+  (cond
+    (seq? form) (or (= char-helper-name (first form))
+                    (first-truthy uses-char? (rest form)))
+    (coll? form) (first-truthy uses-char? form)
+    :else false))
+
 (defn- uses-string-from-i64? [form]
   (cond
     (seq? form) (or (= string-from-i64-helper-name (first form))
@@ -7353,6 +7392,17 @@
         (do (when-not (= 1 (count args))
               (reject! "string-from-i64 requires one i64" form))
             (list string-from-i64-helper-name (desugar-expr (first args))))
+        ;; `(char n)` -> the one-code-point string. A module that defines its
+        ;; own `char` keeps it (the mapv lesson); a string operand is already
+        ;; a one-character value and is returned as written.
+        char
+        (if (contains? *function-arities* 'char)
+          (apply list 'char (map desugar-expr args))
+          (do (when-not (= 1 (count args))
+                (reject! "char requires one code point" form))
+              (if (string? (first args))
+                (first args)
+                (list char-helper-name (desugar-expr (first args))))))
         ;; T4.2: multi-part join → nested string-concat. The 8-part cap of ADR 0162
         ;; was the size of the unrolled expansion, not a semantic bound; the
         ;; expression-node and lowered-node limits already bound it.
@@ -19540,7 +19590,9 @@
               inference-functions
               (cond-> (into parsed (concat helpers inference-dispatchers))
                 (first-truthy #(uses-string-from-i64? (:body %)) helpers)
-                (into [string-from-i64-nat-helper string-from-i64-helper]))
+                (into [string-from-i64-nat-helper string-from-i64-helper])
+                (first-truthy #(uses-char? (:body %)) helpers)
+                (conj char-helper))
               candidates (binding [*schemas* (:schemas namespace-info)]
                            (->> inference-functions
                                 (mapv #(update % :body resolve-overloaded-calls
@@ -19592,7 +19644,9 @@
                  (first-truthy #(uses-map-get? (:body %)) parsed) (conj map-get-helper)
                  (first-truthy #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
                  (first-truthy #(uses-string-from-i64? (:body %)) parsed)
-                 (#(into % [string-from-i64-nat-helper string-from-i64-helper])))
+                 (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
+                 (first-truthy #(uses-char? (:body %)) parsed)
+                 (conj char-helper))
         parsed (mapv #(if (:param-types %)
                         %
                         (assoc % :param-types (vec (repeat (count (:params %)) :i64))))
