@@ -241,7 +241,7 @@
 ;; Reader widenings measured against the compiler's own sources (2026-09-11,
 ;; adr-2609111900 iteration 2): `#_`, `#?@`, `#:ns{}`, `\uXXXX`. Each has a
 ;; positive and a refusing case; a refusal is asserted on its message so a
-;; different failure cannot pass as the intended one (CLAUDE.md 8 問 ⑥).
+;; different failure cannot pass as the intended one (AGENTS.md 8 問 ⑥).
 
 (defn- refusal [src]
   (try (r/read-forms src) nil (catch :default e (.-message e))))

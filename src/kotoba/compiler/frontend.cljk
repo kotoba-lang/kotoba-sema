@@ -6439,7 +6439,7 @@
 ;; is not available to those authors: the members ARE symbols, operation
 ;; heads compared against read source.
 ;;
-;; CLASSIFICATION (CLAUDE.md, "is it a property or implementation state"),
+;; CLASSIFICATION (AGENTS.md, "is it a property or implementation state"),
 ;; written before the change: IMPLEMENTATION STATE. `:symbol` is already a
 ;; value type of this frontend (`value-types`), `(symbol "a")` builds one
 ;; from a `:string`, `(typed-set-new [:set :symbol] ...)` and `(typed-map-new
@@ -18079,7 +18079,7 @@
 ;; one a pure expression over constants -- `(set [...])`, `(into #{} ...)`,
 ;; `(str ...)`, `(merge a b)`, `(* 4 1024)`.
 ;;
-;; CLASSIFICATION, written before the change (CLAUDE.md, "is it a property or
+;; CLASSIFICATION, written before the change (AGENTS.md, "is it a property or
 ;; implementation state"): the literal-only rule was IMPLEMENTATION STATE.
 ;; Nothing in lang/guest-grammar.edn, lang/surface-status.edn or
 ;; lang/safety-claims.edn says a module-level constant must be spelled as a
