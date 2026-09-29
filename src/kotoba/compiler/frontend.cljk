@@ -19731,13 +19731,17 @@
       (reject! "main must take zero arguments" 'main))
     (when (and entry (not (first-truthy #{entry} exports)))
       (reject! "main entrypoint must be exported" exports))
-    ;; Abort ability, slice 1: an aborting function's interface is
-    ;; `[:result T E]`, which the wire ABI does not carry across an export
-    ;; boundary yet. It stays inside the module until a caller catches it.
-    (doseq [name (cond-> (vec exports) entry (conj entry))
-            :when (contains? abort-error-types name)]
-      (reject! (str "unhandled abort at export boundary; catch it with try: " name)
-               name :kotoba.error/abort-unhandled-export))
+    ;; Abort ability: an aborting function's interface is `[:result T E]`, and
+    ;; an EXPORT may abort -- its callers see that `[:result T E]`. This was a
+    ;; blanket refusal ("unhandled abort at export boundary") while the wire ABI
+    ;; did not carry a result across an export boundary; per amu ADR 0354 the
+    ;; language admits it and a target that cannot carry the boundary type
+    ;; refuses by name at its own boundary check, instead of the whole language
+    ;; refusing for every target. `main` is the exception: the entrypoint has a
+    ;; fixed `:i64` result and cannot abort.
+    (when (and entry (contains? abort-error-types entry))
+      (reject! (str "unhandled abort at export boundary; catch it with try: " entry)
+               entry :kotoba.error/abort-unhandled-export))
     ;; slice-value: a slice parameter is TWO machine words, and an export's
     ;; callers spell one word per argument. Refused here rather than in the
     ;; erasure pass because the export list is not known until now, and

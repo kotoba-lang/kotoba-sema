@@ -201,13 +201,14 @@
       (is (= #{} (:effects (function-named hir 'main))))
       (is (= #{:abort} (:effects hir))))))
 
-(deftest an-unhandled-abort-at-an-export-boundary-is-refused
+(deftest an-unhandled-abort-in-main-is-refused-but-an-export-may-abort
+  ;; `main` has a fixed :i64 result and cannot abort.
   (is (= "unhandled abort at export boundary; catch it with try: main"
          (rejection-of "(defn main [] :i64 (if (= 1 1) (throw \"s\") 1))")))
-  (testing "every function is exported when nothing narrows the export list, so a bare aborting helper is refused too"
-    (is (= "unhandled abort at export boundary; catch it with try: f"
-           (rejection-of "(defn f [x :i64] :i64 (if (= x 0) (throw \"s\") x))
-                          (defn main [] :i64 (try (f 1) (catch e 0)))")))))
+  (testing "any other export may abort: its interface is [:result T E] (amu ADR 0354; was refused at the boundary)"
+    (let [hir (sema/analyze "(defn f [x :i64] :i64 (if (= x 0) (throw \"s\") x))
+                             (defn main [] :i64 (try (f 1) (catch e 0)))")]
+      (is (= [:result :i64 :string] (:result (function-named hir 'f)))))))
 
 (deftest a-throw-inside-a-loop-body-is-refused-citing-the-precondition
   (let [message "throw inside a loop/doseq/dotimes body is not admitted in abort slice 1: precondition :checked-lexical-facet-unwind is not met"]
