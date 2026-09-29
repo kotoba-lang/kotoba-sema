@@ -1,0 +1,50 @@
+(ns kotoba.compiler.typed-list-conj-test
+  "`typed-list-conj` is the run-time-length list constructor.
+
+  `typed-list-new` takes its items as literal operands, so a `[:list T]` whose
+  length is known only while the program runs (a parsed s-expression's
+  children) could not be built. `typed-list-conj` appends one item at the END
+  and `conj` on a `[:list T]` elaborates to it. Run to a value on the KIR
+  interpreter, not merely admitted; the item type is enforced."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(defn- run [src]
+  (let [v (kir/execute (kir/lower (sema/analyze src)) 'main [] {})]
+    #?(:clj (long v) :cljs (js/Number v))))
+
+(defn- refusal [src]
+  (try (do (sema/analyze src) nil)
+       (catch #?(:clj Throwable :cljs :default) e
+         {:message (ex-message e)})))
+
+(def ^:private builder
+  "(ns m.probe)
+(defn build [n :i64 acc [:list :string]] [:list :string]
+  (if (<= n 0) acc (build (- n 1) (conj acc \"x\"))))\n")
+
+(deftest a-list-can-grow-at-run-time
+  (testing "conj on a [:list :string] appends; the length is only known when it runs"
+    (is (= 5 (run (str builder "(defn main [] :i64 (vector-count (build 5 (typed-list-new [:list :string]))))"))))
+    (is (= 0 (run (str builder "(defn main [] :i64 (vector-count (build 0 (typed-list-new [:list :string]))))")))))
+  (testing "typed-list-conj appends at the end, and the item is read back by index"
+    (is (= 7 (run "(ns m.probe)
+(defn main [] :i64
+  (typed-list-nth [:list :i64]
+                  (typed-list-conj [:list :i64] (typed-list-new [:list :i64] 7) 9)
+                  0))")))
+    (is (= 9 (run "(ns m.probe)
+(defn main [] :i64
+  (typed-list-nth [:list :i64]
+                  (typed-list-conj [:list :i64] (typed-list-new [:list :i64] 7) 9)
+                  1))")))))
+
+(deftest the-item-type-is-enforced
+  (is (some? (refusal "(ns m.probe)
+(defn main [] :i64
+  (vector-count (typed-list-conj [:list :i64] (typed-list-new [:list :i64]) \"s\")))")))
+  (is (some? (refusal "(ns m.probe)
+(defn main [] :i64
+  (vector-count (typed-list-conj :i64 (typed-list-new [:list :i64]) 1)))"))))
