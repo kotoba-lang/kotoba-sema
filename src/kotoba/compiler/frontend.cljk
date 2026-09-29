@@ -1388,11 +1388,29 @@
 
 (declare reject! closure-result-type?)
 
+(defn- callable-row-map?
+  "The optional last element of a `[:fn ...]` type: `{:effects #{...}}`, the
+  effect row the function type declares (ADR 0353 floor :function-effect-rows)."
+  [x]
+  (and (map? x) (= #{:effects} (set (keys x)))))
+
+(defn- callable-type-clauses-part [type]
+  (if (and (< 1 (count type)) (callable-row-map? (peek type))) (pop type) type))
+
 (defn- callable-type? [type]
-  (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6)))
+  (and (vector? type) (= :fn (first type))
+       (<= 2 (count (callable-type-clauses-part type)) 6)))
 
 (defn- callable-clauses [type]
-  (when (callable-type? type) (subvec type 1)))
+  (when (callable-type? type) (subvec (callable-type-clauses-part type) 1)))
+
+(defn- callable-effect-row
+  "The row a `[:fn ...]` type declares, as a sorted vector of the row's
+  keywords, or nil when the type declares none. A type with no row keeps the
+  row it always had: the union of the closures its dispatcher family reaches."
+  [type]
+  (when (and (callable-type? type) (callable-row-map? (peek type)))
+    (vec (sort-by str (:effects (peek type))))))
 
 (defn- parametric-result-type? [type]
   (and (vector? type) (= 3 (count type)) (= :result (first type))))
@@ -1486,6 +1504,15 @@
                       (= (count arities) (count (distinct arities))))
          (reject! "callable type requires one to five unique [parameter-types result-type] clauses"
                   type :kotoba.error/callable-type))
+       (when (callable-row-map? (peek type))
+         (let [row (:effects (peek type))]
+           (when-not (and (set? row) (every? keyword? row))
+             (reject! "a [:fn ...] effect row is {:effects #{...}}, a set of capability keywords (ADR 0353)"
+                      type :kotoba.error/callable-effect-row))
+           (doseq [kw row]
+             (when-not (or (= :state kw) (contains? capability-registry kw))
+               (reject! (str "a [:fn ...] effect row names an unregistered capability: " kw)
+                        type :kotoba.error/callable-effect-row)))))
        (doseq [[parameter-types result-type] clauses]
          ;; A parameter type is admitted exactly when it is admitted as a
          ;; closure RESULT type -- one predicate, `closure-result-type?`, so
@@ -2967,18 +2994,37 @@
   "The key a dispatcher family is requested and built under. `[result arity]`
   for the all-`:i64` parameter shape -- every key that existed before typed
   parameters is unchanged -- and `[result arity parameter-types]` otherwise."
-  [result-type arity parameter-types]
-  (if (i64-parameter-types? parameter-types)
-    [result-type arity]
-    [result-type arity (vec parameter-types)]))
+  ([result-type arity parameter-types]
+   (dispatcher-key result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
+   (cond
+     ;; A family whose contract declares an effect row (ADR 0353 floor
+     ;; :function-effect-rows) is keyed by that row as well: it reaches only
+     ;; the closures lifted under a contract declaring exactly that row.
+     row [result-type arity
+          (when-not (i64-parameter-types? parameter-types) (vec parameter-types))
+          row]
+     (i64-parameter-types? parameter-types) [result-type arity]
+     :else [result-type arity (vec parameter-types)])))
 
 (defn- invoke-dispatcher-name
   ([arity] (invoke-dispatcher-name :i64 arity))
   ([result-type arity] (invoke-dispatcher-name result-type arity nil))
   ([result-type arity parameter-types]
+   (invoke-dispatcher-name result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
    (when-not (closure-result-type? result-type {})
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
+   (if row
+     ;; One digest of the clause signature and the declared row, as the
+     ;; typed-parameter, structured-result family is named: two digests would
+     ;; pass `max-symbol-chars`.
+     (symbol (str "__kotoba_invoke_r_"
+                  (artifact/sha256 [(when-not (i64-parameter-types? parameter-types)
+                                      (vec parameter-types))
+                                    result-type row])
+                  "$arity" arity))
    (let [parameter-label (dispatcher-parameter-label parameter-types)
          structured-result? (not (keyword? result-type))]
      (symbol (str "__kotoba_invoke"
@@ -3002,15 +3048,17 @@
                     (str (when parameter-label (str "_" parameter-label))
                          (when-not (= :i64 result-type)
                            (str "_" (dispatcher-result-label result-type)))))
-                  "$arity" arity)))))
+                  "$arity" arity))))))
 
 (defn- request-invoke-dispatcher
   ([result-type arity] (request-invoke-dispatcher result-type arity nil))
   ([result-type arity parameter-types]
+   (request-invoke-dispatcher result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
    (when *required-closure-dispatchers*
      (vswap! *required-closure-dispatchers* conj
-             (dispatcher-key result-type arity parameter-types)))
-   (invoke-dispatcher-name result-type arity parameter-types)))
+             (dispatcher-key result-type arity parameter-types row)))
+   (invoke-dispatcher-name result-type arity parameter-types row)))
 
 (def ^:private non-shadowable-special-heads '#{let if do fn loop recur})
 
@@ -3025,12 +3073,35 @@
       (reject! "callable contract does not admit this arity"
                form :kotoba.error/callable-arity)))
 
+(declare record-field-type)
+
+(defn- rowed-field-contract
+  "The `[:fn ...]` contract of a record field read, `(record-get T v :f)` or
+  `(:f v)` over a local of a record type, when that contract declares an
+  effect row (ADR 0353 floor :function-effect-rows); nil otherwise. Only a
+  ROWED field answers: a field with no row keeps the untyped call it always
+  had, so a module with no row keeps its HIR and its CIDs."
+  [form]
+  (when (seq? form)
+    (let [[type field]
+          (cond
+            (and (= 'record-get (first form)) (= 4 (count form)))
+            [(second form) (nth form 3)]
+            (and (keyword? (first form)) (= 2 (count form)) (symbol? (second form)))
+            [(get *local-types* (second form)) (first form)]
+            :else nil)
+          type (when type (canonical-closure-result-type type))]
+      (when (and (record-type? type) (keyword? field))
+        (let [contract (record-field-type type field)]
+          (when (callable-effect-row contract) contract))))))
+
 (defn- expression-callable-contract [form]
   (cond
     (symbol? form) (get *lexical-callable-contracts* form)
     (seq? form) (or (get *function-callable-result-contracts*
                          [(first form) (dec (count form))])
-                    (get *function-callable-result-contracts* (first form)))
+                    (get *function-callable-result-contracts* (first form))
+                    (rowed-field-contract form))
     :else nil))
 
 (defn- desugar-lexical-call [result-type form]
@@ -3049,7 +3120,8 @@
       ;; TYPE is checked where every call's is -- against the dispatcher's
       ;; signature by the ordinary checker (`expression type mismatch:
       ;; expected document, got i64`) -- not by a second table here.
-      (apply list (request-invoke-dispatcher result-type (count args) parameter-types)
+      (apply list (request-invoke-dispatcher result-type (count args) parameter-types
+                                             (callable-effect-row contract))
              closure
              (if parameter-types
                (map (fn [argument wanted]
@@ -3491,7 +3563,13 @@
                                            (into (vec (repeat (count captures) :i64))
                                                  contract-params)))}
                            contract-result (assoc :contract-result contract-result)
-                           contract-params (assoc :parameter-types contract-params))))
+                           contract-params (assoc :parameter-types contract-params)
+                           ;; ADR 0353 floor :function-effect-rows: the row the
+                           ;; contract declares. The lambda joins that row's
+                           ;; dispatcher family, and its inferred effects are
+                           ;; checked against the row once effects are known.
+                           (callable-effect-row expected-contract)
+                           (assoc :effect-row (callable-effect-row expected-contract)))))
                      lowered)))
       ;; Closure captures are always the internal i64 pair-chain ABI, even
       ;; when the lambda's result is a canonical `[:list T]` value.
@@ -3501,25 +3579,34 @@
 
 (defn- lambda-dispatchers [lambda-infos required-dispatchers]
   (let [requested (into #{}
-                        (mapcat (fn [{:keys [arity helper parameter-types]}]
+                        (mapcat (fn [{:keys [arity helper parameter-types effect-row]}]
                                   ;; A lambda with contract-typed parameters
                                   ;; belongs to the family of exactly its
                                   ;; clause signature and to no i64 family:
                                   ;; an i64 dispatcher calling it would hand
-                                  ;; an i64 word to a typed parameter.
-                                  (if parameter-types
-                                    [[(:result helper) arity parameter-types]]
-                                    [[:i64 arity] [(:result helper) arity]])))
+                                  ;; an i64 word to a typed parameter. A
+                                  ;; lambda lifted under a declared effect
+                                  ;; row belongs to that row's family as well.
+                                  (cond-> (if parameter-types
+                                            [[(:result helper) arity parameter-types]]
+                                            [[:i64 arity] [(:result helper) arity]])
+                                    effect-row
+                                    (conj (dispatcher-key (:result helper) arity
+                                                          parameter-types effect-row)))))
                         lambda-infos)
         requested (into requested required-dispatchers)]
     (mapv
-     (fn [[result-type arity parameter-types]]
+     (fn [[result-type arity parameter-types row]]
        (let [closure (symbol (str "__kotoba_closure_"
                                   (dispatcher-result-label result-type) "_" arity))
              args (mapv #(symbol (str "__kotoba_invoke_arg_" %)) (range arity))
+             ;; a row family reaches only the lambdas lifted under exactly
+             ;; that row, each checked against it: a caller through the
+             ;; row is bounded by the row, not by every lifted closure
              candidates (filter #(and (= arity (:arity %))
                                       (= result-type (get-in % [:helper :result]))
-                                      (= parameter-types (:parameter-types %)))
+                                      (= parameter-types (:parameter-types %))
+                                      (or (nil? row) (= row (:effect-row %))))
                                 lambda-infos)
              ;; A closure id belonging to a different result family is a
              ;; type error at the dynamic boundary.  Produce a result-typed
@@ -3546,14 +3633,15 @@
                              (apply list (:name helper) (concat capture-values args))
                              fallback)))
                    fallback (reverse candidates))]
-         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types)
+         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types row)
                   :params (into [closure] args)
                   :result result-type :effects #{} :body body}
            ;; the typed family says its argument types; the i64 family is
            ;; defaulted to all-i64 downstream exactly as before
            parameter-types (assoc :param-types (into [:i64] parameter-types)))))
      (sort-by (juxt (comp dispatcher-result-label first) second
-                    #(or (dispatcher-parameter-label (nth % 2 nil)) ""))
+                    #(or (dispatcher-parameter-label (nth % 2 nil)) "")
+                    #(pr-str (nth % 3 nil)))
               requested))))
 
 (def ^:private closure-apply-helper
@@ -7913,6 +8001,22 @@
                        form)))
             (desugar-ordinary-call op args))))))))
 
+(defn- require-rowed-callable-argument!
+  "A `[:fn ...]` parameter that declares an effect row is given a closure
+  whose row is known to be that one: a `fn` / `fn-ref` written there, lifted
+  under the contract and checked against its row, or a value of exactly that
+  type. Anything else is a closure of unknown row -- a let-bound `fn` lifted
+  under no contract -- and is refused by name rather than trapping closed at
+  the row's dispatcher."
+  [contract argument]
+  (when (callable-effect-row contract)
+    (when-not (or (and (seq? argument) (contains? '#{fn fn-ref} (first argument)))
+                  (= contract (expression-callable-contract argument)))
+      (reject! (str "a [:fn ...] parameter declaring the effect row "
+                    (pr-str (:effects (peek contract)))
+                    " takes a fn literal or a value of that same type; the row of this closure is not known (ADR 0353)")
+               argument :kotoba.error/callable-effect-row))))
+
 (defn- desugar-ordinary-call
   "`(op args...)` for a head that is neither sugar nor a capability: the
   arguments desugared in order, each `fn` (or `fn-ref`) argument written in
@@ -7927,18 +8031,24 @@
         ;; it did before typed parameters (result inferred from the body, a
         ;; family mismatch trapping closed at the dispatcher), so an i64
         ;; program keeps its HIR and its CIDs.
+        ;; A contract that declares an effect row (ADR 0353 floor
+        ;; :function-effect-rows) reaches its argument too: the row is new
+        ;; syntax, so no program written before it changes its HIR.
         contracts (into {}
                         (filter (fn [[_ contract]]
-                                  (first-truthy (fn [[parameter-types _]]
-                                          (not (i64-parameter-types? parameter-types)))
-                                        (callable-clauses contract))))
+                                  (or (callable-effect-row contract)
+                                      (first-truthy (fn [[parameter-types _]]
+                                                      (not (i64-parameter-types? parameter-types)))
+                                                    (callable-clauses contract)))))
                         contracts)]
     (apply list op
            (if (seq contracts)
              (map-indexed (fn [index argument]
                             (if-let [contract (get contracts index)]
-                              (binding [*expected-callable-contract* contract]
-                                (desugar-expr argument))
+                              (do
+                                (require-rowed-callable-argument! contract argument)
+                                (binding [*expected-callable-contract* contract]
+                                  (desugar-expr argument)))
                               (desugar-expr argument)))
                           args)
              (map desugar-expr args)))))
@@ -19479,8 +19589,8 @@
               ;; lambda can infer the structured value returned by that nested
               ;; call instead of falling back to its provisional :i64.
               inference-dispatchers
-              (mapv (fn [[result-type arity parameter-types]]
-                      {:name (invoke-dispatcher-name result-type arity parameter-types)
+              (mapv (fn [[result-type arity parameter-types row]]
+                      {:name (invoke-dispatcher-name result-type arity parameter-types row)
                        :params (vec (cons '__kotoba_inference_closure
                                           (map #(symbol (str "__kotoba_inference_arg_" %))
                                                (range arity))))
@@ -19812,6 +19922,36 @@
                               effect)))
                      row)
                body))
+          ;; ADR 0353 floor :function-effect-rows: a closure lifted under a
+          ;; `[:fn ...]` contract that declares an effect row performs no
+          ;; more than that row. Its row family's dispatcher reaches only such
+          ;; closures, so a caller through the contract is bounded by it.
+          _ (doseq [{:keys [helper effect-row]} preliminary-lambdas
+                    :when effect-row
+                    :let [declared (into #{}
+                                         (map (fn [kw]
+                                                (if (= :state kw)
+                                                  :state
+                                                  [:cap/call (effect-capability-id
+                                                              (get capability-registry kw))])))
+                                         effect-row)
+                          excess (disj (set/difference (get function-effects (:name helper) #{})
+                                                       declared)
+                                       :abort)]
+                    :when (seq excess)]
+              (reject! (str "a closure performs effects outside the effect row its [:fn ...] type declares: "
+                            (pr-str (into (sorted-set)
+                                          (map (fn [effect]
+                                                 (if (vector? effect)
+                                                   (or (first-truthy (fn [[id op]]
+                                                                       (when (= (str id) (str (second effect))) op))
+                                                                     capability-id->name)
+                                                       effect)
+                                                   effect)))
+                                          excess))
+                            " is not in " (pr-str (set effect-row)) " (ADR 0353)")
+                       {:function (:name helper) :excess excess :row effect-row}
+                       :kotoba.error/callable-effect-row))
           _ (doseq [{:keys [name lazy-thunk?]} parsed
                     :when (and lazy-thunk? (seq (get function-effects name)))]
               (reject! "lazy sequence thunks must be effect-free because forcing is non-memoized"
