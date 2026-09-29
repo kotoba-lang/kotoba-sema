@@ -4169,9 +4169,33 @@
                       forms)
         heads (apply dissoc intrinsic-helper-heads defined)
         used (volatile! #{})
-        rename (fn rename [form]
+        ;; A head is renamed only where no local binds its name: a `let` /
+        ;; `loop` name is in scope for the later inits and the body, a `fn` /
+        ;; `defn` name and parameter for its whole form.
+        pattern-symbols (fn [pattern] (filter simple-symbol? (tree-seq coll? seq pattern)))
+        rename (fn rename [heads form]
                  (cond
                    (and (seq? form) (= 'quote (first form))) form
+                   (and (seq? form) (contains? '#{let loop} (first form)) (vector? (second form)))
+                   (let [[op bindings & body] form
+                         [bindings heads]
+                         (reduce (fn [[out heads] [pattern init]]
+                                   [(conj out pattern (rename heads init))
+                                    (apply dissoc heads (pattern-symbols pattern))])
+                                 [[] heads]
+                                 (partition 2 bindings))]
+                     (with-meta (apply list op (with-meta bindings (meta (second form)))
+                                       (map #(rename heads %) body))
+                       (meta form)))
+                   (and (seq? form) (contains? '#{fn defn defn-} (first form)))
+                   (let [[op & parts] form
+                         bound (concat (when (simple-symbol? (first parts)) [(first parts)])
+                                       (mapcat pattern-symbols (filter vector? parts))
+                                       (mapcat #(when (and (seq? %) (vector? (first %)))
+                                                  (pattern-symbols (first %)))
+                                               parts))
+                         heads (apply dissoc heads bound)]
+                     (with-meta (apply list op (map #(rename heads %) parts)) (meta form)))
                    (seq? form)
                    (let [[op & args] form
                          helper (when (symbol? op) (first (get heads op)))
@@ -4189,21 +4213,21 @@
                                                       op)))
                      (with-meta (apply list (if helper
                                               (with-meta helper {:kotoba.diag/source-head op})
-                                              (rename op))
-                                       (map rename (if (= helper '__kotoba_intrinsic_ex_info)
-                                                     (ex-info-data-argument args form)
-                                                     args)))
+                                              (rename heads op))
+                                       (map #(rename heads %) (if (= helper '__kotoba_intrinsic_ex_info)
+                                                                (ex-info-data-argument args form)
+                                                                args)))
                        (meta form)))
-                   (vector? form) (with-meta (mapv rename form) (meta form))
-                   (map? form) (with-meta (into {} (map (fn [[k v]] [(rename k) (rename v)])) form)
+                   (vector? form) (with-meta (mapv #(rename heads %) form) (meta form))
+                   (map? form) (with-meta (into {} (map (fn [[k v]] [(rename heads k) (rename heads v)])) form)
                                  (meta form))
-                   (set? form) (with-meta (into #{} (map rename) form) (meta form))
+                   (set? form) (with-meta (into #{} (map #(rename heads %)) form) (meta form))
                    :else form))
         mentions? (fn [form] (first-truthy #(and (seq? %) (symbol? (first %)) (contains? heads (first %)))
                                             (tree-seq coll? seq form)))]
     (if-not (and (seq heads) (first-truthy mentions? forms))
       forms
-      (let [renamed (mapv rename forms)
+      (let [renamed (mapv #(rename heads %) forms)
             needed (into #{} (mapcat #(second (get heads %))) @used)]
         (into renamed
               (keep (fn [helper] (when (contains? needed helper)
