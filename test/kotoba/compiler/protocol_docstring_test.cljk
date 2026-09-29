@@ -124,7 +124,7 @@
     (testing "at the limit is admitted"
       (is (nil? (outcome (unit (str "(defprotocol IP \"" under "\" (-scan [this p]))"))))))
     (testing "one byte over is refused, and says so"
-      ;; The boundary case CLAUDE.md asks for: a comparison with no input on
+      ;; The boundary case AGENTS.md asks for: a comparison with no input on
       ;; the line cannot tell `>` from `>=`.
       (let [r (outcome (unit (str "(defprotocol IP \"" over "\" (-scan [this p]))")))]
         (is (= "defprotocol docstring exceeds admission limit" (:message r)))
