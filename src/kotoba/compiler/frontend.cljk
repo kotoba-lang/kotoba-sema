@@ -3979,6 +3979,56 @@
                                                                        (+ i 1) (+ 128 (bit-and (quot c 4096) 63)))
                                                         (+ i 2) (+ 128 (bit-and (quot c 64) 63)))
                                          (+ i 3) (+ 128 (bit-and c 63))))))))))))
+   (defn- __kotoba_intrinsic_code_unit_count [s :string] :i64
+     (let [n (string-byte-length s)]
+       (loop [i 0 k 0]
+         (if (>= i n)
+           k
+           (let [c (string-code-point-at s i)]
+             (if (< c 128)
+               (recur (+ i 1) (+ k 1))
+               (if (< c 2048)
+                 (recur (+ i 2) (+ k 1))
+                 (if (< c 65536)
+                   (recur (+ i 3) (+ k 1))
+                   (recur (+ i 4) (+ k 2))))))))))
+   (defn- __kotoba_intrinsic_code_unit_at [s :string u :i64] :i64
+     (let [n (string-byte-length s)]
+       (if (< u 0)
+         (string-code-point-at s n)
+         (loop [i 0 k 0]
+           (if (>= i n)
+             (string-code-point-at s n)
+             (let [c (string-code-point-at s i)]
+               (if (< c 65536)
+                 (if (= k u)
+                   c
+                   (recur (+ i (if (< c 128) 1 (if (< c 2048) 2 3))) (+ k 1)))
+                 (if (= k u)
+                   (+ 55296 (quot (- c 65536) 1024))
+                   (if (= (+ k 1) u)
+                     (+ 56320 (bit-and (- c 65536) 1023))
+                     (recur (+ i 4) (+ k 2)))))))))))
+   (defn- __kotoba_intrinsic_code_unit_offset [s :string u :i64] :i64
+     (let [n (string-byte-length s)]
+       (if (< u 0)
+         (+ n 1)
+         (loop [i 0 k 0]
+           (if (= k u)
+             i
+             (if (>= i n)
+               (+ n 1)
+               (let [c (string-code-point-at s i)]
+                 (if (< c 65536)
+                   (recur (+ i (if (< c 128) 1 (if (< c 2048) 2 3))) (+ k 1))
+                   (if (= (+ k 1) u)
+                     (+ i 1)
+                     (recur (+ i 4) (+ k 2)))))))))))
+   (defn- __kotoba_intrinsic_subs [s :string start :i64 end :i64] :string
+     (string-substring s (__kotoba_intrinsic_code_unit_offset s start)
+                       (__kotoba_intrinsic_code_unit_offset s end)))
+   (defn- __kotoba_intrinsic_subs_from [s :string start :i64] :string
+     (string-substring s (__kotoba_intrinsic_code_unit_offset s start) (string-byte-length s)))
    (defn- __kotoba_intrinsic_ex_info [msg :string data :document] :document
      (document-map (document-keyword :message) (document-string msg)
                    (document-keyword :data) data))
@@ -4027,6 +4077,11 @@
     ;; not a surface head: the arity-2 half of `subvec`, recorded by the
     ;; renaming so its one helper is appended.
     subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]]
+    string-code-unit-count [__kotoba_intrinsic_code_unit_count [__kotoba_intrinsic_code_unit_count]]
+    string-code-unit-at [__kotoba_intrinsic_code_unit_at [__kotoba_intrinsic_code_unit_at]]
+    subs [__kotoba_intrinsic_subs [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs]]
+    ;; not a surface head: the arity-2 half of `subs`, as `subvec-from` is.
+    subs-from [__kotoba_intrinsic_subs_from [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs_from]]
     ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]]
     ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]]
     ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]]
@@ -4037,6 +4092,8 @@
 (def ^:private intrinsic-helper-order
   '[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from
     __kotoba_intrinsic_string_to_utf8
+    __kotoba_intrinsic_code_unit_count __kotoba_intrinsic_code_unit_at
+    __kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs __kotoba_intrinsic_subs_from
     __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data
     __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long])
 
@@ -4118,13 +4175,18 @@
                    (seq? form)
                    (let [[op & args] form
                          helper (when (symbol? op) (first (get heads op)))
-                         ;; `(subvec v start)` is the one arity that names a
-                         ;; different helper.
-                         helper (if (and (= helper '__kotoba_intrinsic_subvec) (= 2 (count args)))
+                         ;; `(subvec v start)` and `(subs s start)` are the
+                         ;; arities that name a different helper.
+                         helper (cond
+                                  (and (= helper '__kotoba_intrinsic_subvec) (= 2 (count args)))
                                   '__kotoba_intrinsic_subvec_from
-                                  helper)]
-                     (when helper (vswap! used conj (if (= helper '__kotoba_intrinsic_subvec_from)
-                                                      'subvec-from op)))
+                                  (and (= helper '__kotoba_intrinsic_subs) (= 2 (count args)))
+                                  '__kotoba_intrinsic_subs_from
+                                  :else helper)]
+                     (when helper (vswap! used conj (case helper
+                                                      __kotoba_intrinsic_subvec_from 'subvec-from
+                                                      __kotoba_intrinsic_subs_from 'subs-from
+                                                      op)))
                      (with-meta (apply list (if helper
                                               (with-meta helper {:kotoba.diag/source-head op})
                                               (rename op))
@@ -9592,8 +9654,9 @@
 
     (= :string type)
     (str "A string has no element count in this profile: string-byte-length "
-         "counts UTF-8 BYTES, not characters, and naming it here would give "
-         "two different answers the same spelling")
+         "counts UTF-8 BYTES and string-code-unit-count counts UTF-16 code "
+         "units, and naming either one count would give two different answers "
+         "the same spelling (ADR 0353)")
 
     :else nil))
 
