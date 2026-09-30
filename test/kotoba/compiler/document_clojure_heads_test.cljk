@@ -62,3 +62,31 @@
   (is (= 3 (run-seq 't5)) "keys of a three-key map")
   (is (= 20 (run-seq 't6)) "the second value of a map")
   (is (= 1 (run-seq 't7)) "first of an empty vector is nil (the null kind)"))
+
+(def ^:private hof-prog
+  "(ns m.probe {:kotoba/export [kc vc kept dropped total mixed]})
+(defn kc [] :i64 (count (map (fn [k] k) (keys (assoc (document-map) :a 1 :b 2 :c 3)))))
+(defn vc [] :i64 (count (mapv (fn [e] e) (vals (assoc (document-map) :a 1 :b 2)))))
+(defn kept [] :i64 (count (filter (fn [x] (= (document-kind x) :i64)) (document-vector (document-i64 1) (document-string \"s\") (document-i64 3)))))
+(defn dropped [] :i64 (count (remove (fn [x] (= (document-kind x) :i64)) (document-vector (document-i64 1) (document-string \"s\") (document-i64 3)))))
+(defn one [x :document] :i64 (match-option (document-i64-value x) [:option :i64] (none 0) (some v v)))
+(defn total [] :i64
+  (let [xs (document-vector (document-i64 4) (document-i64 5) (document-i64 6))]
+    (reduce (fn [acc x] (+ acc (one x))) 0 xs)))
+(defn mixed [] :i64
+  (let [ks (keys (assoc (document-map) :a 1 :b 2))]
+    (reduce (fn [acc k] (+ acc 10)) 0 ks)))")
+
+(def ^:private hof-lowered (delay (kir/lower (sema/analyze hof-prog))))
+
+(defn- run-hof [f]
+  (let [v (kir/execute @hof-lowered f [] {})]
+    #?(:clj (long v) :cljs (js/Number v))))
+
+(deftest map-filter-remove-and-reduce-fold-a-document
+  (is (= 3 (run-hof 'kc)) "map over the keys of a three-key map")
+  (is (= 2 (run-hof 'vc)) "mapv over the values of a two-key map")
+  (is (= 2 (run-hof 'kept)) "filter keeps the two integers")
+  (is (= 1 (run-hof 'dropped)) "remove drops the two integers, keeps the string")
+  (is (= 15 (run-hof 'total)) "reduce over a let-bound document vector")
+  (is (= 20 (run-hof 'mixed)) "reduce over (keys ...) of an assoc chain"))

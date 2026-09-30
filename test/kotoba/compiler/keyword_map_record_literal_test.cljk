@@ -195,10 +195,11 @@
 
 (deftest nesting-past-the-type-depth-limit-is-refused-by-name
   ;; `max-type-depth` is 64 (amu ADR 0355; 12 from 2026-09-24, 8 before). A
-  ;; keyword-map record costs about five descriptor nodes per level, so a
-  ;; 65-deep literal (~325 nodes) stays under the 512-node bound and is refused
-  ;; by the depth limit's own name.
-  (let [nest (fn [n] (str "(let [m " (apply str (repeat n "{:a \"x\" :b "))
+  ;; one-field record per level costs a few descriptor nodes, so a 65-deep
+  ;; literal stays under the 512-node bound and reaches the depth limit first.
+  ;; (The two-field form used before the raise costs more per level and would
+  ;; meet the node bound before the depth bound.)
+  (let [nest (fn [n] (str "(let [m " (apply str (repeat n "{:b "))
                           "\"deep\"" (apply str (repeat n "}")) "] 1)"))]
     (is (= :kotoba.error/value-type-depth-limit
            (:code (refusal ":i64" (nest 65))))))

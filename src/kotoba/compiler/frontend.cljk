@@ -5443,6 +5443,70 @@
                      (tree-seq coll? seq body))))
          functions)))
 
+(def ^:private document-returning-heads
+  "Heads whose answer is a `:document` when their receiver is one."
+  '#{keys vals rest next first second nth assoc dissoc merge select-keys update
+     get-in assoc-in map mapv filter filterv remove concat})
+
+(def ^:private document-constructor-heads
+  '#{document-vector document-list document-map document-set document-null
+     document-assoc document-dissoc document-merge document-vector-conj
+     document-vector-drop document-string document-keyword document-symbol
+     document-i64 document-bool document-f64 document-read document-edn-read
+     __kotoba_document_of})
+
+(defn- guess-document-form?
+  "Whether SOURCE form FORM is a `:document`, as far as desugaring can tell
+  without types: a parameter or `let` local recorded as a document, a document
+  constructor, or a sequence/map head applied to a document. The type-aware
+  rewrite that runs after desugaring decides the rest; this only chooses between
+  the vector-i64 and document lowerings of `reduce`/`map`/`filter`."
+  [form]
+  (cond
+    (symbol? form) (and (map? *local-types*) (= :document (get *local-types* form)))
+    (seq? form)
+    (let [[op & args] form]
+      (or (contains? document-constructor-heads op)
+          (and (contains? document-returning-heads op)
+               (not (contains? *lexical-bindings* op))
+               (let [src (if (contains? '#{map mapv filter filterv remove} op)
+                           (second args)
+                           (first args))]
+                 (guess-document-form? src)))
+          (and (= 'get op) (= 3 (count args)) (guess-document-form? (first args)))))
+    :else false))
+
+(defn- document-callback-call
+  "The source form applying callback F-FORM to the symbol X: an inline `fn`
+  binds its parameter (or destructures it) to X, a keyword looks itself up, and
+  anything else is called."
+  [f-form x]
+  (cond
+    (and (seq? f-form) (= 'fn (first f-form)))
+    (let [[_ params & body] f-form]
+      (when-not (and (vector? params) (= 1 (count params)) (seq body))
+        (reject! "a fn applied to a document collection takes one parameter and a body"
+                 f-form))
+      (list 'let [(first params) x] (implicit-do-body body)))
+
+    (keyword? f-form) (list 'get x f-form '(document-null))
+
+    :else (list f-form x)))
+
+(defn- document-hof->reduce
+  "`(map f doc)` / `(filter p doc)` / `(remove p doc)` (and the -v spellings) as
+  the `reduce` over a document that builds a document vector. The result is a
+  `:document`, so a chain of them and `keys`/`vals`/`rest` stays in documents."
+  [op [f-form coll-form]]
+  (let [acc '__kotoba_hof_acc
+        x '__kotoba_hof_x
+        call (document-callback-call f-form x)
+        step (case op
+               (map mapv) (list 'document-vector-conj acc (list '__kotoba_document_of call))
+               (filter filterv) (list 'if call (list 'document-vector-conj acc x) acc)
+               remove (list 'if call acc (list 'document-vector-conj acc x)))]
+    (list 'reduce (list 'fn [acc x] step) '(document-vector) coll-form)))
+
 (defn- uses-string-from-i64? [form]
   (cond
     (seq? form) (or (= string-from-i64-helper-name (first form))
@@ -6454,6 +6518,15 @@
              (top-level-function-symbol? op))
         (apply list op (map desugar-expr args))
 
+        ;; A document collection: fold it into a document vector (a `map` /
+        ;; `filter` over a `:document` cannot be the vector-i64 lowering, which
+        ;; assumes its source is one).
+        (and (contains? '#{map mapv filter filterv remove} op)
+             (= 2 (count args))
+             (not (contains? *lexical-bindings* op))
+             (guess-document-form? (second args)))
+        (desugar-expr (document-hof->reduce op args))
+
         :else
         (case op
         list (binding [*contextual-closure-result-type* contextual-result-type]
@@ -6682,33 +6755,46 @@
                 ;; Lower bindings sequentially.  A value may call a closure
                 ;; introduced by an earlier binding, while its own pattern is
                 ;; deliberately not visible until that value has finished.
-                (letfn [(lower-bindings [remaining env contracts lowered]
+                (letfn [(lower-bindings [remaining env contracts types lowered]
                           (if-let [[pattern value] (first remaining)]
                             (let [value-contract
                                   (binding [*lexical-callable-contracts* contracts]
                                     (expression-callable-contract value))
+                                  ;; `reduce`/`map`/`filter` choose their lowering
+                                  ;; by the collection's type at desugar time, so a
+                                  ;; `let` local that is a document must be known
+                                  ;; as one by the bindings and body that follow.
+                                  document? (and (symbol? pattern)
+                                                 (binding [*local-types* types]
+                                                   (guess-document-form? value)))
                                   expanded
                                   (binding [*lexical-bindings* env
-                                            *lexical-callable-contracts* contracts]
+                                            *lexical-callable-contracts* contracts
+                                            *local-types* types]
                                     (destructure-binding pattern
                                                          (desugar-expr value)))
+                                  next-types (if document?
+                                               (assoc (or types {}) pattern :document)
+                                               types)
                                   next-env (into env (map first expanded))
                                   next-contracts
                                   (if (and (symbol? pattern) value-contract)
                                     (assoc contracts pattern value-contract)
                                     contracts)]
                               (lower-bindings (rest remaining) next-env next-contracts
-                                              (into lowered expanded)))
-                            [(vec (mapcat identity lowered)) env contracts]))]
-                  (let [[lowered-bindings body-env body-contracts]
+                                              next-types (into lowered expanded)))
+                            [(vec (mapcat identity lowered)) env contracts types]))]
+                  (let [[lowered-bindings body-env body-contracts body-types]
                         (lower-bindings (partition 2 bindings)
                                         *lexical-bindings*
-                                        *lexical-callable-contracts* [])
+                                        *lexical-callable-contracts*
+                                        *local-types* [])
                         ;; `mapv`, not bare `map`: forcing must remain in
                         ;; the dynamic extent of the compiler counters.
                         lowered-body
                         (binding [*lexical-bindings* body-env
-                                  *lexical-callable-contracts* body-contracts]
+                                  *lexical-callable-contracts* body-contracts
+                                  *local-types* body-types]
                           (desugar-tail-expressions contextual-result-type body))]
                     ;; A `let` body is an implicit `do`, exactly like `when`,
                     ;; `when-not`, `when-let` and `when-some` already are here.
@@ -7559,6 +7645,10 @@
                   list-type (when (and (symbol? coll-form) (map? *local-types*))
                               (let [t (get *local-types* coll-form)]
                                 (when (canonical-list-type? t) t)))
+                  ;; a `:document` collection (a parameter, a `let` local, or
+                  ;; the answer of a sequence head on one) is walked by index
+                  ;; through `__kotoba_doc_nth`
+                  document-coll? (and (nil? list-type) (guess-document-form? coll-form))
                   ;; A closed, pure unary map chain can be consumed directly by
                   ;; a pure primitive fold.  The ordinary eager map lowering
                   ;; remains the fallback for callbacks whose effects are not
@@ -7568,6 +7658,7 @@
                   ;; composing them at the vector read is semantics-preserving.
                   map-chain
                   (when (and (nil? list-type)
+                             (not document-coll?)
                              (symbol? f-form)
                              (not (contains? *lexical-bindings* f-form))
                              (contains? '#{+ - * bit-and bit-or bit-xor} f-form))
@@ -7585,7 +7676,7 @@
                            ;; innermost map to the outermost map.
                            :callbacks (vec (reverse callbacks))}))))
                   init* (desugar-expr init-form)
-                  coll* (if list-type
+                  coll* (if (or list-type document-coll?)
                           (desugar-expr coll-form)
                           (desugar-vector-i64-source
                            (if map-chain
@@ -7601,8 +7692,10 @@
                   stored? (not (or primitive? named?
                                    (and (seq? f-form) (= 'fn (first f-form)))))
                   callback (when stored? (synthetic "reduce_callback"))
-                  item (if list-type
-                         (list 'typed-list-nth list-type v i)
+                  item (if (or list-type document-coll?)
+                         (if document-coll?
+                           (list doc-nth-helper-name v i)
+                           (list 'typed-list-nth list-type v i))
                          (reduce (fn [value callback-name]
                                    (case callback-name
                                      inc (list '+ value 1)
@@ -7637,12 +7730,14 @@
                     :else
                     (list (invoke-dispatcher-name 2) callback acc item))]
               ;; Re-enter desugar so loop → __kotoba_loop_N under *pending-loop-helpers*.
-              (binding [*loop-known-types* (cond-> {i :i64 v (or list-type :vector-i64)}
+              (binding [*loop-known-types* (cond-> {i :i64 v (cond list-type list-type
+                                                                     document-coll? :document
+                                                                     :else :vector-i64)}
                                              callback (assoc callback :i64))]
                 (desugar-expr
                  (list 'let (vec (concat (when stored? [callback f-form]) [v coll*]))
                        (list 'loop [i 0 acc init*]
-                             (list 'if (list '< i (list 'vector-count v))
+                             (list 'if (list '< i (list (if document-coll? 'document-count 'vector-count) v))
                                    (list 'recur (list '+ i 1) step)
                                    acc))))))))
         ;; Bounded eager map over one to five vector-i64 sources.  One/two
@@ -10587,6 +10682,11 @@
       (contains? '#{select-keys merge} op)
       (row-op-not-record! op (first args) (first types) (cons op args))
 
+      ;; `assoc` on a document is a document (the rewrite lowers it to
+      ;; document-assoc); typed here so a loop over the result knows its type
+      (and (= op 'map-assoc) (= :document (first types)))
+      :document
+
       (= op 'map-assoc)
       (do (require-expression-type! (first types) :map (first args))
           (doseq [[key-form value-form key-type value-type]
@@ -10694,7 +10794,7 @@
                                ;; a `reduce` over a `[:list T]` parameter binds
                                ;; the list itself, not a vector-i64
                                (and (bounded-vector-source-binding? name)
-                                    (canonical-list-type? type))
+                                    (or (canonical-list-type? type) (= :document type)))
                                type
 
                                (bounded-vector-source-binding? name)
@@ -11056,6 +11156,11 @@
               value-type (infer-expression-type value locals signatures)
               descriptor (resolve-ref-type value-type)]
           (cond
+            ;; `get` on a document: an option of the entry, or the entry or the
+            ;; default when one is given
+            (= :document value-type)
+            (if (= 3 (count args)) :document [:option :document])
+
             (canonical-typed-map-type? value-type)
             (do
               (require-expression-type! (infer-expression-type key locals signatures)
@@ -11128,9 +11233,12 @@
         (keys vals)
         (let [value-type (when (= 1 (count args))
                            (infer-expression-type (first args) locals signatures))]
-          (if (canonical-typed-map-type? value-type)
+          (cond
+            (canonical-typed-map-type? value-type)
             [:list (if (= op 'keys) (second value-type) (nth value-type 2))]
-            (infer-call-type op args locals signatures)))
+            ;; a document map's keys / values are a document vector
+            (= :document value-type) :document
+            :else (infer-call-type op args locals signatures)))
         (pair-first pair-second)
         (let [value-type (when (= 1 (count args))
                            (infer-expression-type (first args) locals signatures))]
@@ -11139,11 +11247,16 @@
             [pair-first :vector-f64] :f64
             [pair-second :vector-i64] :vector-i64
             [pair-second :vector-f64] :vector-f64
+            ;; first / rest of a document are documents
+            [pair-first :document] :document
+            [pair-second :document] :document
             (infer-call-type op args locals signatures)))
         nth
         (let [[value index & defaults] args
               value-type (infer-expression-type value locals signatures)]
           (cond
+            (and (= :document value-type) (= 2 (count args))) :document
+
             (heterogeneous-vector-type? value-type)
             (do
               (when-not (<= 2 (count args) 3)
