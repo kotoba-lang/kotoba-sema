@@ -18336,6 +18336,16 @@
     (when (contains? effectful-def-heads head)
       (reject! (str "def value is stateful/effectful: (" head " ...) -- move it into a function or a capability")
                form :kotoba.error/def-value-stateful {:constant name :head head}))
+    ;; A constant is folded once at analysis time, so a capability call ANYWHERE
+    ;; in it (`(= "1" (env/read "X"))`) is an effect the fold cannot perform.
+    ;; Refused by name here; it used to reach the fold and fail as an internal
+    ;; compiler error.
+    (when-let [op (first-truthy (fn [x] (when (and (seq? x) (symbol? (first x))
+                                                   (contains? source-operation-registry (first x)))
+                                          (first x)))
+                                (tree-seq #(and (coll? %) (not (quote-form? %))) seq value-form))]
+      (reject! (str "def value is stateful/effectful: (" op " ...) -- move it into a function or a capability")
+               form :kotoba.error/def-value-stateful {:constant name :head op}))
     (let [mentioned (set (filter symbol? (tree-seq #(and (coll? %) (not (quote-form? %)))
                                                    seq value-form)))]
       (when (contains? mentioned name)

@@ -102,3 +102,12 @@
               "(ns m.probe {:kotoba/export [g]})
 (defn g [x :string] :string
   (str (clock/now \"monotonic\") (cli/args \"\") (sys/cwd \"\") (io/read \"\")))"))))
+
+(deftest a-capability-call-inside-a-def-value-is-refused-by-name
+  ;; It used to fail as an internal compiler error (the fold cannot perform an effect).
+  (let [r (try (sema/analyze "(ns m.probe {:kotoba/export [f]})
+(def on? (= \"1\" (env/read \"X\")))
+(defn f [] :i64 1)")
+               nil
+               (catch #?(:clj Throwable :cljs :default) e (ex-message e)))]
+    (is (= "def value is stateful/effectful: (env/read ...) -- move it into a function or a capability" r))))
