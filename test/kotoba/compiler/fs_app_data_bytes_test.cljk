@@ -1,0 +1,30 @@
+(ns kotoba.compiler.fs-app-data-bytes-test
+  "`fs/app-data-bytes` is the `:bytes` payload of wire 35: the same wire and the
+  same authority as `fs/app-data`, so a grant of one is a grant of the other.
+  The compiler reads and publishes binary files (wasm, kexe, the loader), which
+  are not UTF-8 and so cannot be a Kotoba string. And `(ex-info msg data cause)`
+  keeps the cause as the data's `:cause` (another error is a document here)."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.compiler.frontend :as frontend]))
+
+(deftest the-bytes-capability-shares-the-wire-and-the-authority
+  (is (= 35 (get frontend/capability-registry :fs/app-data)))
+  (is (= 35 (get frontend/capability-registry :fs/app-data-bytes)))
+  (is (= :fs/app-data (get frontend/capability-id->name 35))
+      "the inverse names the primary capability, not its payload variant"))
+
+(deftest a-bytes-read-and-write-are-named-operations
+  (let [hir (sema/analyze
+             "(ns m.probe {:kotoba/export [rd wr]})
+(defn rd [path :string] :bytes (fs/app-data-bytes path))
+(defn wr [request :bytes] :bytes (fs/app-data-bytes request))")]
+    (is (some? hir))))
+
+(deftest ex-info-keeps-its-cause
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [f]})
+(defn inner [x :i64] :i64 (if (< x 0) (throw (ex-info \"inner\" {:x x})) x))
+(defn f [x :i64] :i64
+  (try (inner x) (catch e (throw (ex-info \"outer\" {:phase :outer} e)))))"))))

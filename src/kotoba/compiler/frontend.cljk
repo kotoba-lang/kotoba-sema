@@ -137,6 +137,10 @@
     ;; granted path scope — wire id 35 for the native loader provider
     ;; table (ADR-2609051100 slice 4).
     :fs/app-data 35
+    ;; fs/app-data-bytes: the `:bytes` payload of the SAME wire, the same
+    ;; authority (both are effect :host/fs-app-data); the compiler reads and
+    ;; publishes binary files, which are not UTF-8.
+    :fs/app-data-bytes 35
     ;; io/write (kotoba-lang a0408d81): the bytes a COMMAND writes to its
     ;; standard output, `:string -> :string` answering the decimal byte
     ;; count. Wire 37. Before it this compiler had no capability for stdout
@@ -221,8 +225,11 @@
         (:capabilities capability-catalog)))
 
 (def capability-id->name
-  "Inverse of capability-registry for diagnostics and effect ceilings."
-  (into {} (map (fn [[k v]] [v k]) capability-registry)))
+  "Inverse of capability-registry for diagnostics and effect ceilings. Two names
+  may share a wire id when they are payload variants of one capability
+  (`:fs/app-data` and `:fs/app-data-bytes`, wire 35); the inverse names the
+  primary one, which sorts after its variants and so is written last."
+  (into {} (map (fn [[k v]] [v k]) (sort-by (comp str key) #(compare %2 %1) capability-registry))))
 
 ;; Dataspace v1 is a language-owned typed capability contract. These
 ;; descriptors intentionally match capability-kits/dataspace-v1.edn. Keeping
@@ -3963,21 +3970,33 @@
   is otherwise a constant document, and a local inside one does not compile
   (lang/conformance/abort/ex_info_round_trip.kotoba). Keys must be keywords;
   each value is typed later by `__kotoba_document_of`. Any other `data` is
-  passed through and must already be a `:document`. The one- and
-  three-argument arities are refused: a cause is another Throwable, and there
-  is none here to be one."
+  passed through and must already be a `:document`. The one-argument arity is
+  refused. The three-argument arity `(ex-info msg data cause)` keeps the cause
+  as the data's `:cause`: there is no Throwable here, but another error is a
+  `:document` (what an abort carries), so the chain is not lost."
   [args form]
-  (when-not (= 2 (count args))
-    (reject! "ex-info takes a message and a data document; the cause arity has no Throwable to name"
+  (when-not (<= 2 (count args) 3)
+    (reject! "ex-info takes a message, a data document and an optional cause"
              form :kotoba.error/library-head-shape))
-  (let [[msg data] args]
-    (if (map? data)
-      (do (when-not (every? keyword? (keys data))
-            (reject! "ex-info data map keys must be keywords" form :kotoba.error/library-head-shape))
-          [msg (apply list 'document-map
-                      (mapcat (fn [[k v]] [(list 'document-keyword k) (list '__kotoba_document_of v)])
-                              (sort-by (comp str key) data)))])
-      args)))
+  (let [[msg data cause] args
+        entries (fn [m]
+                  (when-not (every? keyword? (keys m))
+                    (reject! "ex-info data map keys must be keywords" form :kotoba.error/library-head-shape))
+                  (mapcat (fn [[k v]] [(list 'document-keyword k) (list '__kotoba_document_of v)])
+                          (sort-by (comp str key) m)))
+        cause-entry [(list 'document-keyword :cause) (list '__kotoba_document_of cause)]
+        data* (cond
+                (and (map? data) (= 3 (count args)))
+                (apply list 'document-map (concat (entries (dissoc data :cause)) cause-entry))
+
+                (map? data)
+                (apply list 'document-map (entries data))
+
+                (= 3 (count args))
+                (list 'document-assoc data (first cause-entry) (second cause-entry))
+
+                :else data)]
+    [msg data*]))
 
 (defn- implicit-export-exclusions
   "Names the IMPLICIT export set (no :export clause, no defn-) leaves out
