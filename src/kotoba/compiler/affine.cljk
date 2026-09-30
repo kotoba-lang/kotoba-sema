@@ -94,7 +94,7 @@
   {:kotoba/export [*linear-returning* consuming expand-threads in-place-candidates linear-let-thread? linear-parameter? linear-returning? linear? module-linear-returning producing reading unanalysable-thread]}
   (:require [kotoba.lang.coll :as set])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
-                                          [:kids [:list [:ref :form/r]]]]]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]})))
 
 #?(:kotoba
@@ -119,7 +119,7 @@
 
 #?(:kotoba
    (defn- form-mk [t :i64 s :string n :i64 k :keyword kids [:list [:ref :form/r]]] [:ref :form/r]
-     (record-new [:ref :form/r] t s n k kids)))
+     (record-new [:ref :form/r] t s n k kids 0 (bytes-empty))))
 
 #?(:kotoba
    (defn- form-nil-form [] [:ref :form/r] (form-mk 0 "" 0 :none (form-no-forms))))
