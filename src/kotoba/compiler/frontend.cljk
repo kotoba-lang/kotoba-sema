@@ -2740,6 +2740,13 @@
 ;; always assigns the same names.
 (def ^:dynamic *loop-counter* nil)
 (def ^:dynamic *function-arities* {})
+(def ^:dynamic *document-functions*
+  "Source names of the module's functions whose DECLARED result is `:document`.
+  `reduce`/`map`/`filter` choose between the vector-i64 and document lowerings
+  while desugaring, when a call's result type is not inferred yet; a declared
+  `:document` result is what lets `(merge (base) x)` or `(vals (f))` be read as a
+  document."
+  #{})
 (def ^:dynamic *lambda-counter* nil)
 (def ^:dynamic *pending-lambdas* nil)
 (def ^:dynamic *uses-apply?* nil)
@@ -5391,6 +5398,7 @@
 (def ^:private doc-part-from-helper-name '__kotoba_doc_part_from)
 (def ^:private doc-keys-helper-name '__kotoba_doc_keys)
 (def ^:private doc-vals-helper-name '__kotoba_doc_vals)
+(def ^:private doc-append-from-helper-name '__kotoba_doc_append_from)
 
 (def ^:private document-helpers
   [{:name doc-nth-helper-name
@@ -5428,7 +5436,14 @@
     :body '(__kotoba_doc_part_from d 0 0 (document-vector))}
    {:name doc-vals-helper-name
     :params '[d] :param-types [:document] :result :document :effects #{}
-    :body '(__kotoba_doc_part_from d 0 1 (document-vector))}])
+    :body '(__kotoba_doc_part_from d 0 1 (document-vector))}
+   {:name doc-append-from-helper-name
+    :params '[d i acc] :param-types [:document :i64 :document] :result :document :effects #{}
+    ;; every element of D from I on, appended to the document vector ACC
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_append_from d (+ i 1)
+                                       (document-vector-conj acc (__kotoba_doc_nth d i)))
+             acc)}])
 
 (defn- uses-documents?
   "True when a function set mentions `:document` in a signature or calls a
@@ -5446,7 +5461,7 @@
 (def ^:private document-returning-heads
   "Heads whose answer is a `:document` when their receiver is one."
   '#{keys vals rest next first second nth assoc dissoc merge select-keys update
-     get-in assoc-in map mapv filter filterv remove concat})
+     get-in assoc-in map mapv filter filterv remove concat keep into})
 
 (def ^:private document-constructor-heads
   '#{document-vector document-list document-map document-set document-null
@@ -5467,13 +5482,19 @@
     (seq? form)
     (let [[op & args] form]
       (or (contains? document-constructor-heads op)
+          ;; the keys / values of a map are a document vector whatever the map's
+          ;; expression is (a call to a module function is not typed yet here)
+          (and (contains? '#{keys vals} op) (not (contains? *lexical-bindings* op)))
+          (and (symbol? op) (contains? *document-functions* op)
+               (not (contains? *lexical-bindings* op)))
           (and (contains? document-returning-heads op)
                (not (contains? *lexical-bindings* op))
                (let [src (if (contains? '#{map mapv filter filterv remove} op)
                            (second args)
                            (first args))]
                  (guess-document-form? src)))
-          (and (= 'get op) (= 3 (count args)) (guess-document-form? (first args)))))
+          (and (= 'get op) (= 3 (count args)) (guess-document-form? (first args)))
+          (and (= 'reduce op) (= 3 (count args)) (guess-document-form? (second args)))))
     :else false))
 
 (defn- document-callback-call
@@ -5506,6 +5527,112 @@
                (filter filterv) (list 'if call (list 'document-vector-conj acc x) acc)
                remove (list 'if call acc (list 'document-vector-conj acc x)))]
     (list 'reduce (list 'fn [acc x] step) '(document-vector) coll-form)))
+
+(def ^:private document-head-set
+  "Clojure heads rewritten to primitives when their collection is a `:document`."
+  '#{merge select-keys get-in assoc-in update empty? some every? concat keep into})
+
+(defn- document-conj-step
+  "The reduce step that appends the item X to the document vector ACC."
+  [acc x]
+  (list 'fn [acc x] (list 'document-vector-conj acc x)))
+
+(defn- document-head-target
+  "The argument whose type decides whether OP is a document operation."
+  [op args]
+  (if (contains? '#{some every? keep} op) (second args) (first args)))
+
+(defn- document-head->form
+  "OP applied to a document, as source built from primitives the frontend already
+  has: nested `get`/`assoc` for paths, `document-merge`, and `reduce` for the
+  collection folds. Paths must be literal vectors of keys; a callback is an
+  inline `fn` (one parameter) or a symbol, applied by `document-callback-call`."
+  [op args]
+  (let [acc '__kotoba_hof_acc
+        x '__kotoba_hof_x
+        nil-doc '(document-null)
+        path! (fn [v]
+                (when-not (and (vector? v) (seq v))
+                  (reject! (str op " on a document takes a literal non-empty vector of keys")
+                           (cons op args)))
+                v)]
+    (case op
+      merge (reduce (fn [a b] (list 'document-merge a b)) (first args) (rest args))
+
+      select-keys
+      (let [m '__kotoba_sel_m
+            ks (path! (second args))]
+        (list 'let [m (first args)]
+              (reduce (fn [accumulated k]
+                        (list 'if (list 'contains? m k)
+                              (list 'assoc accumulated k (list 'get m k nil-doc))
+                              accumulated))
+                      '(document-map) ks)))
+
+      get-in
+      (let [ks (path! (second args))
+            default (if (= 3 (count args)) (nth args 2) nil-doc)]
+        (loop [form (first args) remaining ks]
+          (let [k (first remaining)]
+            (if (next remaining)
+              (recur (list 'get form k nil-doc) (next remaining))
+              (list 'get form k default)))))
+
+      assoc-in
+      (let [ks (path! (second args))
+            v (nth args 2)]
+        (letfn [(build [m remaining]
+                  (let [k (first remaining)]
+                    (if (next remaining)
+                      (list 'assoc m k (build (list 'get m k '(document-map)) (next remaining)))
+                      (list 'assoc m k v))))]
+          (build (first args) ks)))
+
+      update
+      (let [[m k f & more] args
+            current (list 'get m k nil-doc)
+            applied (if (and (seq? f) (= 'fn (first f)))
+                      (document-callback-call f current)
+                      (if (keyword? f)
+                        (list 'get current f nil-doc)
+                        (apply list f current more)))]
+        (list 'assoc m k applied))
+
+      empty? (list '= (list 'document-count (first args)) 0)
+
+      some (let [[p coll] args]
+             (list 'reduce (list 'fn [acc x] (list 'if acc acc (document-callback-call p x)))
+                   false coll))
+
+      every? (let [[p coll] args]
+               (list 'reduce (list 'fn [acc x] (list 'if acc (document-callback-call p x) false))
+                     true coll))
+
+      ;; a recursive helper, not a nested reduce: an inner loop's result type is
+      ;; not resolved when an outer loop's argument types are
+      concat (reduce (fn [folded coll] (list doc-append-from-helper-name coll 0 folded))
+                     '(document-vector) args)
+
+      keep (let [[f coll] args]
+             (list 'reduce
+                   (list 'fn [acc x]
+                         (list 'let ['__kotoba_kept (document-callback-call f x)]
+                               (list 'if (list '= (list 'document-kind '__kotoba_kept) :null)
+                                     acc
+                                     (list 'document-vector-conj acc '__kotoba_kept))))
+                   '(document-vector) coll))
+
+      ;; `(into to coll)`: a map target takes each [key value] entry, any other
+      ;; target appends the item.
+      into (let [[to coll] args]
+             (list 'reduce
+                   (list 'fn [acc x]
+                         (list 'if (list '= (list 'document-kind acc) :map)
+                               (list 'document-assoc acc
+                                     (list doc-nth-helper-name x 0)
+                                     (list doc-nth-helper-name x 1))
+                               (list 'document-vector-conj acc x)))
+                   to coll)))))
 
 (defn- uses-string-from-i64? [form]
   (cond
@@ -6526,6 +6653,15 @@
              (not (contains? *lexical-bindings* op))
              (guess-document-form? (second args)))
         (desugar-expr (document-hof->reduce op args))
+
+        ;; the rest of the collection heads, on a document (merge, select-keys,
+        ;; get-in, assoc-in, update, empty?, some, every?, concat, keep, into)
+        (and (contains? document-head-set op)
+             (not (contains? *lexical-bindings* op))
+             (not (top-level-function-symbol? op))
+             (seq args)
+             (guess-document-form? (document-head-target op args)))
+        (desugar-expr (document-head->form op args))
 
         :else
         (case op
@@ -19585,6 +19721,10 @@
                       (update out source-name (fnil conj #{}) arity))
                     out))
                 {} def-parts)
+        document-functions (into #{}
+                                 (comp (filter #(= :document (:result %)))
+                                       (map :source-name))
+                                 def-parts)
         _ (when (> (count def-parts) max-functions)
             (reject! "function count exceeds admission limit" (count def-parts)))
         ;; After every function is parsed and before anything is desugared:
@@ -19675,6 +19815,7 @@
                           *uses-lazy?* uses-lazy?
                           *required-closure-dispatchers* required-dispatchers
                           *function-arities* function-arities
+                          *document-functions* document-functions
                           *function-callable-result-contracts*
                           function-callable-result-contracts
                           *function-callable-param-contracts*

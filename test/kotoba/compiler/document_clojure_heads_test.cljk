@@ -90,3 +90,41 @@
   (is (= 1 (run-hof 'dropped)) "remove drops the two integers, keeps the string")
   (is (= 15 (run-hof 'total)) "reduce over a let-bound document vector")
   (is (= 20 (run-hof 'mixed)) "reduce over (keys ...) of an assoc chain"))
+
+(def ^:private more-prog
+  "(ns m.probe {:kotoba/export [a b c d e f g h i j k l]})
+(defn ival [x :document] :i64 (match-option (document-i64-value x) [:option :i64] (none -1) (some v v)))
+(defn dbl [x :document] :document (document-i64 (* 2 (ival x))))
+(defn base [] :document (assoc (document-map) :a 1 :b 2 :c 3))
+(defn a [] :i64 (count (merge (base) (assoc (document-map) :d 4 :a 9))))
+(defn b [] :i64 (count (select-keys (base) [:a :c :zzz])))
+(defn c [] :i64 (ival (get-in (assoc (document-map) :x (base)) [:x :b] (document-null))))
+(defn d [] :i64 (ival (get-in (assoc-in (document-map) [:p :q] (document-i64 77)) [:p :q] (document-null))))
+(defn e [] :i64 (ival (get (update (base) :b dbl) :b (document-null))))
+(defn f [] :i64 (if (empty? (document-vector)) 1 0))
+(defn g [] :i64 (if (some (fn [x] (= (ival x) 2)) (vals (base))) 1 0))
+(defn h [] :i64 (if (every? (fn [x] (> (ival x) 0)) (vals (base))) 1 0))
+(defn i [] :i64 (count (concat (document-vector (document-i64 1)) (document-vector (document-i64 2) (document-i64 3)))))
+(defn j [] :i64 (count (into (document-vector) (vals (base)))))
+(defn k [] :i64 (count (into (document-map) (document-vector (document-vector :m (document-i64 1)) (document-vector :n (document-i64 2))))))
+(defn l [] :i64 (count (keep (fn [x] (if (> (ival x) 1) x (document-null))) (vals (base)))))")
+
+(def ^:private more-lowered (delay (kir/lower (sema/analyze more-prog))))
+
+(defn- run-more [f]
+  (let [v (kir/execute @more-lowered f [] {})]
+    #?(:clj (long v) :cljs (js/Number v))))
+
+(deftest merge-select-get-in-update-and-the-collection-folds-answer-on-a-document
+  (is (= 4 (run-more 'a)) "merge: the union of the keys")
+  (is (= 2 (run-more 'b)) "select-keys keeps the keys that are present")
+  (is (= 2 (run-more 'c)) "get-in through a nested map")
+  (is (= 77 (run-more 'd)) "assoc-in then get-in")
+  (is (= 4 (run-more 'e)) "update applies the function to the current value")
+  (is (= 1 (run-more 'f)) "empty? of an empty vector")
+  (is (= 1 (run-more 'g)) "some finds a value")
+  (is (= 1 (run-more 'h)) "every? holds")
+  (is (= 3 (run-more 'i)) "concat of one and two")
+  (is (= 3 (run-more 'j)) "into a vector appends")
+  (is (= 2 (run-more 'k)) "into a map assocs each [key value] entry")
+  (is (= 2 (run-more 'l)) "keep drops the nil results"))
