@@ -32,7 +32,11 @@
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
-                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]})))
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]]]]
+                                 :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
 ;; clojure.core/some, spelled as the loop it is. In Kotoba `some` is the
 ;; option constructor and a two-argument `(some pred coll)` is refused as a
@@ -283,6 +287,1678 @@
 #?(:kotoba
    (defn- head-is? [f [:ref :form/r] name :string] :bool
      (and (form/is-seq? f) (> (form/count-of f) 0) (sym-is? (form/nth-of f 0) name)))
+   :default nil)
+
+;; ---- desugar on the Kotoba route (selfhost S3, desugar half): the env, the result records, refusals ----
+;; The host threads ~30 dynamic vars through desugar; here one record is threaded by value. The fields the
+;; ported heads read today: the synthetic-name counter (`*synthetic-counter*`, a volatile on the host), the
+;; contextual closure result type (`*contextual-closure-result-type*`, nil-form for none), the absence mode
+;; (`*absence-mode*` = :none) and the module's function names (a Form set: a head that is one of them is an
+;; ordinary call, `desugar-ordinary-call`; every other head that is not ported here is refused as unported).
+;; A pass is (env, Form) -> :fe/dr {env' form'}; a list of forms is :fe/drs. A refusal is a thrown :fe/err
+;; (ADR 0007), so every call of an aborting function sits in tail position or as a `let` value.
+#?(:kotoba
+   (defn- fe-env [counter :i64 result [:ref :form/r] none :bool arities [:ref :form/r] tbl [:ref :form/r]] [:ref :fe/env]
+     (record-new [:ref :fe/env] counter result none arities
+                 (form/form-set (form/no-forms)) (form/nil-form) (form/form-set (form/no-forms)) -1 tbl
+                 (form/nil-form) false "" (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-counter [env [:ref :fe/env]] :i64 (record-get [:ref :fe/env] env :counter))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-result [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :result))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-none? [env [:ref :fe/env]] :bool (record-get [:ref :fe/env] env :none))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-arities [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :arities))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-lexical [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :lexical))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-types [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :types))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-docfns [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :docfns))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-schemas [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :schemas))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-loop-counter [env [:ref :fe/env]] :i64 (record-get [:ref :fe/env] env :loop-counter))
+   :default nil)
+
+#?(:kotoba
+   (defn- with-lexical [env [:ref :fe/env] s [:ref :form/r]] [:ref :fe/env]
+     (record-assoc [:ref :fe/env] env :lexical s))
+   :default nil)
+
+#?(:kotoba
+   (defn- with-loop-counter [env [:ref :fe/env] n :i64] [:ref :fe/env]
+     (record-assoc [:ref :fe/env] env :loop-counter n))
+   :default nil)
+
+#?(:kotoba
+   (defn- with-result [env [:ref :fe/env] r [:ref :form/r]] [:ref :fe/env]
+     (record-assoc [:ref :fe/env] env :result r))
+   :default nil)
+
+#?(:kotoba
+   (defn- dr [env [:ref :fe/env] f [:ref :form/r]] [:ref :fe/dr]
+     (record-new [:ref :fe/dr] env f))
+   :default nil)
+
+#?(:kotoba
+   (defn- dr-env [r [:ref :fe/dr]] [:ref :fe/env] (record-get [:ref :fe/dr] r :env))
+   :default nil)
+
+#?(:kotoba
+   (defn- dr-form [r [:ref :fe/dr]] [:ref :form/r] (record-get [:ref :fe/dr] r :form))
+   :default nil)
+
+#?(:kotoba
+   (defn- drs [env [:ref :fe/env] fs [:list [:ref :form/r]]] [:ref :fe/drs]
+     (record-new [:ref :fe/drs] env fs))
+   :default nil)
+
+#?(:kotoba
+   (defn- drs-env [r [:ref :fe/drs]] [:ref :fe/env] (record-get [:ref :fe/drs] r :env))
+   :default nil)
+
+#?(:kotoba
+   (defn- drs-forms [r [:ref :fe/drs]] [:list [:ref :form/r]] (record-get [:ref :fe/drs] r :forms))
+   :default nil)
+
+;; a refusal with a stable code (the host `reject!`'s :kotoba.error/code, spelled as its text)
+#?(:kotoba
+   (defn- fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg code form "subset"))
+   :default nil)
+
+;; `(when-not ok (reject! msg form code))` as an aborting function: bind it in a `let`
+#?(:kotoba
+   (defn- require-k [ok :bool msg :string code :string form [:ref :form/r]] :i64
+     (if ok 0 (throw (fe-reject msg code form))))
+   :default nil)
+
+;; the Kotoba route has not ported this shape yet: the differential counts these, it does not compare them
+#?(:kotoba
+   (defn- fe-unported [what :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] (string-concat "unported desugar form: " what) "kotoba.fe/unported" form "desugar"))
+   :default nil)
+
+;; the keyword's text, ":bool"
+#?(:kotoba
+   (defn- kw-text [f [:ref :form/r]] :string
+     (document-edn-print (document-keyword (form/keyword-value f))))
+   :default nil)
+
+;; `(simple-symbol? f)`: a symbol with no namespace (the lone `/` is one)
+#?(:kotoba
+   (defn- simple-symbol-form? [f [:ref :form/r]] :bool
+     (and (form/is-symbol? f)
+          (or (< (string-find-byte (form/symbol-value f) 47 0) 0)
+              (string=? (form/symbol-value f) "/"))))
+   :default nil)
+
+;; the kind of result type `desugar-result-expr` admits without the schema machinery: the flat closure types
+#?(:kotoba
+   (defn- flat-result-type? [t [:ref :form/r]] :bool
+     (and (form/is-keyword? t)
+          (let [s (kw-text t)]
+            (or (string=? s ":i64") (string=? s ":bool") (string=? s ":f32") (string=? s ":f64")
+                (string=? s ":string") (string=? s ":bytes") (string=? s ":vector-i64")
+                (string=? s ":vector-f64") (string=? s ":document")))))
+   :default nil)
+
+#?(:kotoba
+   (defn- document-ctx? [t [:ref :form/r]] :bool
+     (and (form/is-keyword? t) (string=? (kw-text t) ":document")))
+   :default nil)
+
+;; the list of the call's arguments from index I as a Form seq (the host's `(rest form)` / `args`)
+#?(:kotoba
+   (defn- args-of [form [:ref :form/r]] [:list [:ref :form/r]]
+     (form/rest-list form))
+   :default nil)
+
+#?(:kotoba
+   (defn- argc [form [:ref :form/r]] :i64 (- (form/count-of form) 1))
+   :default nil)
+
+#?(:kotoba
+   (defn- arg [form [:ref :form/r] k :i64] [:ref :form/r] (form/nth-of form (+ k 1)))
+   :default nil)
+
+;; the constant tables the dispatch reads, parsed ONCE per env (a Kotoba table accessor re-reads its EDN on every call)
+#?(:kotoba
+   (defn- put2 [acc [:list [:ref :form/r]] k [:ref :form/r] v [:ref :form/r]] [:list [:ref :form/r]]
+     (form/append-form (form/append-form acc k) v))
+   :default nil)
+
+#?(:kotoba
+   (defn- fe-tables [] [:ref :form/r]
+     (form/form-map
+      (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (form/no-forms)
+        (form/keyword-form :string-idx) (tables/contextual-string-argument-indexes))
+        (form/keyword-form :document-idx) (tables/contextual-document-argument-indexes))
+        (form/keyword-form :f64-idx) (tables/contextual-f64-argument-indexes))
+        (form/keyword-form :f32-idx) (tables/contextual-f32-argument-indexes))
+        (form/keyword-form :vec-f64) (tables/contextual-vector-f64-argument-types))
+        (form/keyword-form :typed-vec) (tables/typed-vector-operations))
+        (form/keyword-form :doc-heads) (tables/document-head-set))
+        (form/keyword-form :non-shadowable) (tables/non-shadowable-special-heads))
+        (form/keyword-form :str-int) (tables/str-integer-heads))
+        (form/keyword-form :doc-ctor) (tables/document-constructor-heads))
+        (form/keyword-form :doc-ret) (tables/document-returning-heads))
+        (form/keyword-form :unported) (unported-heads))
+        (form/keyword-form :typed-ops) (typed-op-specs))
+        (form/keyword-form :cap-registry) (capability-registry))))
+   :default nil)
+
+#?(:kotoba
+   (defn- env-table [env [:ref :fe/env] k :keyword] [:ref :form/r]
+     (form/form-get (record-get [:ref :fe/env] env :tbl) (form/keyword-form k)))
+   :default nil)
+
+;; the form at index I of FORM: under RESULT-TYPE when it is the last form and there is one
+#?(:kotoba
+   (defn- desugar-tail-one [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (if (and (not (form/is-nil? result-type)) (= i (- (form/count-of form) 1)))
+       (desugar-result-expr env result-type (form/nth-of form i))
+       (desugar-expr env (form/nth-of form i))))
+   :default nil)
+
+;; the chain from the remaining operands [j, n) of FORM, LEFT the bound temp of the previous operand
+#?(:kotoba
+   (defn- comparison-chain-rest [env [:ref :fe/env] op [:ref :form/r] left [:ref :form/r] form [:ref :form/r] j :i64] [:ref :fe/dr]
+     (let [remaining (- (form/count-of form) j)]
+       (if (= remaining 0)
+         (dr env (form/bool-form true))
+         (let [right (chain-temp "cmp" remaining)
+               a (desugar-expr env (form/nth-of form j))
+               b (comparison-chain-rest (dr-env a) op right form (+ j 1))]
+           (dr (dr-env b)
+               (form/call2 "let" (form/vec2 right (dr-form a))
+                           (form/call3 "if" (form/call2 (form/symbol-value op) left right)
+                                       (dr-form b) (form/bool-form false))))))))
+   :default nil)
+
+;; CLAUSES are the forms of FORM from index I (test/result pairs)
+#?(:kotoba
+   (defn- desugar-cond-lower [env [:ref :fe/env] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (let [n (- (form/count-of form) i)]
+       (if (= n 0)
+         (dr env (form/int-form 0))
+         (let [test (form/nth-of form i)
+               result (form/nth-of form (+ i 1))
+               remaining (- n 2)]
+           (if (form/eq test (form/keyword-form :else))
+             (let [_ (require-k (= remaining 0) "cond :else clause must be last" "kotoba.error/subset-reject" form)]
+               (desugar-cond-value env result))
+             (let [t (desugar-bool-expr env test)
+                   v (desugar-cond-value (dr-env t) result)
+                   e (desugar-cond-rest (dr-env v) form (+ i 2) remaining)]
+               (dr (dr-env e) (form/call3 "if" (dr-form t) (dr-form v) (dr-form e)))))))))
+   :default nil)
+
+;; what follows a cond clause: the remaining clauses, or the absence marker
+#?(:kotoba
+   (defn- desugar-cond-rest [env [:ref :fe/env] form [:ref :form/r] i :i64 remaining :i64] [:ref :fe/dr]
+     (if (> remaining 0)
+       (desugar-cond-lower env form i)
+       (dr env (absence-marker-form env))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-cond-value [env [:ref :fe/env] x [:ref :form/r]] [:ref :fe/dr]
+     (if (form/is-nil? x)
+       (dr env (form/call1 "__kotoba_absent" (form/keyword-form :nil)))
+       (desugar-expr env x)))
+   :default nil)
+
+;; reduce thread-form over the steps of FORM from index I
+#?(:kotoba
+   (defn- thread-steps [value [:ref :form/r] form [:ref :form/r] i :i64 last? :bool] [:ref :form/r]
+     (if (>= i (form/count-of form))
+       value
+       (thread-steps (thread-form value (form/nth-of form i) last?) form (+ i 1) last?)))
+   :default nil)
+
+#?(:kotoba
+   (defn- as-thread-steps [value [:ref :form/r] name [:ref :form/r] form [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (form/count-of form))
+       value
+       (as-thread-steps (form/call2 "let" (form/vec2 name value) (form/nth-of form i)) name form (+ i 1))))
+   :default nil)
+
+;; VALUE is the already desugared accumulator; the test/step pairs of FORM start at index I
+#?(:kotoba
+   (defn- cond-thread-steps [env [:ref :fe/env] value [:ref :form/r] form [:ref :form/r] i :i64 last? :bool] [:ref :fe/dr]
+     (if (>= i (form/count-of form))
+       (dr env value)
+       (let [test (form/nth-of form i)
+             step (form/nth-of form (+ i 1))
+             _ (require-k (and (form/is-seq? step) (> (form/count-of step) 0) (form/is-symbol? (form/nth-of step 0)))
+                          (string-concat (if last? "cond->>" "cond->") " update must be a non-empty call form")
+                          "kotoba.error/subset-reject" step)
+             t (synthetic env "cond-thread")
+             tmp (dr-form t)
+             threaded (thread-form tmp step last?)
+             a (desugar-bool-expr (dr-env t) test)
+             b (desugar-expr (dr-env a) threaded)]
+         (cond-thread-steps (dr-env b)
+                            (form/call2 "let" (form/vec2 tmp value)
+                                        (form/call3 "if" (dr-form a) (dr-form b) tmp))
+                            form (+ i 2) last?))))
+   :default nil)
+
+;; the pairs of FORM from index I (up to END, exclusive), folded from the last to the first over FALLBACK
+#?(:kotoba
+   (defn- condp-fold [env [:ref :fe/env] predicate [:ref :form/r] tmp [:ref :form/r] form [:ref :form/r]
+                      i :i64 end :i64 fallback [:ref :form/r]] [:ref :fe/dr]
+     (if (< i end)
+       (let [j (- end 2)
+             test (form/nth-of form j)
+             result (form/nth-of form (+ j 1))
+             a (desugar-expr env test)
+             c (desugar-bool-expr (dr-env a) (form/call2 (form/symbol-value predicate) (dr-form a) tmp))
+             d (desugar-expr (dr-env c) result)]
+         (condp-fold (dr-env d) predicate tmp form i j (form/call3 "if" (dr-form c) (dr-form d) fallback)))
+       (dr env fallback)))
+   :default nil)
+
+#?(:kotoba
+   (defn- condp-default-form [form [:ref :form/r] default? :bool] [:ref :form/r]
+     (if default?
+       (form/nth-of form (- (form/count-of form) 1))
+       (form/call2 "quot" (form/int-form 1) (form/int-form 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn- condp-has-arrow? [form [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of form))
+       false
+       (if (form/eq (form/nth-of form i) (form/keyword-form :>>))
+         true
+         (condp-has-arrow? form (+ i 1)))))
+   :default nil)
+
+;; the forms of FORM from index I, each desugared, in order
+#?(:kotoba
+   (defn- desugar-each [env [:ref :fe/env] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-expr env (form/nth-of form i))]
+         (desugar-each (dr-env r) form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; (HEAD ,@forms)
+#?(:kotoba
+   (defn- head-call [head [:ref :form/r] forms [:list [:ref :form/r]]] [:ref :form/r]
+     (form/form-seq (form/cons-onto head forms)))
+   :default nil)
+
+;; (NAME (desugar arg))-shaped heads: the arity is checked first
+#?(:kotoba
+   (defn- desugar-operand [env [:ref :fe/env] form [:ref :form/r] msg :string] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) msg "kotoba.error/subset-reject" form)]
+       (desugar-expr env (arg form 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-if-branch [env [:ref :fe/env] ctx [:ref :form/r] x [:ref :form/r]] [:ref :fe/dr]
+     (cond
+       (form/is-nil? x) (dr env (form/call1 "__kotoba_absent" (form/keyword-form :nil)))
+       (not (form/is-nil? ctx)) (desugar-result-expr env ctx x)
+       :else (desugar-expr env x)))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-if [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 3 (argc form))
+                        (string-concat "if requires test, then, else; got " (string-concat (string-from-i64 (argc form)) " arguments"))
+                        "kotoba.error/if-arity" form)
+           t (desugar-bool-expr env (arg form 0))
+           a (desugar-if-branch (dr-env t) ctx (arg form 1))
+           b (desugar-if-branch (dr-env a) ctx (arg form 2))]
+       (dr (dr-env b) (form/call3 "if" (dr-form t) (dr-form a) (dr-form b)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-do-arm [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) "do requires at least one expression" "kotoba.error/do-empty" form)]
+       (if (= 1 (argc form))
+         (if (form/is-nil? ctx)
+           (desugar-expr env (arg form 0))
+           (desugar-result-expr env ctx (arg form 0)))
+         (let [r (desugar-tail-expressions env ctx form 1 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "do") (drs-forms r)))))))
+   :default nil)
+
+;; (= a b) and the ordered comparisons: two operands stay a call, any other count is a chain
+#?(:kotoba
+   (defn- desugar-binary-op [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (if (= 2 (argc form))
+       (let [a (desugar-expr env (arg form 0))
+             b (desugar-expr (dr-env a) (arg form 1))]
+         (dr (dr-env b) (form/call2 (form/symbol-value op) (dr-form a) (dr-form b))))
+       (desugar-comparison-chain env op form 1)))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-not= [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (if (= 2 (argc form))
+       (let [a (desugar-expr env (arg form 0))
+             b (desugar-expr (dr-env a) (arg form 1))]
+         (dr (dr-env b) (form/call3 "if" (form/call2 "=" (dr-form a) (dr-form b)) (form/bool-form false) (form/bool-form true))))
+       (let [c (desugar-comparison-chain env (form/symbol-form "=") form 1)]
+         (dr (dr-env c) (form/call3 "if" (dr-form c) (form/bool-form false) (form/bool-form true))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-when-body [env [:ref :fe/env] form [:ref :form/r] single-only :bool] [:ref :fe/dr]
+     ;; the body of when / when-not, forms from index 2: one form is itself, several a `do`, none 0 (when-not) or (do)
+     (let [n (- (form/count-of form) 2)]
+       (cond
+         (= n 1) (desugar-expr env (form/nth-of form 2))
+         (and (= n 0) (not single-only)) (dr env (form/int-form 0))
+         :else (let [r (desugar-each env form 2 (form/no-forms))]
+                 (dr (drs-env r) (head-call (form/symbol-form "do") (drs-forms r)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-when [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) "when requires a test expression" "kotoba.error/subset-reject" form)
+           then (desugar-when-body env form true)
+           t (desugar-bool-expr (dr-env then) (arg form 0))]
+       (dr (dr-env t) (form/call3 "if" (dr-form t) (dr-form then) (absence-marker-form (dr-env t))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-when-not [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) "when-not requires a test expression" "kotoba.error/subset-reject" form)
+           then (desugar-when-body env form false)
+           t (desugar-bool-expr (dr-env then) (arg form 0))]
+       (dr (dr-env t) (form/call3 "if" (dr-form t) (absence-marker-form (dr-env t)) (dr-form then)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-if-not-else [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (if (= 3 (argc form))
+       (desugar-cond-value env (arg form 2))
+       (dr env (absence-marker-form env))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-if-not [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (and (<= 2 (argc form)) (<= (argc form) 3)) "if-not requires then and optional else expressions"
+                        "kotoba.error/subset-reject" form)
+           t (desugar-bool-expr env (arg form 0))
+           e (desugar-if-not-else (dr-env t) form)
+           th (desugar-cond-value (dr-env e) (arg form 1))]
+       (dr (dr-env th) (form/call3 "if" (dr-form t) (dr-form e) (dr-form th)))))
+   :default nil)
+
+;; (NAME ,@(map desugar-expr args)) with an arity check; `(get ...)`-style heads keep the authored head
+#?(:kotoba
+   (defn- desugar-keep-head [env [:ref :fe/env] form [:ref :form/r] ok :bool msg :string] [:ref :fe/dr]
+     (let [_ (require-k ok msg "kotoba.error/subset-reject" form)
+           r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/nth-of form 0) (drs-forms r)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-some-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form))
+                        (if (= 2 (argc form))
+                          "some with two arguments is clojure.core/some (a predicate over a collection); in this language `some` is the option constructor and takes one i64 operand -- search with filter / first, or write the loop"
+                          "some requires one i64 operand")
+                        "kotoba.error/subset-reject" form)
+           a (desugar-expr env (arg form 0))]
+       (dr (dr-env a) (form/call1 "option-some" (dr-form a)))))
+   :default nil)
+
+;; (OUTER (desugar arg)) with the one-operand check
+#?(:kotoba
+   (defn- desugar-wrap1 [env [:ref :fe/env] form [:ref :form/r] msg :string outer :string] [:ref :fe/dr]
+     (let [a (desugar-operand env form msg)]
+       (dr (dr-env a) (form/call1 outer (dr-form a)))))
+   :default nil)
+
+;; (OUTER (desugar arg) CONST) for zero? pos? neg? empty?
+#?(:kotoba
+   (defn- desugar-against-zero [env [:ref :fe/env] form [:ref :form/r] msg :string outer :string] [:ref :fe/dr]
+     (let [a (desugar-operand env form msg)]
+       (dr (dr-env a) (form/call2 outer (dr-form a) (form/int-form 0)))))
+   :default nil)
+
+;; ((fn ...) args): bound to a synthetic callee and called by name; the contextual result type rides along
+#?(:kotoba
+   (defn- desugar-beta [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [c (synthetic env "app_callee")
+           callee (dr-form c)
+           call (form/form-seq (form/cons-onto callee (form/rest-list form)))]
+       (desugar-expr (with-result (dr-env c) ctx) (form/call2 "let" (form/vec2 callee (form/nth-of form 0)) call))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-wrap1-if [env [:ref :fe/env] form [:ref :form/r] msg :string] [:ref :fe/dr]
+     (let [a (desugar-operand env form msg)]
+       (dr (dr-env a) (form/call3 "if" (dr-form a) (form/bool-form false) (form/bool-form true)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-second [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [a (desugar-operand env form "second requires one operand")]
+       (dr (dr-env a) (form/call1 "pair-first" (form/call1 "pair-second" (dr-form a))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-cons [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 2 (argc form)) "cons requires two operands" "kotoba.error/subset-reject" form)
+           a (desugar-expr env (arg form 0))
+           b (desugar-expr (dr-env a) (arg form 1))]
+       (dr (dr-env b) (form/call2 "pair" (dr-form a) (dr-form b)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-nil? [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [a (desugar-operand env form "nil? requires one option operand")]
+       (dr (dr-env a) (form/call1 "bool-not" (form/call1 "option-some?" (dr-form a))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-call [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (if (= 0 (form/count-of form))
+       (throw (fe-unported "empty list" form))
+       (let [op (form/nth-of form 0)]
+         (cond
+           (form/is-keyword? op)
+           (cond
+             (= 2 (form/count-of form))
+             (let [a (desugar-expr env (form/nth-of form 1))]
+               (dr (dr-env a) (form/call2 "record-get" (dr-form a) op)))
+             (= 3 (form/count-of form))
+             (desugar-expr env (form/call3 "get" (form/nth-of form 1) op (form/nth-of form 2)))
+             :else (throw (fe-unported "keyword head" form)))
+           (form/is-seq? op) (desugar-beta env form ctx)
+           (form/is-symbol? op) (desugar-head env op form ctx)
+           :else (throw (fe-unported "operator" form))))))
+   :default nil)
+
+;; heads of the host's `case op` (and its cond chain) that have no Kotoba port yet: the scaffolding that shrinks as
+;; arms land. A head outside this set and outside the ported arms is an ordinary call (`desugar-ordinary-call`).
+#?(:kotoba
+   (defn- unported-heads [] [:ref :form/r]
+     (form/edn-form "#{fn fn-ref invoke apply eval lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop document loop dotimes doseq assert! retract! observe! facet-enter! facet-leave! match if-some when-some cap-call typed-cap-call char string-join reduce mapv filterv into map map-indexed filter remove}"))
+   :default nil)
+
+#?(:kotoba
+   (defn- unported-head? [env [:ref :fe/env] name :string] :bool
+     (tables/table-has? (env-table env :unported) (form/symbol-form name)))
+   :default nil)
+
+;; `lexical-call-form?`: the head is a local bound by an enclosing let/fn and is not a non-shadowable special head
+#?(:kotoba
+   (defn- lexical-call? [env [:ref :fe/env] op [:ref :form/r]] :bool
+     (and (tables/table-has? (env-lexical env) op)
+          (not (tables/table-has? (env-table env :non-shadowable) op))))
+   :default nil)
+
+;; whether SOURCE form F is a :document as far as desugaring can tell without types
+#?(:kotoba
+   (defn- guess-document-src [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (if (or (sym-is? op "map") (sym-is? op "mapv") (sym-is? op "filter") (sym-is? op "filterv") (sym-is? op "remove"))
+       (form/nth-of form 2)
+       (form/nth-of form 1)))
+   :default nil)
+
+;; the parts of FORM from index I, each as a :string operand
+#?(:kotoba
+   (defn- str-parts [env [:ref :fe/env] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [p (str-part env (form/nth-of form i))]
+         (str-parts (dr-env p) form (+ i 1) (form/append-form acc (dr-form p))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- concat-parts [acc [:ref :form/r] parts [:list [:ref :form/r]] i :i64] [:ref :form/r]
+     (if (>= i (vector-count parts))
+       acc
+       (concat-parts (form/call2 "string-concat" acc (typed-list-nth [:list [:ref :form/r]] parts i)) parts (+ i 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-str [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) "str requires at least one argument" "kotoba.error/subset-reject" form)]
+       (if (= 1 (argc form))
+         (desugar-expr env (arg form 0))
+         (let [first-part (str-part env (arg form 0))
+               rest-parts (str-parts (dr-env first-part) form 2 (form/no-forms))]
+           (dr (drs-env rest-parts) (concat-parts (dr-form first-part) (drs-forms rest-parts) 0))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-string-length [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) "string-length requires one string" "kotoba.error/subset-reject" form)
+           a (desugar-result-expr env (form/keyword-form :string) (arg form 0))]
+       (dr (dr-env a) (form/call1 "string-byte-length" (dr-form a)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-string-from-i64 [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [a (desugar-operand env form "string-from-i64 requires one i64")]
+       (dr (dr-env a) (form/call1 "__kotoba_string_from_i64" (dr-form a)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-inc-dec [env [:ref :fe/env] form [:ref :form/r] msg :string op :string] [:ref :fe/dr]
+     (let [a (desugar-operand env form msg)]
+       (dr (dr-env a) (form/call2 op (dr-form a) (form/int-form 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-rem [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 2 (argc form)) "rem requires two i64 operands" "kotoba.error/subset-reject" form)
+           sa (synthetic env "rem_a")
+           sb (synthetic (dr-env sa) "rem_b")
+           a (desugar-expr (dr-env sb) (arg form 0))
+           b (desugar-expr (dr-env a) (arg form 1))
+           ta (dr-form sa)
+           tb (dr-form sb)]
+       (dr (dr-env b)
+           (form/call2 "let" (form/vec4 ta (dr-form a) tb (dr-form b))
+                       (form/call2 "-" ta (form/call2 "*" (form/call2 "quot" ta tb) tb))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-mod [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 2 (argc form)) "mod requires two i64 operands" "kotoba.error/subset-reject" form)
+           sa (synthetic env "mod_a")
+           sb (synthetic (dr-env sa) "mod_b")
+           sr (synthetic (dr-env sb) "mod_r")
+           a (desugar-expr (dr-env sr) (arg form 0))
+           b (desugar-expr (dr-env a) (arg form 1))
+           ta (dr-form sa)
+           tb (dr-form sb)
+           tr (dr-form sr)
+           zero (form/int-form 0)
+           rv (form/call2 "-" ta (form/call2 "*" (form/call2 "quot" ta tb) tb))]
+       (dr (dr-env b)
+           (form/call2 "let" (form/vec6 ta (dr-form a) tb (dr-form b) tr rv)
+                       (form/call3 "if" (form/call2 "=" tr zero) tr
+                                   (form/call3 "if" (form/call2 "<" tr zero)
+                                               (form/call3 "if" (form/call2 "<" tb zero) tr (form/call2 "+" tr tb))
+                                               (form/call3 "if" (form/call2 "<" tb zero) (form/call2 "+" tr tb) tr)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-assert [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) "assert requires exactly one condition; messages are not supported"
+                        "kotoba.error/subset-reject" form)
+           a (desugar-bool-expr env (arg form 0))]
+       (dr (dr-env a) (form/call3 "if" (dr-form a) (form/int-form 0) (form/call2 "quot" (form/int-form 1) (form/int-form 0))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-bytes-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 0 (argc form)) "bytes currently constructs only the canonical empty value"
+                        "kotoba.error/subset-reject" form)]
+       (dr env (form/call0 "bytes-empty"))))
+   :default nil)
+
+;; symbol patterns only: a destructuring pattern is `destructure-binding`'s business (not ported yet)
+#?(:kotoba
+   (defn- lower-let-bindings [env [:ref :fe/env] bindings [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of bindings))
+       (drs env acc)
+       (let [pattern (form/nth-of bindings i)
+             _ (require-k (form/is-symbol? pattern) "unported desugar form: let destructuring" "kotoba.fe/unported" pattern)
+             v (desugar-expr env (form/nth-of bindings (+ i 1)))
+             env2 (with-lexical (dr-env v) (form/form-set (form/append-form (form/kids-of (env-lexical env)) pattern)))]
+         (lower-let-bindings env2 bindings (+ i 2) (form/append-form (form/append-form acc pattern) (dr-form v))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-let [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [bindings (arg form 0)]
+       (if (and (form/is-vec? bindings) (= 0 (rem (form/count-of bindings) 2)))
+         (let [saved (env-lexical env)
+               lowered (lower-let-bindings env bindings 0 (form/no-forms))
+               body (desugar-tail-expressions (drs-env lowered) ctx form 2 (form/no-forms))
+               sb (sequenced-body (drs-forms body) form "let")]
+           (dr (with-lexical (drs-env body) saved)
+               (form/call2 "let" (form/form-vec (drs-forms lowered)) sb)))
+         (let [r (desugar-each env form 2 (form/no-forms))]
+           (dr (drs-env r) (form/form-seq (form/cons-onto (form/symbol-form "let") (form/cons-onto bindings (drs-forms r)))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- binding-if-else [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :form/r]
+     (if when?
+       (absence-marker-form env)
+       (if (= 4 (form/count-of form))
+         (form/nth-of form 3)
+         (absence-marker-form env))))
+   :default nil)
+
+#?(:kotoba
+   (defn- binding-if-then [form [:ref :form/r] when? :bool] [:ref :form/r]
+     ;; bodies are the forms of FORM from index 2
+     (if when?
+       (if (= 1 (- (form/count-of form) 2))
+         (form/nth-of form 2)
+         (form/form-seq (form/cons-onto (form/symbol-form "do") (args-from form 2))))
+       (form/nth-of form 2)))
+   :default nil)
+
+#?(:kotoba
+   (defn- some-thread-lower [env [:ref :fe/env] value-form [:ref :form/r] form [:ref :form/r] i :i64 last? :bool] [:ref :fe/dr]
+     (if (>= i (form/count-of form))
+       (let [a (desugar-expr env value-form)]
+         (dr (dr-env a) (form/call1 "__kotoba_some_last" (dr-form a))))
+       (let [t (some-thread-temp env)
+             tmp (dr-form t)
+             threaded (thread-form (form/call1 "__kotoba_present" tmp) (form/nth-of form i) last?)
+             a (desugar-expr (dr-env t) value-form)
+             b (some-thread-lower (dr-env a) threaded form (+ i 1) last?)]
+         (dr (dr-env b)
+             (form/call2 "let" (form/vec2 tmp (dr-form a))
+                         (form/call2 "__kotoba_some_bind" tmp (dr-form b)))))))
+   :default nil)
+
+;; the temp of one `some->` step: numbered by the loop counter when the analysis has one, else by the synthetic counter
+#?(:kotoba
+   (defn- some-thread-temp [env [:ref :fe/env]] [:ref :fe/dr]
+     (if (>= (env-loop-counter env) 0)
+       (let [n (+ (env-loop-counter env) 1)]
+         (dr (with-loop-counter env n) (form/symbol-form (string-concat "some-thread__" (string-from-i64 n)))))
+       (synthetic env "some-thread")))
+   :default nil)
+
+#?(:kotoba
+   (defn- case-literal? [x [:ref :form/r]] :bool
+     (or (form/is-int? x) (form/is-keyword? x) (form/is-bool? x) (form/is-string? x)))
+   :default nil)
+
+;; every constant of the clause groups (a list group contributes its members) is a literal
+#?(:kotoba
+   (defn- case-constants-ok? [form [:ref :form/r] i :i64 end :i64] :bool
+     (if (>= i end)
+       true
+       (let [g (form/nth-of form i)]
+         (and (if (form/is-seq? g) (all-literal? (form/kids-of g) 0) (case-literal? g))
+              (case-constants-ok? form (+ i 2) end)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- all-literal? [kids [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count kids))
+       true
+       (and (case-literal? (typed-list-nth [:list [:ref :form/r]] kids i)) (all-literal? kids (+ i 1)))))
+   :default nil)
+
+;; the constants of the groups of FORM from index I to END (step 2), as one flat list
+#?(:kotoba
+   (defn- case-constants [form [:ref :form/r] i :i64 end :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i end)
+       acc
+       (let [g (form/nth-of form i)]
+         (case-constants form (+ i 2) end
+                         (if (form/is-seq? g) (form/append-many acc (form/kids-of g)) (form/append-form acc g))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- member-of? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64 end :i64] :bool
+     (if (>= i end)
+       false
+       (if (form/eq (typed-list-nth [:list [:ref :form/r]] xs i) x) true (member-of? xs x (+ i 1) end))))
+   :default nil)
+
+;; the tests of one clause group: (= tmp X') for each member, desugared in order
+#?(:kotoba
+   (defn- case-member-tests [env [:ref :fe/env] tmp [:ref :form/r] members [:list [:ref :form/r]] i :i64
+                             acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (vector-count members))
+       (drs env acc)
+       (let [a (desugar-expr env (typed-list-nth [:list [:ref :form/r]] members i))]
+         (case-member-tests (dr-env a) tmp members (+ i 1) (form/append-form acc (form/call2 "=" tmp (dr-form a)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- case-group-test [env [:ref :fe/env] tmp [:ref :form/r] group [:ref :form/r]] [:ref :fe/dr]
+     (let [members (if (form/is-seq? group) (form/kids-of group) (form/one-form group))
+           tests (case-member-tests env tmp members 0 (form/no-forms))]
+       (if (= 1 (vector-count members))
+         (dr (drs-env tests) (typed-list-nth [:list [:ref :form/r]] (drs-forms tests) 0))
+         (desugar-or (drs-env tests) (form/form-seq (form/cons-onto (form/symbol-form "or") (drs-forms tests))) 1))))
+   :default nil)
+
+;; the pairs [i, end) of FORM folded from the last over FALLBACK
+#?(:kotoba
+   (defn- case-fold [env [:ref :fe/env] tmp [:ref :form/r] form [:ref :form/r] i :i64 end :i64 fallback [:ref :form/r]] [:ref :fe/dr]
+     (if (< i end)
+       (let [j (- end 2)
+             test (case-group-test env tmp (form/nth-of form j))
+             r (desugar-expr (dr-env test) (form/nth-of form (+ j 1)))]
+         (case-fold (dr-env r) tmp form i j (form/call3 "if" (dr-form test) (dr-form r) fallback)))
+       (dr env fallback)))
+   :default nil)
+
+;; X under RTYPE when there is one (not nil), else as it stands
+#?(:kotoba
+   (defn- desugar-under [env [:ref :fe/env] rtype [:ref :form/r] x [:ref :form/r]] [:ref :fe/dr]
+     (if (form/is-nil? rtype)
+       (desugar-expr env x)
+       (desugar-result-expr env rtype x)))
+   :default nil)
+
+;; (OP ,@args) with the args at the indexes in IDX desugared under RTYPE (idx a Form set; nil-form: none)
+#?(:kotoba
+   (defn- desugar-indexed [env [:ref :fe/env] form [:ref :form/r] idx [:ref :form/r] rtype [:ref :form/r]
+                           i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-under env (if (tables/table-has? idx (form/int-form (- i 1))) rtype (form/nil-form))
+                              (form/nth-of form i))]
+         (desugar-indexed (dr-env r) form idx rtype (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-indexed-call [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] idx [:ref :form/r] rtype [:ref :form/r]] [:ref :fe/dr]
+     (let [r (desugar-indexed env form idx rtype 1 (form/no-forms))]
+       (dr (drs-env r) (head-call op (drs-forms r)))))
+   :default nil)
+
+;; every argument under one result type
+#?(:kotoba
+   (defn- desugar-all-under [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] rtype [:ref :form/r] i :i64
+                             acc [:list [:ref :form/r]]] [:ref :fe/dr]
+     (if (>= i (form/count-of form))
+       (dr env (head-call op acc))
+       (let [r (desugar-result-expr env rtype (form/nth-of form i))]
+         (desugar-all-under (dr-env r) op form rtype (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; document-map: the odd-indexed arguments (value positions) are :document
+#?(:kotoba
+   (defn- desugar-document-map [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/dr]
+     (if (>= i (form/count-of form))
+       (dr env (head-call op acc))
+       (let [r (desugar-under env (if (= 1 (rem (- i 1) 2)) (form/keyword-form :document) (form/nil-form))
+                              (form/nth-of form i))]
+         (desugar-document-map (dr-env r) op form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; contextual-vector-f64-argument-types: index -> expected type
+#?(:kotoba
+   (defn- desugar-typed-indexed [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] expected [:ref :form/r] i :i64
+                                 acc [:list [:ref :form/r]]] [:ref :fe/dr]
+     (if (>= i (form/count-of form))
+       (dr env (head-call op acc))
+       (let [want (form/form-get expected (form/int-form (- i 1)))
+             r (desugar-under env want (form/nth-of form i))]
+         (desugar-typed-indexed (dr-env r) op form expected (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; typed-vector-operations: first operand a :vector-i64
+#?(:kotoba
+   (defn- desugar-typed-vector-op [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [arity (tables/table-get (env-table env :typed-vec) op)
+           _ (require-k (= (form/int-value arity) (argc form))
+                        (string-concat "typed vector operation arity mismatch: "
+                          (string-concat (form/symbol-value op)
+                            (string-concat " takes "
+                              (string-concat (string-from-i64 (form/int-value arity))
+                                (string-concat (if (= 1 (form/int-value arity)) " argument" " arguments")
+                                  (string-concat "; got " (string-from-i64 (argc form))))))))
+                        "kotoba.error/call-arity" form)]
+       (desugar-indexed-call env op form (form/form-set (form/one-form (form/int-form 0))) (form/keyword-form :vector-i64))))
+   :default nil)
+
+;; a call whose operator is a symbol, in the order of the host's cond chain and then its `case op`
+#?(:kotoba
+   (defn- desugar-head [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [name (form/symbol-value op)]
+       (cond
+         (lexical-call? env op) (throw (fe-unported "lexical call" form))
+         (tables/table-has? (env-table env :string-idx) op)
+         (desugar-indexed-call env op form (tables/table-get (env-table env :string-idx) op) (form/keyword-form :string))
+         (tables/table-has? (env-table env :document-idx) op)
+         (desugar-indexed-call env op form (tables/table-get (env-table env :document-idx) op) (form/keyword-form :document))
+         (or (string=? name "document-vector") (string=? name "document-list") (string=? name "document-set"))
+         (desugar-all-under env op form (form/keyword-form :document) 1 (form/no-forms))
+         (string=? name "document-map") (desugar-document-map env op form 1 (form/no-forms))
+         (tables/table-has? (env-table env :f64-idx) op)
+         (desugar-indexed-call env op form (tables/table-get (env-table env :f64-idx) op) (form/keyword-form :f64))
+         (tables/table-has? (env-table env :f32-idx) op)
+         (desugar-indexed-call env op form (tables/table-get (env-table env :f32-idx) op) (form/keyword-form :f32))
+         (tables/table-has? (env-table env :vec-f64) op)
+         (desugar-typed-indexed env op form (tables/table-get (env-table env :vec-f64) op) 1 (form/no-forms))
+         (string=? name "vector-f64-new") (desugar-all-under env op form (form/keyword-form :f64) 1 (form/no-forms))
+         (tables/table-has? (env-table env :typed-vec) op) (desugar-typed-vector-op env op form)
+         (and (or (string=? name "mapv") (string=? name "filterv") (string=? name "remove"))
+              (top-level-function-symbol? env op))
+         (desugar-ordinary-call env op form)
+         (and (or (string=? name "map") (string=? name "mapv") (string=? name "filter") (string=? name "filterv") (string=? name "remove"))
+              (= 2 (argc form))
+              (not (tables/table-has? (env-lexical env) op))
+              (guess-document-form? env (arg form 1)))
+         (throw (fe-unported "document collection lowering" form))
+         (and (tables/table-has? (env-table env :doc-heads) op)
+              (not (tables/table-has? (env-lexical env) op))
+              (not (top-level-function-symbol? env op))
+              (> (argc form) 0)
+              (guess-document-form? env (document-head-target op form)))
+         (throw (fe-unported "document head lowering" form))
+         (string=? name "if") (desugar-if env form ctx)
+         (string=? name "do") (desugar-do-arm env form ctx)
+         (string=? name "and") (desugar-and env form 1)
+         (string=? name "or") (desugar-or env form 1)
+         (string=? name "not") (desugar-wrap1-if env form "not requires one operand")
+         (string=? name "not=") (desugar-not= env form)
+         (string=? name "zero?") (desugar-against-zero env form "zero? requires one operand" "=")
+         (string=? name "pos?") (desugar-against-zero env form "pos? requires one operand" ">")
+         (string=? name "neg?") (desugar-against-zero env form "neg? requires one operand" "<")
+         (string=? name "empty?") (desugar-against-zero env form "empty? requires one operand" "=")
+         (string=? name "=") (desugar-binary-op env op form)
+         (string=? name "<") (desugar-binary-op env op form)
+         (string=? name ">") (desugar-binary-op env op form)
+         (string=? name "<=") (desugar-binary-op env op form)
+         (string=? name ">=") (desugar-binary-op env op form)
+         (string=? name "->") (desugar-thread env form false)
+         (string=? name "->>") (desugar-thread env form true)
+         (string=? name "as->") (desugar-as-thread env form)
+         (string=? name "some->") (desugar-some-thread env form false)
+         (string=? name "some->>") (desugar-some-thread env form true)
+         (string=? name "cond") (desugar-cond env form)
+         (string=? name "condp") (desugar-condp env form)
+         (string=? name "cond->") (desugar-cond-thread env form false)
+         (string=? name "cond->>") (desugar-cond-thread env form true)
+         (string=? name "assert") (desugar-assert env form)
+         (string=? name "case") (desugar-case env form)
+         (string=? name "if-let") (desugar-binding-if env form false)
+         (string=? name "when-let") (desugar-binding-if env form true)
+         (string=? name "if-not") (desugar-if-not env form)
+         (string=? name "when-not") (desugar-when-not env form)
+         (string=? name "when") (desugar-when env form)
+         (string=? name "let") (desugar-let env form ctx)
+         (string=? name "first") (desugar-wrap1 env form "first requires one operand" "pair-first")
+         (string=? name "rest") (desugar-wrap1 env form "rest requires one operand" "pair-second")
+         (string=? name "second") (desugar-second env form)
+         (string=? name "cons") (desugar-cons env form)
+         (string=? name "some") (desugar-some-arm env form)
+         (string=? name "some?") (desugar-wrap1 env form "some? requires one option operand" "option-some?")
+         (string=? name "nil?") (desugar-nil? env form)
+         (string=? name "bytes") (desugar-bytes-arm env form)
+         (string=? name "str") (desugar-str env form)
+         (string=? name "string-length") (desugar-string-length env form)
+         (string=? name "string-from-i64") (desugar-string-from-i64 env form)
+         (string=? name "inc") (desugar-inc-dec env form "inc requires one i64" "+")
+         (string=? name "dec") (desugar-inc-dec env form "dec requires one i64" "-")
+         (string=? name "rem") (desugar-rem env form)
+         (string=? name "mod") (desugar-mod env form)
+         (string=? name "get")
+         (desugar-keep-head env form (and (<= 2 (argc form)) (<= (argc form) 3))
+                            "get requires a value, a key, and an optional default")
+         (string=? name "contains?")
+         (desugar-keep-head env form (= 2 (argc form)) "contains? requires a map and one key")
+         (string=? name "dissoc")
+         (desugar-keep-head env form (>= (argc form) 2) "dissoc requires a map and at least one key")
+         (tables/table-has? (env-table env :typed-ops) op)
+         (desugar-typed-op env op form (tables/table-get (env-table env :typed-ops) op))
+         (string=? name "list") (desugar-list-arm env form ctx)
+         (string=? name "typed-list-new") (desugar-item-ctor env form "typed-list-new" "typed-list-new requires a type descriptor" false)
+         (string=? name "typed-set") (desugar-item-ctor env form "typed-set-new" "typed-set requires a type descriptor" true)
+         (string=? name "typed-set-new") (desugar-item-ctor env form "typed-set-new" "typed-set-new requires a type descriptor" true)
+         (string=? name "hetero-vector") (desugar-hetero-ctor env form "hetero-vector requires a type descriptor")
+         (string=? name "hetero-vector-new") (desugar-hetero-ctor env form "hetero-vector-new requires a type descriptor")
+         (string=? name "typed-map-new") (desugar-typed-map-new env form)
+         (string=? name "record") (desugar-record-ctor env form "record requires a type descriptor")
+         (string=? name "record-new") (desugar-record-ctor env form "record-new requires a type descriptor")
+         (string=? name "record-get") (desugar-record-get env form)
+         (string=? name "record-assoc") (desugar-record-assoc env form)
+         (string=? name "hetero-vector-assoc") (desugar-hetero-assoc env form)
+         (string=? name "variant-new") (desugar-variant-new env form)
+         (string=? name "match-variant") (desugar-match-variant env form)
+         (string=? name "variant-match") (desugar-variant-match env form)
+         (string=? name "match-result") (desugar-match-result env form)
+         (string=? name "result-match-of") (desugar-result-match-of env form)
+         (string=? name "option-match") (desugar-option-match env form)
+         (string=? name "match-option") (desugar-match-option env form)
+         (string=? name "throw") (desugar-throw env form)
+         (string=? name "try") (desugar-try env form)
+         (string=? name "catch") (throw (desugar-catch-arm form))
+         (string=? name "vector-i64") (desugar-vector-i64-arm env form)
+         (string=? name "vector-f64") (desugar-vector-f64-arm env form)
+         (string=? name "xorshift32") (desugar-xorshift32 env form)
+         (string=? name "assoc") (desugar-assoc-arm env form)
+         (string=? name "select-keys") (desugar-select-keys-arm env form)
+         (string=? name "merge") (desugar-merge-arm env form)
+         (unported-head? env name) (throw (fe-unported name form))
+         (not (< (string-find-byte name 47 0) 0)) (desugar-named-op env op form)
+         :else (desugar-ordinary-call env op form))))
+   :default nil)
+
+;; the forms of FORM from index I as a list
+#?(:kotoba
+   (defn- args-from [form [:ref :form/r] i :i64] [:list [:ref :form/r]]
+     (args-from-loop form i (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn- args-from-loop [form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of form))
+       acc
+       (args-from-loop form (+ i 1) (form/append-form acc (form/nth-of form i)))))
+   :default nil)
+
+;; `closure-default-value-expr` as the three answers its callers ask: 0 none (nil), 1 the literal `false`
+;; (non-nil, falsey), 2 a truthy default expression
+#?(:kotoba
+   (defn- default-kind-keyword [t [:ref :form/r]] :i64
+     (let [s (kw-text t)]
+       (cond
+         (string=? s ":bool") 1
+         (or (string=? s ":i64") (string=? s ":string") (string=? s ":bytes") (string=? s ":keyword")
+             (string=? s ":symbol") (string=? s ":f64") (string=? s ":f32") (string=? s ":vector-i64")
+             (string=? s ":vector-f64") (string=? s ":document") (string=? s ":map") (string=? s ":option-i64")
+             (string=? s ":result-i64") (string=? s ":string-index") (string=? s ":disjoint-set-i64"))
+         2
+         :else 0)))
+   :default nil)
+
+;; every element of the Form vector V from index I has a non-nil default (kind >= 1); FIELDS? reads [name type] pairs
+#?(:kotoba
+   (defn- all-defaults? [v [:ref :form/r] i :i64 fields? :bool] :bool
+     (if (>= i (form/count-of v))
+       true
+       (let [item (form/nth-of v i)
+             t (if fields? (form/nth-of item 1) item)]
+         (and (>= (default-kind t) 1) (all-defaults? v (+ i 1) fields?)))))
+   :default nil)
+
+;; some variant case [tag payload-type] of V (from I) has a truthy default payload
+#?(:kotoba
+   (defn- some-variant-default? [v [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of v))
+       false
+       (or (= 2 (default-kind (form/nth-of (form/nth-of v i) 1)))
+           (some-variant-default? v (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- default-kind [t [:ref :form/r]] :i64
+     (cond
+       (form/is-keyword? t) (default-kind-keyword t)
+       (generic-option-type? t) 2
+       (canonical-list-type? t) 2
+       (parametric-result-type? t)
+       (if (or (= 2 (default-kind (form/nth-of t 1))) (= 2 (default-kind (form/nth-of t 2)))) 2 0)
+       (heterogeneous-vector-type? t) (if (all-defaults? (form/nth-of t 1) 0 false) 2 0)
+       (typed-set-type? t) 2
+       (canonical-typed-map-type? t) 2
+       (variant-type? t) (if (some-variant-default? (form/nth-of t 2) 0) 2 0)
+       (record-type? t) (if (all-defaults? (form/nth-of t 2) 0 true) 2 0)
+       :else 0))
+   :default nil)
+
+#?(:kotoba
+   (defn- valid-type? [t [:ref :form/r]] :bool
+     (try (let [n (validate-value-type! t)] true)
+          (catch e false)))
+   :default nil)
+
+;; the component of the descriptor T a typed operation's operand is expected to have (nil-form when T is not that kind)
+#?(:kotoba
+   (defn- component-type [k :string t [:ref :form/r]] [:ref :form/r]
+     (cond
+       (string=? k ":list-item") (if (canonical-list-type? t) (form/nth-of t 1) (form/nil-form))
+       (string=? k ":set-item") (if (typed-set-type? t) (form/nth-of t 1) (form/nil-form))
+       (string=? k ":key") (if (canonical-typed-map-type? t) (form/nth-of t 1) (form/nil-form))
+       (string=? k ":val") (if (canonical-typed-map-type? t) (form/nth-of t 2) (form/nil-form))
+       (string=? k ":ok") (if (parametric-result-type? t) (form/nth-of t 1) (form/nil-form))
+       (string=? k ":err") (if (parametric-result-type? t) (form/nth-of t 2) (form/nil-form))
+       (string=? k ":payload") (if (generic-option-type? t) (form/nth-of t 1) (form/nil-form))
+       :else (form/nil-form)))
+   :default nil)
+
+;; one operand of a table-driven typed operation, by its kind
+#?(:kotoba
+   (defn- typed-op-arg [env [:ref :fe/env] kind [:ref :form/r] t [:ref :form/r] x [:ref :form/r]] [:ref :fe/dr]
+     (let [k (kw-text kind)]
+       (cond
+         (string=? k ":raw") (dr env x)
+         (string=? k ":ct") (dr env (canonical-closure-result-type env x))
+         (string=? k ":expr") (desugar-expr env x)
+         (string=? k ":value") (desugar-expected-value env t x)
+         :else (desugar-expected-value env (component-type k t) x))))
+   :default nil)
+
+;; operands [i, n) of FORM by the KINDS vector (index i-1), T the first operand
+#?(:kotoba
+   (defn- typed-op-args [env [:ref :fe/env] kinds [:ref :form/r] t [:ref :form/r] form [:ref :form/r] i :i64
+                         acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (typed-op-arg env (form/nth-of kinds (- i 1)) t (form/nth-of form i))]
+         (typed-op-args (dr-env r) kinds t form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; SPEC is [arity message kinds]: one kind per operand (:raw verbatim, :ct canonical type, :expr plain, :value expected
+;; under the first operand, or a component kind). The head is OP.
+#?(:kotoba
+   (defn- desugar-typed-op [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] spec [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= (form/int-value (form/nth-of spec 0)) (argc form)) (form/string-value (form/nth-of spec 1))
+                        "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           r (typed-op-args env (form/nth-of spec 2) t form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call op (drs-forms r)))))
+   :default nil)
+
+;; each operand from index I of FORM expected as ITEM-TYPE (nil-form: plain)
+#?(:kotoba
+   (defn- ev-each [env [:ref :fe/env] item-type [:ref :form/r] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-expected-value env item-type (form/nth-of form i))]
+         (ev-each (dr-env r) item-type form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; typed-list-new / typed-set / typed-set-new: (HEAD type item ...) items expected as the descriptor's item type
+#?(:kotoba
+   (defn- desugar-item-ctor [env [:ref :fe/env] form [:ref :form/r] head :string msg :string set? :bool] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) msg "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           item (if (if set? (typed-set-type? t) (canonical-list-type? t)) (form/nth-of t 1) (form/nil-form))
+           r (ev-each env item form 2 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form head) (form/cons-onto t (drs-forms r))))))
+   :default nil)
+
+;; each operand from index I expected as the matching item type of the Form vector TYPES (index i-2)
+#?(:kotoba
+   (defn- ev-each-indexed [env [:ref :fe/env] types [:ref :form/r] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-expected-value env (form/nth-of types (- i 2)) (form/nth-of form i))]
+         (ev-each-indexed (dr-env r) types form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- ctor-tail [env [:ref :fe/env] types [:ref :form/r] form [:ref :form/r]] [:ref :fe/drs]
+     (if (= (form/count-of types) (- (argc form) 1))
+       (ev-each-indexed env types form 2 (form/no-forms))
+       (desugar-each env form 2 (form/no-forms))))
+   :default nil)
+
+;; hetero-vector / hetero-vector-new
+#?(:kotoba
+   (defn- desugar-hetero-ctor [env [:ref :fe/env] form [:ref :form/r] msg :string] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) msg "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           types (if (heterogeneous-vector-type? t) (form/nth-of t 1) (form/form-vec (form/no-forms)))
+           r (ctor-tail env types form)]
+       (dr (drs-env r) (head-call (form/symbol-form "hetero-vector-new") (form/cons-onto t (drs-forms r))))))
+   :default nil)
+
+;; typed-map-new: (typed-map-new type key value ...) keys and values expected as the descriptor's
+#?(:kotoba
+   (defn- map-pairs [env [:ref :fe/env] key-type [:ref :form/r] value-type [:ref :form/r] form [:ref :form/r] i :i64
+                     acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= (+ i 1) (form/count-of form))
+       (drs env acc)
+       (let [k (desugar-expected-value env key-type (form/nth-of form i))
+             v (desugar-expected-value (dr-env k) value-type (form/nth-of form (+ i 1)))]
+         (map-pairs (dr-env v) key-type value-type form (+ i 2)
+                    (form/append-form (form/append-form acc (dr-form k)) (dr-form v))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-typed-map-new [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (and (> (argc form) 0) (= 1 (rem (argc form) 2))) "typed-map-new requires type and key/value pairs"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           ok? (canonical-typed-map-type? t)
+           r (map-pairs env (if ok? (form/nth-of t 1) (form/nil-form)) (if ok? (form/nth-of t 2) (form/nil-form)) form 2 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "typed-map-new") (form/cons-onto t (drs-forms r))))))
+   :default nil)
+
+;; record / record-new: field values expected as the declared field types
+#?(:kotoba
+   (defn- record-field-type-at [fields [:ref :form/r] i :i64] [:ref :form/r]
+     (if (and (>= i 0) (< i (form/count-of fields)))
+       (form/nth-of (form/nth-of fields i) 1)
+       (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn- record-values [env [:ref :fe/env] ct [:ref :form/r] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [ft (if (record-type? ct) (record-field-type-at (form/nth-of ct 2) (- i 2)) (form/nil-form))
+             r (desugar-expected-value env ft (form/nth-of form i))]
+         (record-values (dr-env r) ct form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-record-ctor [env [:ref :fe/env] form [:ref :form/r] msg :string] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) msg "kotoba.error/subset-reject" form)
+           ct (canonical-closure-result-type env (arg form 0))
+           r (record-values env ct form 2 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "record-new") (form/cons-onto ct (drs-forms r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-record-get [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (or (= 2 (argc form)) (= 3 (argc form))) "record-get requires (value field) or (type value field)"
+                        "kotoba.error/subset-reject" form)]
+       (if (= 2 (argc form))
+         (let [a (desugar-expr env (arg form 0))]
+           (dr (dr-env a) (form/call2 "record-get" (dr-form a) (arg form 1))))
+         (let [ct (canonical-closure-result-type env (arg form 0))
+               a (desugar-expected-value env ct (arg form 1))]
+           (dr (dr-env a) (form/call3 "record-get" ct (dr-form a) (arg form 2)))))))
+   :default nil)
+
+;; the type of FIELD in the record descriptor CT's fields (nil-form when CT is not a record or has no such field)
+#?(:kotoba
+   (defn- field-type-of [fields [:ref :form/r] field [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (form/count-of fields))
+       (form/nil-form)
+       (if (form/eq (form/nth-of (form/nth-of fields i) 0) field)
+         (form/nth-of (form/nth-of fields i) 1)
+         (field-type-of fields field (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-record-assoc [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 4 (argc form)) "record-assoc requires type, value, literal field, and replacement"
+                        "kotoba.error/subset-reject" form)
+           ct (canonical-closure-result-type env (arg form 0))
+           ft (if (record-type? ct) (field-type-of (form/nth-of ct 2) (arg form 2) 0) (form/nil-form))
+           a (desugar-expected-value env ct (arg form 1))
+           b (desugar-expected-value (dr-env a) ft (arg form 3))]
+       (dr (dr-env b) (form/call4 "record-assoc" ct (dr-form a) (arg form 2) (dr-form b)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-hetero-assoc [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 4 (argc form)) "hetero-vector-assoc requires type, value, literal index, and item"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           index (arg form 2)
+           it (if (and (heterogeneous-vector-type? t) (form/is-int? index) (<= 0 (form/int-value index))
+                       (< (form/int-value index) (form/count-of (form/nth-of t 1))))
+                (form/nth-of (form/nth-of t 1) (form/int-value index))
+                (form/nil-form))
+           a (desugar-expected-value env t (arg form 1))
+           b (desugar-expected-value (dr-env a) it (arg form 3))]
+       (dr (dr-env b) (form/call4 "hetero-vector-assoc" t (dr-form a) index (dr-form b)))))
+   :default nil)
+
+;; the payload type of case TAG in the variant descriptor's cases vector
+#?(:kotoba
+   (defn- variant-payload-type [cases [:ref :form/r] tag [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (form/count-of cases))
+       (form/nil-form)
+       (if (form/eq (form/nth-of (form/nth-of cases i) 0) tag)
+         (form/nth-of (form/nth-of cases i) 1)
+         (variant-payload-type cases tag (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-variant-new [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 3 (argc form)) "variant-new requires type, case tag, and payload" "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           ct (canonical-closure-result-type env t)
+           pt (if (variant-type? ct) (variant-payload-type (form/nth-of ct 2) (arg form 1) 0) (form/nil-form))
+           a (desugar-expected-value env pt (arg form 2))]
+       (dr (dr-env a) (form/call3 "variant-new" t (arg form 1) (dr-form a)))))
+   :default nil)
+
+;; branches [tag binder body] as a vector of vectors with the bodies desugared; BRANCH-AT reads branch k of FORM
+#?(:kotoba
+   (defn- variant-branches [env [:ref :fe/env] branches [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of branches))
+       (drs env acc)
+       (let [b (form/nth-of branches i)
+             body (desugar-expr env (form/nth-of b 2))]
+         (variant-branches (dr-env body) branches (+ i 1)
+                           (form/append-form acc (form/vec3 (form/nth-of b 0) (form/nth-of b 1) (dr-form body)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- variant-branch-ok? [b [:ref :form/r] seq? :bool] :bool
+     (and (if seq? (form/is-seq? b) (form/is-vec? b)) (= 3 (form/count-of b))
+          (form/is-keyword? (form/nth-of b 0)) (form/is-symbol? (form/nth-of b 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn- all-variant-branches-ok? [branches [:ref :form/r] i :i64 seq? :bool] :bool
+     (if (>= i (form/count-of branches))
+       true
+       (and (variant-branch-ok? (form/nth-of branches i) seq?) (all-variant-branches-ok? branches (+ i 1) seq?))))
+   :default nil)
+
+;; a Form vector of the forms of FORM from index I
+#?(:kotoba
+   (defn- vec-from [form [:ref :form/r] i :i64] [:ref :form/r]
+     (form/form-vec (args-from form i)))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-match-variant [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (>= (argc form) 3) "match-variant requires value, type, and exhaustive branches"
+                        "kotoba.error/subset-reject" form)
+           branches (vec-from form 3)
+           _ (require-k (all-variant-branches-ok? branches 0 true) "match-variant branches require (:case binder body)"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 1)
+           v (desugar-expected-value env t (arg form 0))
+           bs (variant-branches (dr-env v) branches 0 (form/no-forms))]
+       (dr (drs-env bs) (form/call3 "variant-match" t (dr-form v) (form/form-vec (drs-forms bs))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-variant-match [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 3 (argc form)) "variant-match requires type, value, and lowered branches"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           branches (arg form 2)
+           _ (require-k (and (form/is-vec? branches) (all-variant-branches-ok? branches 0 false))
+                        "variant-match lowered branches are invalid" "kotoba.error/subset-reject" form)
+           v (desugar-expected-value env t (arg form 1))
+           bs (variant-branches (dr-env v) branches 0 (form/no-forms))]
+       (dr (drs-env bs) (form/call3 "variant-match" t (dr-form v) (form/form-vec (drs-forms bs))))))
+   :default nil)
+
+;; (ok binder body) / (err binder body) / (some binder body) branch shape: a 3-element seq headed by HEAD with a symbol binder
+#?(:kotoba
+   (defn- branch3? [b [:ref :form/r] head :string] :bool
+     (and (form/is-seq? b) (= 3 (form/count-of b)) (sym-is? (form/nth-of b 0) head) (form/is-symbol? (form/nth-of b 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-match-result [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 4 (argc form)) "match-result requires value, type, ok branch, and err branch"
+                        "kotoba.error/subset-reject" form)
+           okb (arg form 2)
+           errb (arg form 3)
+           _ (require-k (branch3? okb "ok") "match-result requires exactly one (ok binder body) branch"
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (branch3? errb "err") "match-result requires exactly one (err binder body) branch"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 1)
+           v (desugar-expected-value env t (arg form 0))
+           ob (desugar-expr (dr-env v) (form/nth-of okb 2))
+           eb (desugar-expr (dr-env ob) (form/nth-of errb 2))]
+       (dr (dr-env eb)
+           (form/call6 "result-match-of" t (dr-form v) (form/nth-of okb 1) (dr-form ob) (form/nth-of errb 1) (dr-form eb)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-result-match-of [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 6 (argc form)) "result-match-of requires type, value, and two bound branches"
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (and (form/is-symbol? (arg form 2)) (form/is-symbol? (arg form 4)))
+                        "result-match-of requires symbol binders" "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           v (desugar-expected-value env t (arg form 1))
+           ob (desugar-expr (dr-env v) (arg form 3))
+           eb (desugar-expr (dr-env ob) (arg form 5))]
+       (dr (dr-env eb) (form/call6 "result-match-of" t (dr-form v) (arg form 2) (dr-form ob) (arg form 4) (dr-form eb)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-option-match [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 5 (argc form)) "option-match requires type, value, none body, binder, and some body"
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (form/is-symbol? (arg form 3)) "option-match requires a symbol binder" "kotoba.error/subset-reject" form)
+           t (arg form 0)
+           v (desugar-expected-value env t (arg form 1))
+           nb (desugar-expr (dr-env v) (arg form 2))
+           sb (desugar-expr (dr-env nb) (arg form 4))]
+       (dr (dr-env sb) (form/call5 "option-match" t (dr-form v) (dr-form nb) (arg form 3) (dr-form sb)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-match-option [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 4 (argc form)) "match-option requires value, type, none branch, and some branch"
+                        "kotoba.error/subset-reject" form)
+           nb (arg form 2)
+           sb (arg form 3)
+           _ (require-k (and (form/is-seq? nb) (= 2 (form/count-of nb)) (sym-is? (form/nth-of nb 0) "none"))
+                        "match-option requires exactly one (none body) branch" "kotoba.error/subset-reject" form)
+           _ (require-k (branch3? sb "some") "match-option requires exactly one (some binder body) branch"
+                        "kotoba.error/subset-reject" form)
+           t (arg form 1)
+           v (desugar-expected-value env t (arg form 0))
+           n (desugar-expr (dr-env v) (form/nth-of nb 1))
+           s (desugar-expr (dr-env n) (form/nth-of sb 2))]
+       (dr (dr-env s) (form/call5 "option-match" t (dr-form v) (dr-form n) (form/nth-of sb 1) (dr-form s)))))
+   :default nil)
+
+;; ---- abort ability: throw / try / catch ----
+;; the description of the lexical context that refuses `throw`, or "" (`abort-lexical-context`)
+#?(:kotoba
+   (defn- abort-context-text [env [:ref :fe/env]] :string
+     (cond
+       (record-get [:ref :fe/env] env :lazy) "a lazy thunk"
+       (string=? (record-get [:ref :fe/env] env :abort-ctx) "fn") "a fn literal"
+       :else ""))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-throw [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) "throw requires exactly one error value" "kotoba.error/abort-shape" form)
+           context (abort-context-text env)
+           _ (require-k (string=? context "")
+                        (string-concat "throw inside "
+                          (string-concat context " is not admitted in abort slice 1: precondition :checked-lexical-facet-unwind is not met"))
+                        "kotoba.error/abort-precondition" form)
+           a (desugar-expr env (arg form 0))]
+       (dr (dr-env a) (form/call1 "throw" (dr-form a)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- types-assoc [types [:ref :form/r] k [:ref :form/r] v [:ref :form/r]] [:ref :form/r]
+     (if (form/is-map? types)
+       (form/assoc-form types k v)
+       (form/form-map (form/two-forms k v))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-try [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 2 (argc form)) "try requires exactly one body expression and one catch clause"
+                        "kotoba.error/abort-shape" form)
+           body (arg form 0)
+           clause (arg form 1)
+           _ (require-k (and (form/is-seq? clause) (sym-is? (form/nth-of clause 0) "catch"))
+                        "try requires a (catch [error-type] binder handler) clause" "kotoba.error/abort-shape" form)
+           parts (- (form/count-of clause) 1)
+           _ (require-k (or (= 2 parts) (= 3 parts))
+                        "catch requires an optional error type, one binder, and one handler expression"
+                        "kotoba.error/abort-shape" form)
+           binder (form/nth-of clause (if (= 2 parts) 1 2))
+           handler (form/nth-of clause (if (= 2 parts) 2 3))
+           raw-type (if (= 2 parts) (form/nil-form) (form/nth-of clause 1))
+           error-type (if (form/eq raw-type (form/keyword-form :default)) (form/nil-form) raw-type)
+           _ (require-k (simple-symbol-form? binder) "catch binder must be an unqualified symbol" "kotoba.error/abort-shape" form)
+           _ (require-k (<= (string-byte-length (form/symbol-value binder)) 128)
+                        "catch binder must be a bounded unqualified symbol" "kotoba.error/abort-shape" form)
+           _ (desugar-validate-error-type error-type)
+           saved-lexical (env-lexical env)
+           saved-types (env-types env)
+           henv (record-assoc [:ref :fe/env] (with-lexical env (form/form-set (form/append-form (form/kids-of saved-lexical) binder)))
+                              :types (if (form/is-nil? error-type) saved-types (types-assoc saved-types binder error-type)))
+           h (desugar-expr henv handler)
+           renv (record-assoc [:ref :fe/env] (with-lexical (dr-env h) saved-lexical) :types saved-types)
+           b (desugar-expr renv body)]
+       (dr (dr-env b)
+           (form/call2 "try" (dr-form b)
+                       (if (form/is-nil? error-type)
+                         (form/call2 "catch" binder (dr-form h))
+                         (form/call3 "catch" error-type binder (dr-form h)))))))
+   :default nil)
+
+;; `(when (some? error-type) (validate-value-type! error-type))`
+#?(:kotoba
+   (defn- desugar-validate-error-type [error-type [:ref :form/r]] :i64
+     (if (form/is-nil? error-type)
+       0
+       (validate-value-type! error-type)))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-catch-arm [form [:ref :form/r]] [:ref :fe/err]
+     (fe-reject "catch is admitted only as the clause of a try" "kotoba.error/abort-shape" form))
+   :default nil)
+
+;; ---- vector literals ----
+;; `closed-vector-literal-type`: the descriptor a closed literal determines, nil-form when it is not closed
+#?(:kotoba
+   (defn- all-item-types-are? [types [:list [:ref :form/r]] want [:ref :form/r] i :i64] :bool
+     (if (>= i (vector-count types))
+       true
+       (and (form/eq (typed-list-nth [:list [:ref :form/r]] types i) want) (all-item-types-are? types want (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- all-item-types-some? [types [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count types))
+       true
+       (and (not (form/is-nil? (typed-list-nth [:list [:ref :form/r]] types i))) (all-item-types-some? types (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- closed-vector-item-types [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of f))
+       acc
+       (closed-vector-item-types f (+ i 1) (form/append-form acc (closed-vector-literal-type (form/nth-of f i))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-vector-literal [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (<= (form/count-of form) 128) "vector literal exceeds item limit" "kotoba.error/subset-reject" form)
+           types (closed-vector-item-types form 0 (form/no-forms))]
+       (cond
+         (or (= 0 (vector-count types)) (all-item-types-are? types (form/keyword-form :i64) 0))
+         (let [r (desugar-each-from env form 0 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "vector-new") (drs-forms r))))
+         (all-item-types-are? types (form/keyword-form :f64) 0)
+         (let [r (desugar-each-from env form 0 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "vector-f64-new") (drs-forms r))))
+         (all-item-types-some? types 0)
+         (let [t (form/vec2 (form/keyword-form :vector) (form/form-vec types))
+               r (ev-each-types env types form 0 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "hetero-vector-new") (form/cons-onto t (drs-forms r)))))
+         :else
+         (let [r (desugar-each-from env form 0 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "vector-new") (drs-forms r)))))))
+   :default nil)
+
+;; each kid of FORM from index I desugared (a literal's items start at 0; a call's operands at 1)
+#?(:kotoba
+   (defn- desugar-each-from [env [:ref :fe/env] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-expr env (form/nth-of form i))]
+         (desugar-each-from (dr-env r) form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; item k of the literal FORM expected as TYPES[k]
+#?(:kotoba
+   (defn- ev-each-types [env [:ref :fe/env] types [:list [:ref :form/r]] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-expected-value env (typed-list-nth [:list [:ref :form/r]] types i) (form/nth-of form i))]
+         (ev-each-types (dr-env r) types form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+;; ---- small arms ----
+#?(:kotoba
+   (defn- desugar-vector-i64-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (<= (argc form) 128) "vector-i64 exceeds item limit" "kotoba.error/subset-reject" form)
+           r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "vector-new") (drs-forms r)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-vector-f64-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (<= (argc form) 128) "vector-f64 exceeds item limit" "kotoba.error/subset-reject" form)]
+       (desugar-all-under env (form/symbol-form "vector-f64-new") form (form/keyword-form :f64) 1 (form/no-forms))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-xorshift32 [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) "xorshift32 requires one state value" "kotoba.error/subset-reject" form)
+           s0 (synthetic env "xorshift32_0")
+           s1 (synthetic (dr-env s0) "xorshift32_1")
+           s2 (synthetic (dr-env s1) "xorshift32_2")
+           s3 (synthetic (dr-env s2) "xorshift32_3")
+           x0 (dr-form s0)
+           x1 (dr-form s1)
+           x2 (dr-form s2)
+           x3 (dr-form s3)
+           a (desugar-expr (dr-env s3) (arg form 0))
+           b0 (form/call1 "u32-wrap" (dr-form a))
+           b1 (form/call1 "u32-wrap" (form/call2 "i32-xor" x0 (form/call2 "i32-shift-left" x0 (form/int-form 13))))
+           b2 (form/call1 "u32-wrap" (form/call2 "i32-xor" x1 (form/call2 "u32-shift-right" x1 (form/int-form 17))))
+           b3 (form/call1 "u32-wrap" (form/call2 "i32-xor" x2 (form/call2 "i32-shift-left" x2 (form/int-form 5))))]
+       (dr (dr-env a)
+           (form/call2 "let" (form/form-vec (put2 (put2 (put2 (put2 (form/no-forms) x0 b0) x1 b1) x2 b2) x3 b3)) x3))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-assoc-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (and (>= (argc form) 3) (= 1 (rem (argc form) 2)))
+                        "assoc requires a map followed by one or more key/value pairs" "kotoba.error/subset-reject" form)
+           r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "map-assoc") (drs-forms r)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-select-keys-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [ks (arg form 1)
+           _ (require-k (and (= 2 (argc form)) (form/is-vec? ks) (all-keywords? ks 0))
+                        "select-keys requires a record and a literal vector of keyword fields: a record's fields are static, so the fields it keeps are written, not computed"
+                        "kotoba.error/row-operation-shape" form)
+           a (desugar-expr env (arg form 0))]
+       (dr (dr-env a) (form/form-seq (form/cons-onto (form/symbol-form "select-keys") (form/cons-onto (dr-form a) (form/kids-of ks)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- all-keywords? [v [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of v))
+       true
+       (and (form/is-keyword? (form/nth-of v i)) (all-keywords? v (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-merge-arm [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (>= (argc form) 2)
+                        "merge requires a record and at least one record or map literal to merge onto it"
+                        "kotoba.error/row-operation-shape" form)
+           r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "merge") (drs-forms r)))))
+   :default nil)
+
+;; the table-driven typed operations: op -> [arity message kinds-per-operand]
+#?(:kotoba
+   (defn- typed-op-specs [] [:ref :form/r]
+     (form/edn-form "{typed-list-nth [3 \"typed-list-nth requires type, value, and index\" [:raw :value :expr]]
+    typed-list-conj [3 \"typed-list-conj requires type, value, and item\" [:raw :value :list-item]]
+    typed-set-count [2 \"typed-set-count requires type and value\" [:raw :value]]
+    typed-set-contains [3 \"typed-set-contains requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-conj [3 \"typed-set-conj requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-disj [3 \"typed-set-disj requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-equal [3 \"typed-set-equal requires type and two values\" [:raw :value :value]]
+    typed-set-nth [3 \"typed-set-nth requires type, value, and index\" [:raw :value :expr]]
+    typed-map-count [2 \"typed-map-count requires type and value\" [:raw :value]]
+    typed-map-contains [3 \"typed-map-contains requires type, value, and key\" [:raw :value :key]]
+    typed-map-get [3 \"typed-map-get requires type, value, and key\" [:raw :value :key]]
+    typed-map-entry-at [3 \"typed-map-entry-at requires type, value, and index\" [:raw :value :expr]]
+    typed-map-keys [2 \"typed-map-keys requires type and value\" [:raw :value]]
+    typed-map-vals [2 \"typed-map-vals requires type and value\" [:raw :value]]
+    typed-map-assoc [4 \"typed-map-assoc requires type, value, key, and item\" [:raw :value :key :val]]
+    typed-map-dissoc [3 \"typed-map-dissoc requires type, value, and key\" [:raw :value :key]]
+    typed-map-equal [3 \"typed-map-equal requires type and two values\" [:raw :value :value]]
+    hetero-vector-count [2 \"hetero-vector-count requires type and value\" [:raw :value]]
+    hetero-vector-at [3 \"hetero-vector-at requires type, value, and literal index\" [:raw :value :raw]]
+    hetero-vector-equal [3 \"hetero-vector-equal requires type and two values\" [:raw :value :value]]
+    record-equal [3 \"record-equal requires type and two values\" [:ct :value :value]]
+    result-ok-of [2 \"result-ok-of requires type and payload\" [:raw :ok]]
+    result-err-of [2 \"result-err-of requires type and payload\" [:raw :err]]
+    result-ok?-of [2 \"result-ok?-of requires type and result\" [:raw :value]]
+    result-value-of [3 \"result-value-of requires type, result, and fallback\" [:raw :value :ok]]
+    result-error-of [3 \"result-error-of requires type, result, and fallback\" [:raw :value :err]]
+    option-some-of [2 \"option-some-of requires type and payload\" [:raw :payload]]
+    option-none-of [1 \"option-none-of requires one type\" [:raw]]
+    option-some?-of [2 \"option-some?-of requires type and value\" [:raw :value]]
+    option-value-of [3 \"option-value-of requires type, value, and fallback\" [:raw :value :payload]]
+    option-or [2 \"option-or requires an option value and a fallback\" [:expr :expr]]}"))
+   :default nil)
+
+;; ---- list ----
+;; `(list a b c)`: the pair chain built from the last item (items are desugared last to first, as the host's reverse/reduce)
+#?(:kotoba
+   (defn- list-pairs [env [:ref :fe/env] form [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :fe/dr]
+     (if (< i 1)
+       (dr env acc)
+       (let [a (desugar-expr env (form/nth-of form i))]
+         (list-pairs (dr-env a) form (- i 1) (form/call2 "pair" (dr-form a) acc)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- desugar-list-arm [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (<= (argc form) 128) "list item count exceeds admission limit" "kotoba.error/subset-reject" form)]
+       (if (canonical-list-type? ctx)
+         (let [r (ev-each env (form/nth-of ctx 1) form 1 (form/no-forms))]
+           (dr (drs-env r) (head-call (form/symbol-form "typed-list-new") (form/cons-onto ctx (drs-forms r)))))
+         (list-pairs env form (argc form) (form/int-form 0)))))
+   :default nil)
+
+;; ---- named operations: a namespaced head ----
+#?(:kotoba
+   (defn- reader-tagged-refusal [name :string form [:ref :form/r]] [:ref :fe/err]
+     (cond
+       (string=? name "kotoba.reader/regex")
+       (fe-reject "host regex literal #\"...\" is not admitted; pass the pattern as a string to kotoba.lang.bounded-regex"
+                  "kotoba.error/host-regex-literal" form)
+       (string=? name "kotoba.reader/js")
+       (fe-reject "#js literal is host interop; keep it inside a :cljs reader-conditional branch"
+                  "kotoba.error/host-js-literal" form)
+       (or (string=? name "kotoba.reader/set") (string=? name "kotoba.reader/bigint") (string=? name "kotoba.reader/bigdec"))
+       (fe-reject (string-concat "host literal "
+                    (string-concat (string-substring name 14 (string-byte-length name))
+                      " is not admitted (Kotoba admits keyword-set data and i64 / f64 literals); keep it inside a :clj / :cljs reader-conditional branch"))
+                  "kotoba.error/host-literal" form)
+       (string=? name "kotoba.reader/char")
+       (fe-reject "character literal \\c is host data; Kotoba text is UTF-8 bytes -- spell the byte as an integer (byte-at / string-byte-at) or use a one-character string"
+                  "kotoba.error/host-char-literal" form)
+       :else (fe-reject (string-concat "named operation " (string-concat name " is not a registered capability"))
+                        "kotoba.error/subset-reject" form)))
+   :default nil)
+
+;; the operation was written with a namespace: a registered capability (one request value), clojure.core/X
+;; (the bare head), else a refusal by name
+#?(:kotoba
+   (defn- desugar-named-op [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [name (form/symbol-value op)
+           slash (string-find-byte name 47 0)
+           kw (form/edn-form (string-concat ":" name))]
+       (cond
+         (tables/table-has? (env-table env :cap-registry) kw)
+         (let [_ (require-k (= 1 (argc form)) (string-concat "named operation " (string-concat name " requires exactly one request value"))
+                            "kotoba.error/subset-reject" form)
+               a (desugar-expr (note-used-capability env kw) (arg form 0))]
+           (dr (dr-env a) (form/call1 name (dr-form a))))
+         (string=? (string-substring name 0 slash) "clojure.core")
+         (desugar-expr env (form/form-seq (form/cons-onto (form/symbol-form (string-substring name (+ slash 1) (string-byte-length name)))
+                                                          (form/rest-list form))))
+         :else (throw (reader-tagged-refusal name form)))))
+   :default nil)
+
+;; `*used-capability-keywords*` when bound: a Form set the analysis reads back; nil-form when unbound
+#?(:kotoba
+   (defn- note-used-capability [env [:ref :fe/env] kw [:ref :form/r]] [:ref :fe/env]
+     (let [used (record-get [:ref :fe/env] env :used-caps)]
+       (record-assoc [:ref :fe/env] env :used-caps
+                     (if (form/is-set? used) (form/form-set (form/append-form (form/kids-of used) kw)) used))))
    :default nil)
 
 ;; ---- Kotoba-route string readings (host regexes, spelled as scans) --------
@@ -2349,6 +4025,15 @@
 (def ^:private closure-flat-result-types
   #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document})
 
+;; variants, vector literals, throw/try/catch =====
+;; a top-level schema reference resolved through the env's schemas (nested references stay closed edges)
+#?(:kotoba
+   (defn- canonical-closure-result-type [env [:ref :fe/env] t [:ref :form/r]] [:ref :form/r]
+     (if (and (schema-ref-type? t) (form/is-map? (env-schemas env)))
+       (let [r (form/form-get (env-schemas env) (form/nth-of t 1))]
+         (if (form/is-nil? r) t r))
+       t))
+   :default
 (defn- canonical-closure-result-type
   "Resolve a top-level schema reference before it becomes dispatcher identity.
   Nested references remain closed schema edges and are not recursively expanded."
@@ -2356,7 +4041,7 @@
   ([type schemas]
    (if (and (schema-ref-type? type) (map? schemas))
      (or (get schemas (second type)) type)
-     type)))
+     type))))
 
 (defn- closure-default-value-expr
   "Return a bounded inhabitant for a dispatcher result type, or nil when the
@@ -2416,6 +4101,16 @@
 
     :else nil))
 
+;; the dispatcher profile test (schemas {}: nothing is resolved here, exactly as the host calls it)
+#?(:kotoba
+   (defn- closure-result-type? [t [:ref :form/r]] :bool
+     (and (valid-type? t)
+          (or (flat-result-type? t)
+              (and (or (record-type? t) (generic-option-type? t) (parametric-result-type? t) (variant-type? t)
+                       (canonical-list-type? t) (heterogeneous-vector-type? t) (typed-set-type? t)
+                       (canonical-typed-map-type? t))
+                   (>= (default-kind t) 1)))))
+   :default
 (defn- closure-result-type?
   ([type] (closure-result-type? type *schemas*))
   ([type schemas]
@@ -2434,7 +4129,7 @@
                        (heterogeneous-vector-type? type)
                        (typed-set-type? type)
                        (canonical-typed-map-type? type))
-                   (some? (closure-default-value-expr type))))))))
+                   (some? (closure-default-value-expr type)))))))))
 
 (defn- dispatcher-result-label [result-type]
   (if (keyword? result-type)
@@ -2554,6 +4249,13 @@
                     args parameter-types)
                (map desugar-expr args))))))
 
+#?(:kotoba
+   (defn- desugar-result-expr [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [rt (canonical-closure-result-type env result-type)
+           _ (require-k (closure-result-type? rt) "closure result type is outside the admitted dispatcher profile"
+                        "kotoba.error/subset-reject" rt)]
+       (desugar-expr (with-result env rt) form)))
+   :default
 (defn- desugar-result-expr
   "Desugar an expression in a context with a known closure result family.
   The expectation follows value-producing tail positions, while ordinary
@@ -2564,8 +4266,16 @@
       (reject! "closure result type is outside the admitted dispatcher profile"
                result-type))
     (binding [*contextual-closure-result-type* result-type]
-      (desugar-expr form))))
+      (desugar-expr form)))))
 
+#?(:kotoba
+   (defn- desugar-vector-i64-source [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (if (and (form/is-seq? form) (= 2 (form/count-of form))
+              (or (head-is? form "rest") (head-is? form "pair-second")))
+       (let [a (desugar-vector-i64-source env (form/nth-of form 1))]
+         (dr (dr-env a) (form/call2 "vector-drop" (dr-form a) (form/int-form 1))))
+       (desugar-result-expr env (form/keyword-form :vector-i64) form)))
+   :default
 (defn- desugar-vector-i64-source
   "Desugar a T4.5 map/filter/reduce collection in the vector-i64 profile.
 
@@ -2582,7 +4292,7 @@
            (contains? '#{rest pair-second} (first form))
            (= 1 (count (rest form))))
     (list 'vector-drop (desugar-vector-i64-source (second form)) 1)
-    (desugar-result-expr :vector-i64 form)))
+    (desugar-result-expr :vector-i64 form))))
 
 (defn- bounded-vector-source-binding?
   "True for the synthetic collection binding T4.5 map/filter/reduce emit.
@@ -2599,9 +4309,21 @@
         (str/starts-with? s "__kotoba_reduce_v_")
         (str/starts-with? s "__kotoba_mapindexed_v_"))))
 
+#?(:kotoba
+   (defn- desugar-bool-expr [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (desugar-result-expr env (form/keyword-form :bool) form))
+   :default
 (defn- desugar-bool-expr [form]
-  (desugar-result-expr :bool form))
+  (desugar-result-expr :bool form)))
 
+#?(:kotoba
+   (defn- desugar-expected-value [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [rt (canonical-closure-result-type env result-type)]
+       (cond
+         (closure-result-type? rt) (desugar-result-expr env rt form)
+         (and (callable-type? rt) (head-is? form "fn")) (throw (fe-unported "function value under a callable contract" form))
+         :else (desugar-expr env form))))
+   :default
 (defn- desugar-expected-value [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
     (cond
@@ -2615,16 +4337,33 @@
       (and (callable-type? result-type) (seq? form) (= 'fn (first form)))
       (binding [*expected-callable-contract* result-type]
         (desugar-expr form))
-      :else (desugar-expr form))))
+      :else (desugar-expr form)))))
 
+;; the forms of FORM from index I (inclusive), each desugared, the last under RESULT-TYPE when it is not nil
+#?(:kotoba
+   (defn- desugar-tail-expressions [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r] i :i64
+                                    acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [r (desugar-tail-one env result-type form i)]
+         (desugar-tail-expressions (dr-env r) result-type form (+ i 1) (form/append-form acc (dr-form r))))))
+   :default
 (defn- desugar-tail-expressions [result-type forms]
   (let [last-index (dec (count forms))]
     (mapv (fn [index form]
             (if (and result-type (= index last-index))
               (desugar-result-expr result-type form)
               (desugar-expr form)))
-          (range (count forms)) forms)))
+          (range (count forms)) forms))))
 
+#?(:kotoba
+   (defn- sequenced-body [forms [:list [:ref :form/r]] form [:ref :form/r] head :string] [:ref :form/r]
+     (cond
+       (= 0 (vector-count forms)) (throw (fe-reject (string-concat head " requires at least one body expression")
+                                                    "kotoba.error/let-body-empty" form))
+       (= 1 (vector-count forms)) (typed-list-nth [:list [:ref :form/r]] forms 0)
+       :else (form/form-seq (form/cons-onto (form/symbol-form "do") forms))))
+   :default
 (defn- sequenced-body
   "Collapse an implicit-`do` body into the ONE expression a core head takes.
 
@@ -2650,7 +4389,7 @@
     (reject! (str head " requires at least one body expression") form
              :kotoba.error/let-body-empty)
     (= 1 (count forms)) (first forms)
-    :else (list* 'do forms)))
+    :else (list* 'do forms))))
 
 (defn- implicit-do-body
   "The ONE expression a `defn` / `defn-` / `fn` body is, from the one or more
@@ -2727,6 +4466,26 @@
              form :kotoba.error/if-arity))
   args)
 
+#?(:kotoba
+   (defn- closed-vector-literal-type [f [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-int? f) (form/keyword-form :i64)
+       (form/is-f64? f) (form/keyword-form :f64)
+       (form/is-string? f) (form/keyword-form :string)
+       (form/is-keyword? f) (form/keyword-form :keyword)
+       (form/is-bool? f) (form/keyword-form :bool)
+       (and (form/is-seq? f) (= 2 (form/count-of f)) (sym-is? (form/nth-of f 0) "quote") (form/is-symbol? (form/nth-of f 1)))
+       (form/keyword-form :symbol)
+       (form/is-vec? f)
+       (let [types (closed-vector-item-types f 0 (form/no-forms))]
+         (cond
+           (= 0 (vector-count types)) (form/keyword-form :vector-i64)
+           (all-item-types-are? types (form/keyword-form :i64) 0) (form/keyword-form :vector-i64)
+           (all-item-types-are? types (form/keyword-form :f64) 0) (form/keyword-form :vector-f64)
+           (all-item-types-some? types 0) (form/vec2 (form/keyword-form :vector) (form/form-vec types))
+           :else (form/nil-form)))
+       :else (form/nil-form)))
+   :default
 (defn- closed-vector-literal-type
   "Infer only descriptors that are completely determined by a closed vector
   literal. Unknown expressions return nil and keep the established i64-vector
@@ -2749,7 +4508,7 @@
         (every? #{:f64} item-types) :vector-f64
         (every? some? item-types) [:vector item-types]
         :else nil))
-    :else nil))
+    :else nil)))
 
 (defn- nth-pair-second [expr n]
   (nth (iterate (fn [value] (list 'pair-second value)) expr) n))
@@ -2793,19 +4552,29 @@
   an :i64 is still the 0 it always was (`absence-type`)."
   :legacy)
 
+#?(:kotoba
+   (defn- absence-marker-form [env [:ref :fe/env]] [:ref :form/r]
+     (if (env-none? env)
+       (form/call1 "__kotoba_absent" (form/keyword-form :none))
+       (form/call0 "__kotoba_absent")))
+   :default
 (defn- absence-marker-form
   "The marker a missing else writes here."
   []
-  (if (= :none *absence-mode*) '(__kotoba_absent :none) '(__kotoba_absent)))
+  (if (= :none *absence-mode*) '(__kotoba_absent :none) '(__kotoba_absent))))
 
 (defn- absence-kind-mode [kind]
   (get {absent-kind :legacy none-kind :none nil-kind :nil} kind))
 
+#?(:kotoba
+   (defn- absence-marker? [form [:ref :form/r]] :bool
+     (head-is? form "__kotoba_absent"))
+   :default
 (defn- absence-marker?
   "`(__kotoba_absent)` / `(__kotoba_absent :none)` (no else; see
   `*absence-mode*`) or `(__kotoba_absent :nil)` (a literal nil)."
   [form]
-  (and (seq? form) (= '__kotoba_absent (first form))))
+  (and (seq? form) (= '__kotoba_absent (first form)))))
 
 (defn- absence-kind? [type] (contains? #{absent-kind none-kind nil-kind} type))
 
@@ -3208,14 +4977,29 @@
 
 #?(:kotoba nil :default (def ^:private str-integer-heads tables/str-integer-heads))
 
+#?(:kotoba
+   (defn- str-integer-form? [env [:ref :fe/env] part [:ref :form/r]] :bool
+     (or (form/is-int? part)
+         (and (form/is-symbol? part) (form/is-map? (env-types env))
+              (form/eq (form/form-get (env-types env) part) (form/keyword-form :i64)))
+         (and (form/is-seq? part) (> (form/count-of part) 0)
+              (tables/table-has? (env-table env :str-int) (form/nth-of part 0)))))
+   :default
 (defn- str-integer-form?
   "Is PART certainly an i64 without a type inference: an integer literal, a
   parameter or `let` local known as :i64, or an arithmetic form."
   [part]
   (boolean (or (kotoba-integer? part)
                (and (symbol? part) (= :i64 (get *local-types* part)))
-               (and (seq? part) (contains? str-integer-heads (first part))))))
+               (and (seq? part) (contains? str-integer-heads (first part)))))))
 
+#?(:kotoba
+   (defn- str-part [env [:ref :fe/env] part [:ref :form/r]] [:ref :fe/dr]
+     (if (str-integer-form? env part)
+       (let [a (desugar-expr env part)]
+         (dr (dr-env a) (form/call1 "__kotoba_string_from_i64" (dr-form a))))
+       (desugar-result-expr env (form/keyword-form :string) part)))
+   :default
 (defn- str-part
   "One `str` argument as a :string operand. Clojure's `str` prints an integer
   as its decimal digits, so an integer literal, a parameter typed :i64 and an
@@ -3224,7 +5008,7 @@
   [part]
   (if (str-integer-form? part)
     (list string-from-i64-helper-name (desugar-expr part))
-    (desugar-result-expr :string part)))
+    (desugar-result-expr :string part))))
 
 (defn- elaborate-named-operation
   "W1 safety elaboration validates an ordinary namespaced operation and keeps
@@ -3273,8 +5057,12 @@
 ;; harmless anyway -- a temp is read only in its own `if` test and else branch,
 ;; both outside any inner binding -- but relying on that alone would leave a real
 ;; program able to capture one by writing the name.
+#?(:kotoba
+   (defn- chain-temp [prefix :string depth :i64] [:ref :form/r]
+     (form/symbol-form (string-concat "__kotoba_" (string-concat prefix (string-concat "_" (string-from-i64 depth))))))
+   :default
 (defn- chain-temp [prefix depth]
-  (symbol (str "__kotoba_" prefix "_" depth)))
+  (symbol (str "__kotoba_" prefix "_" depth))))
 
 ;; Every other synthesized `let` temporary. Bound ONCE per `analyze` call, the
 ;; same lifetime and for the same reason as `*loop-counter*` above: the same
@@ -3297,10 +5085,16 @@
 ;; `analyze` still produces correct (if unstable) names rather than colliding.
 (def ^:dynamic *synthetic-counter* nil)
 
+#?(:kotoba
+   (defn- synthetic [env [:ref :fe/env] prefix :string] [:ref :fe/dr]
+     (let [n (+ (env-counter env) 1)]
+       (dr (record-assoc [:ref :fe/env] env :counter n)
+           (form/symbol-form (string-concat "__kotoba_" (string-concat prefix (string-concat "_" (string-from-i64 n))))))))
+   :default
 (defn- synthetic [prefix]
   (if *synthetic-counter*
     (symbol (str "__kotoba_" prefix "_" (vswap! *synthetic-counter* inc)))
-    (gensym (str prefix "__"))))
+    (gensym (str prefix "__")))))
 
 (defn- reserved-binding-name? [value]
   (and (simple-symbol? value) (= "__kotoba_" (subs (str value) 0 (min 9 (count (str value)))))))
@@ -3629,6 +5423,20 @@
                                    (get @intrinsic-helper-forms helper))))
               intrinsic-helper-order)))))
 
+;; ARGS are the forms of FORM from index I
+#?(:kotoba
+   (defn- desugar-and [env [:ref :fe/env] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (let [n (- (form/count-of form) i)]
+       (cond
+         (= n 0) (dr env (form/int-form 1))
+         (= n 1) (desugar-bool-expr env (form/nth-of form i))
+         :else (let [tmp (chain-temp "and" n)
+                     a (desugar-bool-expr env (form/nth-of form i))
+                     b (desugar-and (dr-env a) form (+ i 1))]
+                 (dr (dr-env b)
+                     (form/call2 "let" (form/vec2 tmp (dr-form a))
+                                 (form/call3 "if" tmp (dr-form b) tmp)))))))
+   :default
 (defn- desugar-and
   "`(and a b c ...)` -> nested `let`/`if`, ported from kotoba-lang/kotoba's
   runtime.clj `desugar-and` (verified live there, ADR-2607150000): binds
@@ -3640,8 +5448,21 @@
     (empty? (rest args)) (desugar-bool-expr (first args))
     :else (let [tmp (chain-temp "and" (count args))]
             (list 'let [tmp (desugar-bool-expr (first args))]
-                  (list 'if tmp (desugar-and (rest args)) tmp)))))
+                  (list 'if tmp (desugar-and (rest args)) tmp))))))
 
+#?(:kotoba
+   (defn- desugar-or [env [:ref :fe/env] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (let [n (- (form/count-of form) i)]
+       (cond
+         (= n 0) (dr env (form/int-form 0))
+         (= n 1) (desugar-bool-expr env (form/nth-of form i))
+         :else (let [tmp (chain-temp "or" n)
+                     a (desugar-bool-expr env (form/nth-of form i))
+                     b (desugar-or (dr-env a) form (+ i 1))]
+                 (dr (dr-env b)
+                     (form/call2 "let" (form/vec2 tmp (dr-form a))
+                                 (form/call3 "if" tmp tmp (dr-form b))))))))
+   :default
 (defn- desugar-or
   "Mirror of desugar-and for `(or a b c ...)`. `(or)` is vacuously falsy
   (0); `(or a)` is just a."
@@ -3651,8 +5472,13 @@
     (empty? (rest args)) (desugar-bool-expr (first args))
     :else (let [tmp (chain-temp "or" (count args))]
             (list 'let [tmp (desugar-bool-expr (first args))]
-                  (list 'if tmp tmp (desugar-or (rest args)))))))
+                  (list 'if tmp tmp (desugar-or (rest args))))))))
 
+#?(:kotoba
+   (defn- desugar-cond [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 0 (rem (argc form) 2)) "cond requires test/result pairs" "kotoba.error/cond-pairs" form)]
+       (desugar-cond-lower env form 1)))
+   :default
 (defn- desugar-cond
   "Lowers `(cond test value ... :else fallback)` to the already admitted
   nested `if` core. Tests retain left-to-right, at-most-once evaluation.
@@ -3676,8 +5502,27 @@
                         ;; no :else is absence (`absence-type`); an empty
                         ;; cond stays the 0 it always was
                         (if (seq remaining) (lower remaining) (absence-marker-form)))))))]
-    (lower args)))
+    (lower args))))
 
+#?(:kotoba
+   (defn- desugar-condp [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (>= (argc form) 2) "condp requires a predicate and dispatch expression"
+                        "kotoba.error/subset-reject" form)
+           predicate (arg form 0)
+           _ (require-k (simple-symbol-form? predicate) "condp predicate must be an unqualified function symbol"
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (not (condp-has-arrow? form 3)) "condp :>> clauses are not supported by this portable profile"
+                        "kotoba.error/subset-reject" form)
+           clauses (- (argc form) 2)
+           default? (= 1 (rem clauses 2))
+           end (if default? (- (form/count-of form) 1) (form/count-of form))
+           t (synthetic env "condp")
+           tmp (dr-form t)
+           disp (desugar-expr (dr-env t) (arg form 1))
+           dflt (desugar-expr (dr-env disp) (condp-default-form form default?))
+           folded (condp-fold (dr-env dflt) predicate tmp form 3 end (dr-form dflt))]
+       (dr (dr-env folded) (form/call2 "let" (form/vec2 tmp (dr-form disp)) (dr-form folded)))))
+   :default
 (defn- desugar-condp
   "Lowers the portable `(condp predicate dispatch test result ... default?)`
   subset to a single dispatch binding and left-to-right nested `if` calls.
@@ -3704,8 +5549,16 @@
                             (desugar-expr result)
                             fallback))
                     (desugar-expr default)
-                    (reverse pairs))))))
+                    (reverse pairs)))))))
 
+#?(:kotoba
+   (defn- desugar-cond-thread [env [:ref :fe/env] form [:ref :form/r] last? :bool] [:ref :fe/dr]
+     (let [_ (require-k (and (> (argc form) 0) (= 0 (rem (- (argc form) 1) 2)))
+                        (string-concat (if last? "cond->>" "cond->") " requires an initial value followed by test/form pairs")
+                        "kotoba.error/subset-reject" form)
+           init (desugar-expr env (arg form 0))]
+       (cond-thread-steps (dr-env init) (dr-form init) form 2 last?)))
+   :default
 (defn- desugar-cond-thread [args form last?]
   (when (or (empty? args) (odd? (count (rest args))))
     (reject! (str (if last? "cond->>" "cond->")
@@ -3721,7 +5574,7 @@
                           (desugar-expr threaded)
                           tmp))))
           (desugar-expr (first args))
-          (partition 2 (rest args))))
+          (partition 2 (rest args)))))
 
 (defn- desugar-dotimes [args form]
   (let [[binding & body] args]
@@ -3999,6 +5852,16 @@
                       (reverse groups))]
           (desugar-expr lowered))))))
 
+#?(:kotoba
+   (defn- thread-form [value [:ref :form/r] step [:ref :form/r] last? :bool] [:ref :form/r]
+     (cond
+       (form/is-symbol? step) (form/call1 (form/symbol-value step) value)
+       (and (form/is-seq? step) (> (form/count-of step) 0) (form/is-symbol? (form/nth-of step 0)))
+       (if last?
+         (form/form-seq (form/cons-onto (form/nth-of step 0) (form/append-form (form/rest-list step) value)))
+         (form/form-seq (form/cons-onto (form/nth-of step 0) (form/cons-onto value (form/rest-list step)))))
+       :else (throw (fe-reject "thread step must be a symbol or non-empty call" "kotoba.error/subset-reject" step))))
+   :default
 (defn- thread-form [value step last?]
   (cond
     (symbol? step) (list step value)
@@ -4006,20 +5869,34 @@
     (if last?
       (apply list (first step) (concat (rest step) [value]))
       (list* (first step) value (rest step)))
-    :else (reject! "thread step must be a symbol or non-empty call" step)))
+    :else (reject! "thread step must be a symbol or non-empty call" step))))
 
+#?(:kotoba
+   (defn- desugar-thread [env [:ref :fe/env] form [:ref :form/r] last? :bool] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) (if last? "->> requires an initial value" "-> requires an initial value")
+                        "kotoba.error/subset-reject" form)
+           v (thread-steps (arg form 0) form 2 last?)]
+       (desugar-expr env v)))
+   :default
 (defn- desugar-thread [args form last?]
   (when (empty? args)
     (reject! (if last? "->> requires an initial value" "-> requires an initial value") form))
-  (desugar-expr (reduce #(thread-form %1 %2 last?) (first args) (rest args))))
+  (desugar-expr (reduce #(thread-form %1 %2 last?) (first args) (rest args)))))
 
+#?(:kotoba
+   (defn- desugar-as-thread [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (and (<= 2 (argc form)) (simple-symbol-form? (arg form 1)))
+                        "as-> requires an initial value, an unqualified binding symbol, and optional forms"
+                        "kotoba.error/subset-reject" form)]
+       (desugar-expr env (as-thread-steps (arg form 0) (arg form 1) form 3))))
+   :default
 (defn- desugar-as-thread [args form]
   (let [[initial name & steps] args]
     (when-not (and (<= 2 (count args)) (symbol? name) (nil? (namespace name)))
       (reject! "as-> requires an initial value, an unqualified binding symbol, and optional forms" form))
     (desugar-expr
      (reduce (fn [value step] (list 'let [name value] step))
-             initial steps))))
+             initial steps)))))
 
 ;; the vector's first element is the keyword NAME
 #?(:kotoba
@@ -4196,6 +6073,12 @@
     (= payload-type :f32) 0.0
     :else 0))
 
+#?(:kotoba
+   (defn- desugar-some-thread [env [:ref :fe/env] form [:ref :form/r] last? :bool] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) (if last? "some->> requires an initial option" "some-> requires an initial option")
+                        "kotoba.error/subset-reject" form)]
+       (some-thread-lower env (arg form 0) form 2 last?)))
+   :default
 (defn- desugar-some-thread
   "`(some-> x s1 s2)` threads while each value is present (ADR 0353 floor
   :absence). A step whose value is an `[:option T]` stops the thread when it
@@ -4217,8 +6100,31 @@
                     threaded (thread-form (list '__kotoba_present tmp) (first steps) last?)]
                 (list 'let [tmp (desugar-expr value-form)]
                       (list '__kotoba_some_bind tmp (lower threaded (rest steps)))))))]
-    (lower (first args) (rest args))))
+    (lower (first args) (rest args)))))
 
+#?(:kotoba
+   (defn- desugar-binding-if [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :fe/dr]
+     (let [binding (arg form 0)
+           nb (- (form/count-of form) 2)
+           _ (require-k (and (form/is-vec? binding) (= 2 (form/count-of binding)))
+                        (if when? "when-let requires one binding pair" "if-let requires one binding pair")
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (if when? (> nb 0) (and (<= 1 nb) (<= nb 2)))
+                        (if when? "when-let requires at least one body expression"
+                            "if-let requires then and optional else expressions")
+                        "kotoba.error/subset-reject" form)
+           pattern (form/nth-of binding 0)
+           t (synthetic env "binding-if")
+           tmp (dr-form t)
+           then-form (binding-if-then form when?)
+           else-form (binding-if-else env form when?)
+           v (desugar-bool-expr (dr-env t) (form/nth-of binding 1))]
+       (desugar-expr (dr-env v)
+                     (form/call2 "let" (form/vec2 tmp (dr-form v))
+                                 (form/call3 "if" tmp
+                                             (form/call2 "let" (form/vec2 pattern (form/call1 "__kotoba_present" tmp)) then-form)
+                                             else-form)))))
+   :default
 (defn- desugar-binding-if [args form when?]
   (let [[binding & bodies] args]
     (when-not (and (vector? binding) (= 2 (count binding)))
@@ -4243,7 +6149,7 @@
        (list 'let [tmp (desugar-bool-expr value)]
              (list 'if tmp
                    (list 'let [pattern (list '__kotoba_present tmp)] then-form)
-                   else-form))))))
+                   else-form)))))))
 
 (defn- desugar-binding-some [args form when?]
   (let [[binding & bodies] args]
@@ -4309,11 +6215,35 @@
   [v]
   (if (kotoba-integer? v) [::integer (str v)] [::literal v]))
 
+#?(:kotoba
+   (defn- all-distinct? [xs [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count xs))
+       true
+       (and (not (member-of? xs (typed-list-nth [:list [:ref :form/r]] xs i) 0 i)) (all-distinct? xs (+ i 1)))))
+   :default
 (defn- all-distinct?
   "Uniqueness over values that may include `.kotoba` integer literals."
   [xs]
-  (= (count xs) (count (distinct (map uniqueness-key xs)))))
+  (= (count xs) (count (distinct (map uniqueness-key xs))))))
 
+#?(:kotoba
+   (defn- desugar-case [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (> (argc form) 0) "case requires a dispatch expression" "kotoba.error/subset-reject" form)
+           clauses (- (argc form) 1)
+           default? (= 1 (rem clauses 2))
+           end (if default? (- (form/count-of form) 1) (form/count-of form))
+           _ (require-k (case-constants-ok? form 2 end)
+                        "case constants must be bounded integer, keyword, boolean, or string literals"
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (all-distinct? (case-constants form 2 end (form/no-forms)) 0)
+                        "case constants must be unique" "kotoba.error/subset-reject" form)
+           t (synthetic env "case")
+           tmp (dr-form t)
+           disp (desugar-expr (dr-env t) (arg form 0))
+           dflt (desugar-expr (dr-env disp) (condp-default-form form default?))
+           folded (case-fold (dr-env dflt) tmp form 2 end (dr-form dflt))]
+       (dr (dr-env folded) (form/call2 "let" (form/vec2 tmp (dr-form disp)) (dr-form folded)))))
+   :default
 (defn- desugar-case [args form]
   (when (empty? args) (reject! "case requires a dispatch expression" form))
   (let [[dispatch & clauses] args
@@ -4338,8 +6268,22 @@
                         (list 'if test
                               (desugar-expr result) fallback)))
                     (desugar-expr default)
-                    (reverse pairs))))))
+                    (reverse pairs)))))))
 
+;; ARGS are the forms of FORM from index I
+#?(:kotoba
+   (defn- desugar-comparison-chain [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (let [n (- (form/count-of form) i)
+           _ (require-k (or (string=? (form/symbol-value op) "=") (> n 0))
+                        "ordered comparison requires at least one operand" "kotoba.error/subset-reject" form)]
+       (if (= n 0)
+         (dr env (form/bool-form true))
+         (let [left (chain-temp "cmp" (+ n 1))
+               a (desugar-expr env (form/nth-of form i))
+               b (comparison-chain-rest (dr-env a) op left form (+ i 1))]
+           (dr (dr-env b)
+               (form/call2 "let" (form/vec2 left (dr-form a)) (dr-form b)))))))
+   :default
 (defn- desugar-comparison-chain [op args form]
   (when (and (not= op '=) (empty? args))
     (reject! "ordered comparison requires at least one operand" form))
@@ -4357,9 +6301,21 @@
       true
       (let [left (chain-temp "cmp" (inc (count args)))]
         (list 'let [left (desugar-expr (first args))]
-              (chain left (rest args)))))))
+              (chain left (rest args))))))))
 
 
+#?(:kotoba
+   (defn- desugar-do [env [:ref :fe/env] form [:ref :form/r] i :i64] [:ref :fe/dr]
+     (let [n (- (form/count-of form) i)]
+       (cond
+         (= n 0) (dr env (form/int-form 0))
+         (= n 1) (desugar-expr env (form/nth-of form i))
+         :else (let [t (synthetic env "do-tmp")
+                     a (desugar-expr (dr-env t) (form/nth-of form i))
+                     b (desugar-do (dr-env a) form (+ i 1))]
+                 (dr (dr-env b)
+                     (form/call2 "let" (form/vec2 (dr-form t) (dr-form a)) (dr-form b)))))))
+   :default
 (defn- desugar-do
   "ADR-2607180900 L2: `(do a b c)` -> nested `let` returning last expression."
   [args]
@@ -4368,7 +6324,7 @@
     (empty? (rest args)) (desugar-expr (first args))
     :else (let [tmp (synthetic "do-tmp")]
             (list 'let [tmp (desugar-expr (first args))]
-                  (desugar-do (rest args))))))
+                  (desugar-do (rest args)))))))
 
 (defn- integer-literal-compare
   "Numeric order over `.kotoba` integer literals on BOTH runtimes.
@@ -5157,6 +7113,27 @@
 
 #?(:kotoba nil :default (def ^:private document-constructor-heads tables/document-constructor-heads))
 
+#?(:kotoba
+   (defn- guess-document-form? [env [:ref :fe/env] f [:ref :form/r]] :bool
+     (cond
+       (form/is-symbol? f)
+       (and (form/is-map? (env-types env))
+            (form/eq (form/form-get (env-types env) f) (form/keyword-form :document)))
+       (form/is-seq? f)
+       (if (= 0 (form/count-of f))
+         false
+         (let [op (form/nth-of f 0)
+               lexical? (tables/table-has? (env-lexical env) op)
+               n (argc f)]
+           (or (tables/table-has? (env-table env :doc-ctor) op)
+               (and (or (sym-is? op "keys") (sym-is? op "vals")) (not lexical?))
+               (and (form/is-symbol? op) (tables/table-has? (env-docfns env) op) (not lexical?))
+               (and (tables/table-has? (env-table env :doc-ret) op) (not lexical?)
+                    (guess-document-form? env (guess-document-src env op f)))
+               (and (sym-is? op "get") (= 3 n) (guess-document-form? env (form/nth-of f 1)))
+               (and (sym-is? op "reduce") (= 3 n) (guess-document-form? env (form/nth-of f 2))))))
+       :else false))
+   :default
 (defn- guess-document-form?
   "Whether SOURCE form FORM is a `:document`, as far as desugaring can tell
   without types: a parameter or `let` local recorded as a document, a document
@@ -5182,7 +7159,7 @@
                  (guess-document-form? src)))
           (and (= 'get op) (= 3 (count args)) (guess-document-form? (first args)))
           (and (= 'reduce op) (= 3 (count args)) (guess-document-form? (second args)))))
-    :else false))
+    :else false)))
 
 (defn- document-callback-call
   "The source form applying callback F-FORM to the symbol X: an inline `fn`
@@ -5222,10 +7199,14 @@
   [acc x]
   (list 'fn [acc x] (list 'document-vector-conj acc x)))
 
+#?(:kotoba
+   (defn- document-head-target [op [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (if (or (sym-is? op "some") (sym-is? op "every?") (sym-is? op "keep")) (form/nth-of form 2) (form/nth-of form 1)))
+   :default
 (defn- document-head-target
   "The argument whose type decides whether OP is a document operation."
   [op args]
-  (if (contains? '#{some every? keep} op) (second args) (first args)))
+  (if (contains? '#{some every? keep} op) (second args) (first args))))
 
 (defn- document-head->form
   "OP applied to a document, as source built from primitives the frontend already
@@ -5751,11 +7732,17 @@
         (cons op (map #(replace-recur % helper-name loop-names captured) args))))
     :else form))
 
+#?(:kotoba
+   (defn- top-level-function-symbol? [env [:ref :fe/env] v [:ref :form/r]] :bool
+     (and (simple-symbol-form? v)
+          (not (tables/table-has? (env-lexical env) v))
+          (tables/table-has? (env-arities env) v)))
+   :default
 (defn- top-level-function-symbol? [value]
   (and (symbol? value)
        (nil? (namespace value))
        (not (contains? *lexical-bindings* value))
-       (contains? *function-arities* value)))
+       (contains? *function-arities* value))))
 
 (defn- callback-supported-arities [callback]
   (cond
@@ -6118,6 +8105,22 @@
                                 (map symbol-literal-form datum))
           (reject-quoted-symbol-datum! form))))))
 
+#?(:kotoba
+   (defn- desugar-expr* [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (cond
+       (absence-marker? form) (dr env form)
+       (document-ctx? ctx) (throw (fe-unported "document context" form))
+       (form/is-int? form) (dr env form)
+       (form/is-vec? form) (desugar-vector-literal env form)
+       (or (form/is-f64? form) (form/is-map? form) (form/is-set? form))
+       (throw (fe-unported "literal" form))
+       (form/is-keyword? form) (dr env form)
+       (form/is-bool? form) (dr env form)
+       (form/is-nil? form) (dr env (form/call0 "option-none"))
+       (not (form/is-seq? form)) (dr env form)
+       (head-is? form "quote") (throw (fe-unported "quote" form))
+       :else (desugar-call env form ctx)))
+   :default
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; An absence marker is already desugared (see `absence-type`).
@@ -8056,8 +10059,14 @@
               (reject! (str "named operation " (pr-str op)
                             " is not a registered capability")
                        form)))
-            (desugar-ordinary-call op args))))))))
+            (desugar-ordinary-call op args)))))))))
 
+;; `(op args...)` of a module function: the arguments desugared in order (no callable contracts on this route yet)
+#?(:kotoba
+   (defn- desugar-ordinary-call [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call op (drs-forms r)))))
+   :default
 (defn- desugar-ordinary-call
   "`(op args...)` for a head that is neither sugar nor a capability: the
   arguments desugared in order, each `fn` (or `fn-ref`) argument written in
@@ -8086,7 +10095,7 @@
                                 (desugar-expr argument))
                               (desugar-expr argument)))
                           args)
-             (map desugar-expr args)))))
+             (map desugar-expr args))))))
 
 #?(:kotoba nil :default (def ^:private i64-answer-predicates tables/i64-answer-predicates))
 
@@ -8105,6 +10114,12 @@
         (list '= marked 1)))
     result))
 
+#?(:kotoba
+   (defn- desugar-expr [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [ctx (env-result env)
+           r (desugar-expr* (with-result env (form/nil-form)) form ctx)]
+       (dr (with-result (dr-env r) ctx) (dr-form r))))
+   :default
 (defn- desugar-expr [form]
   ;; The one chokepoint every desugared node passes through, and therefore the
   ;; only place a host error escaping ANY branch of the lowering table can be
@@ -8137,7 +10152,7 @@
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (or (coll? result) (symbol? result)))
       (with-meta result (merge (meta result) location))
-      result)))
+      result))))
 
 (defn- valid-name? [value]
   (and (simple-symbol? value) (<= (count (name value)) max-symbol-chars)))
