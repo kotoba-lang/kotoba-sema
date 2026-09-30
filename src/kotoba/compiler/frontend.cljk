@@ -5378,6 +5378,71 @@
     (coll? form) (first-truthy uses-char? form)
     :else false))
 
+;; ---------------------------------------------------------------------------
+;; Sequence heads on a `:document` (a dynamic EDN tree: the compiler's own forms,
+;; HIR, policies). `first`/`rest`/`nth`/`keys`/`vals` on a document read its
+;; run-time kind, so they need small recursive helpers, injected into a module
+;; only when it uses documents (a module that does not lowers byte for byte as
+;; before). Written directly in primitive form, like the other helpers.
+
+(def ^:private doc-nth-helper-name '__kotoba_doc_nth)
+(def ^:private doc-rest-from-helper-name '__kotoba_doc_rest_from)
+(def ^:private doc-rest-helper-name '__kotoba_doc_rest)
+(def ^:private doc-part-from-helper-name '__kotoba_doc_part_from)
+(def ^:private doc-keys-helper-name '__kotoba_doc_keys)
+(def ^:private doc-vals-helper-name '__kotoba_doc_vals)
+
+(def ^:private document-helpers
+  [{:name doc-nth-helper-name
+    :params '[d i] :param-types [:document :i64] :result :document :effects #{}
+    ;; element I of a vector, a list, or a map (its I-th [key value] entry);
+    ;; nil (document-null) out of range or for any other kind -- Clojure's
+    ;; `(nth x i nil)`.
+    :body '(if (= (document-kind d) :vector)
+             (option-value-of [:option :document] (document-vector-at d i) (document-null))
+             (if (= (document-kind d) :list)
+               (option-value-of [:option :document] (document-list-at d i) (document-null))
+               (if (= (document-kind d) :map)
+                 (option-value-of [:option :document] (document-map-entry-at d i) (document-null))
+                 (document-null))))}
+   {:name doc-rest-from-helper-name
+    :params '[d i acc] :param-types [:document :i64 :document] :result :document :effects #{}
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_rest_from d (+ i 1)
+                                     (document-vector-conj acc (__kotoba_doc_nth d i)))
+             acc)}
+   {:name doc-rest-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    ;; everything after the first element, as a vector
+    :body '(__kotoba_doc_rest_from d 1 (document-vector))}
+   {:name doc-part-from-helper-name
+    :params '[d i j acc] :param-types [:document :i64 :i64 :document] :result :document :effects #{}
+    ;; part J (0 key, 1 value) of every [key value] entry of a map
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_part_from d (+ i 1) j
+                                     (document-vector-conj
+                                      acc (__kotoba_doc_nth (__kotoba_doc_nth d i) j)))
+             acc)}
+   {:name doc-keys-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    :body '(__kotoba_doc_part_from d 0 0 (document-vector))}
+   {:name doc-vals-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    :body '(__kotoba_doc_part_from d 0 1 (document-vector))}])
+
+(defn- uses-documents?
+  "True when a function set mentions `:document` in a signature or calls a
+  `document-*` head: only those modules get the document sequence helpers."
+  [functions]
+  (boolean
+   (some (fn [{:keys [param-types result body]}]
+           (or (some #{:document} (tree-seq coll? seq (concat param-types [result])))
+               (some #(and (symbol? %)
+                           (or (str/starts-with? (str %) "document-")
+                               (= '__kotoba_document_of %)))
+                     (tree-seq coll? seq body))))
+         functions)))
+
 (defn- uses-string-from-i64? [form]
   (cond
     (seq? form) (or (= string-from-i64-helper-name (first form))
@@ -12733,6 +12798,10 @@
                                                   locals signatures)
                            (catch #?(:clj Exception :cljs :default) _ nil))]
           (cond
+            ;; `(nth doc i)` on a `:document`: element I, nil out of range.
+            (and (= :document value-type) (= 2 (count rewritten-args)))
+            (list doc-nth-helper-name (first rewritten-args) (second rewritten-args))
+
             (heterogeneous-vector-type? value-type)
             (do
               (when-not (<= 2 (count rewritten-args) 3)
@@ -12973,8 +13042,15 @@
                      form (if keys?
                             :kotoba.error/keys-arity
                             :kotoba.error/vals-arity)))
-          (if (canonical-typed-map-type? value-type)
+          (cond
+            (canonical-typed-map-type? value-type)
             (list (if keys? 'typed-map-keys 'typed-map-vals) value-type receiver)
+
+            ;; a `:document` map: its keys / values, as a document vector
+            (= :document value-type)
+            (list (if keys? doc-keys-helper-name doc-vals-helper-name) receiver)
+
+            :else
             (reject! (str (if keys? "keys" "vals")
                           " projects a canonical typed map; got "
                           (pr-str value-type) ". "
@@ -13017,6 +13093,14 @@
                                 (catch #?(:clj Exception :cljs :default) _ nil)))
               first? (= op 'pair-first)]
           (cond
+            ;; `first` / `rest` on a `:document` (a dynamic EDN tree): element 0,
+            ;; and everything after it as a vector. `second` is `first` of
+            ;; `rest`, so it composes.
+            (= :document value-type)
+            (if first?
+              (list doc-nth-helper-name receiver 0)
+              (list doc-rest-helper-name receiver))
+
             (= :vector-i64 value-type)
             (if first? (list 'vector-at receiver 0) (list 'vector-drop receiver 1))
 
@@ -19652,7 +19736,9 @@
                 (first-truthy #(uses-string-from-i64? (:body %)) helpers)
                 (into [string-from-i64-nat-helper string-from-i64-helper])
                 (first-truthy #(uses-char? (:body %)) helpers)
-                (conj char-helper))
+                (conj char-helper)
+                (uses-documents? helpers)
+                (into document-helpers))
               candidates (binding [*schemas* (:schemas namespace-info)]
                            (->> inference-functions
                                 (mapv #(update % :body resolve-overloaded-calls
@@ -19706,7 +19792,9 @@
                  (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                  (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
                  (first-truthy #(uses-char? (:body %)) parsed)
-                 (conj char-helper))
+                 (conj char-helper)
+                 (uses-documents? parsed)
+                 (into document-helpers))
         parsed (mapv #(if (:param-types %)
                         %
                         (assoc % :param-types (vec (repeat (count (:params %)) :i64))))

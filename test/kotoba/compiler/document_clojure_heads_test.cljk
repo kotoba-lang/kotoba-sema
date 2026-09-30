@@ -37,3 +37,28 @@
   (is (= 1 (run 'c)) "dissoc removes one of two keys")
   (is (= 42 (run 'd)) "get returns the stored value")
   (is (= 9 (run 'e)) "get returns the default for an absent key"))
+
+(def ^:private seq-prog
+  "(ns m.probe {:kotoba/export [t1 t2 t3 t4 t5 t6 t7]})
+(defn t1 [] :i64 (match-option (document-i64-value (first (document-vector (document-i64 7) (document-i64 8) (document-i64 9)))) [:option :i64] (none -1) (some x x)))
+(defn t2 [] :i64 (match-option (document-i64-value (second (document-vector (document-i64 7) (document-i64 8) (document-i64 9)))) [:option :i64] (none -1) (some x x)))
+(defn t3 [] :i64 (count (rest (document-vector (document-i64 7) (document-i64 8) (document-i64 9)))))
+(defn t4 [] :i64 (match-option (document-i64-value (first (document-list (document-i64 4) (document-i64 5)))) [:option :i64] (none -1) (some x x)))
+(defn t5 [] :i64 (count (keys (assoc (document-map) :a 1 :b 2 :c 3))))
+(defn t6 [] :i64 (match-option (document-i64-value (nth (vals (assoc (document-map) :a 10 :b 20)) 1)) [:option :i64] (none -1) (some x x)))
+(defn t7 [] :i64 (if (= (document-kind (first (document-vector))) :null) 1 0))")
+
+(def ^:private seq-lowered (delay (kir/lower (sema/analyze seq-prog))))
+
+(defn- run-seq [f]
+  (let [v (kir/execute @seq-lowered f [] {})]
+    #?(:clj (long v) :cljs (js/Number v))))
+
+(deftest the-sequence-heads-answer-on-a-document
+  (is (= 7 (run-seq 't1)) "first of a vector")
+  (is (= 8 (run-seq 't2)) "second of a vector")
+  (is (= 2 (run-seq 't3)) "rest of a three-element vector has two")
+  (is (= 4 (run-seq 't4)) "first of a list")
+  (is (= 3 (run-seq 't5)) "keys of a three-key map")
+  (is (= 20 (run-seq 't6)) "the second value of a map")
+  (is (= 1 (run-seq 't7)) "first of an empty vector is nil (the null kind)"))
