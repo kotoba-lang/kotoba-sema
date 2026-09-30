@@ -1,0 +1,23 @@
+(ns kotoba.compiler.reduce-destructuring-params-test
+  "`reduce`'s fn takes destructuring patterns for its accumulator and item
+  (`(fn [{:keys [a]} [i x]] ...)`), the shape the selfhost wall measured in
+  kotoba.object.macho64 (`layout-sections`) and sha2.sha512 (`compress`),
+  both refused `reduce fn must be (fn [acc x] single-expr)`. The patterns are
+  bound by the ordinary `let` destructuring; symbols still work unchanged."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(defn- run [defs]
+  (str (kir/execute (kir/lower (sema/analyze (str "(ns m.probe)\n" defs))) 'main [] {})))
+
+(deftest a-vector-pattern-accumulator-and-item
+  (is (= "6" (run "(defn main [] (nth (reduce (fn [[a b] x] [(+ a x) b]) [0 0] [1 2 3]) 0))"))))
+
+(deftest a-plain-symbol-fn-is-unchanged
+  (is (= "6" (run "(defn main [] (reduce (fn [a x] (+ a x)) 0 [1 2 3]))"))))
+
+(deftest a-rest-parameter-is-still-refused
+  (is (thrown? #?(:clj Exception :cljs :default)
+               (sema/analyze "(ns m.probe)\n(defn main [] (reduce (fn [a & r] a) 0 [1 2]))"))))

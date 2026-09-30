@@ -1,0 +1,28 @@
+(ns kotoba.compiler.namespaced-keys-destructuring-test
+  "`{:ns/keys [a b]}` and `{:keys [ns/a]}` map destructuring (Clojure's
+  namespaced-keys shape). The selfhost wall measured 5 dependent sources
+  (kotoba.mir, kotoba.native.*, kotoba.codegen.mc) refused
+  `map destructuring requires :keys, :as, ...` at
+  `(defn f [t {:mir/keys [op kind]}] ...)`: a genuine missing language
+  feature, not a source defect. The bare name is bound and the qualified
+  keyword is looked up; host behaviour is the Clojure meaning."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(defn- run [defs]
+  (str (kir/execute (kir/lower (sema/analyze (str "(ns m.probe)\n" defs))) 'main [] {})))
+
+(deftest namespaced-keys-binds-the-bare-name-and-reads-the-qualified-key
+  (is (= "12" (run "(defn main [] (let [{:m/keys [op kind]} {:m/op 5 :m/kind 7}] (+ op kind)))"))))
+
+(deftest a-qualified-keys-entry-reads-its-own-namespace
+  (is (= "12" (run "(defn main [] (let [{:keys [m/op m/kind]} {:m/op 5 :m/kind 7}] (+ op kind)))"))))
+
+(deftest namespaced-keys-mixes-with-plain-keys-and-as
+  (is (= "30" (run "(defn main [] (let [{:m/keys [op] :keys [z] :as whole} {:m/op 5 :z 25}] (+ op z)))"))))
+
+(deftest a-malformed-namespaced-keys-slot-is-still-refused
+  (is (thrown? #?(:clj Exception :cljs :default)
+               (sema/analyze "(ns m.probe)\n(defn main [] (let [{:m/keys 5} {:m/op 1}] 1))"))))
