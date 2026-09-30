@@ -5,7 +5,9 @@
   (:require #?(:clj  [kotoba.test :refer [deftest is]]
                :cljs [cljs.test :refer [deftest is] :include-macros true])
             [kotoba.compiler.frontend :as frontend]
-            [kotoba.compiler.frontend-tables :as tables]))
+            [kotoba.compiler.frontend-tables :as tables]
+            #?(:cljs ["fs" :as fs])
+            #?(:cljs [clojure.edn :as edn])))
 
 (deftest the-frontend-re-exports-the-tables-unchanged
   (is (identical? tables/kernel-memory-operations frontend/kernel-memory-operations))
@@ -18,3 +20,39 @@
   (is (not (tables/table-has? tables/arithmetic 'nope)))
   (is (= 1 (tables/table-get tables/heap-operations 'pair-first)))
   (is (= [0] (frontend/kernel-base-argument-positions 'not-a-kernel-op))))
+
+;; The Kotoba route has no classpath, so the values the JVM frontend reads from
+;; the vendored grammar are embedded in frontend-tables. Compare them with the
+;; resource so a grammar bump that is not carried over fails here.
+#?(:cljs
+   (defn- grammar-edn []
+     (edn/read-string
+      (fs/readFileSync (str (js/process.cwd) "/../kotoba-sema/resources/kotoba/lang/guest-grammar.edn") "utf8"))))
+
+(deftest the-embedded-grammar-heads-equal-what-the-frontend-reads
+  #?(:clj
+     (do (is (= (into #{} (remove #(= "" (name %))) frontend/grammar-declared-heads)
+                tables/grammar-declared-heads))
+         (is (= frontend/forbidden-heads tables/forbidden-heads)))
+     :cljs
+     (when-let [edn (try (grammar-edn) (catch :default _ nil))]
+       ;; a grammar key like :f32/ has an empty name: not a head, not embedded
+       (is (= (into #{}
+                    (comp cat (map #(symbol (name %))) (remove #(= "" (name %))))
+                    [(:admitted-builtins edn) (keys (:sugar edn))
+                     (:arithmetic edn) (:comparisons edn) (:predicates edn)
+                     (get-in edn [:floating-point :arithmetic])])
+              tables/grammar-declared-heads))
+       (is (= (into frontend/forbidden-heads
+                    (map #(symbol (name %)) (:forbidden-heads edn)))
+              tables/forbidden-heads)))))
+
+(deftest the-embedded-capability-tables-equal-the-fallback-derivation
+  #?(:cljs
+     (do (is (= frontend/capability-catalog tables/capability-catalog-fallback))
+         (is (= frontend/source-operation-registry tables/source-operation-registry-fallback))
+         (is (= frontend/capability-id->name tables/capability-id->name-fallback)))
+     :clj
+     ;; the JVM reads the catalog resource, which is a subset of the fallback
+     (is (every? (fn [[k v]] (= v (get tables/capability-registry-cljs-fallback k)))
+                 frontend/capability-registry))))

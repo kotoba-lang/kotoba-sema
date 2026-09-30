@@ -24,7 +24,13 @@
             ;; reason `orgs/kotoba-lang/amu` carried one on its production
             ;; classpath.
             [kotoba.compiler.kotoba-reader :as kr]
-            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])))
+            #?@(:kotoba [[kotoba.form :as form]])
+            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]]))
+  ;; The Kotoba route holds dynamic Clojure forms and the heads tables as the
+  ;; recursive Form record (kotoba.form); the host keeps its own data.
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]})))
 
 ;; clojure.core/some, spelled as the loop it is. In Kotoba `some` is the
 ;; option constructor and a two-argument `(some pred coll)` is refused as a
@@ -36,6 +42,7 @@
     (when s
       (or (pred (first s)) (recur (next s))))))
 
+#?(:kotoba nil :default
 (defn- load-catalog-forbidden
   "P0: merge catalog forbidden-heads when guest-grammar.edn is on classpath."
   []
@@ -50,8 +57,9 @@
                (into #{} (map (fn [x] (if (symbol? x) x (symbol (name x))))) heads)))
            #{}))
        (catch Exception _ #{}))
-     :cljs #{}))
+     :cljs #{})))
 
+#?(:kotoba nil :default
 (defn- load-grammar-declared-heads
   "Every head the language grammar names, when `guest-grammar.edn` is on the
   classpath: `:admitted-builtins`, the `:sugar` keys, `:arithmetic`,
@@ -78,12 +86,23 @@
                       (get-in edn [:floating-point :arithmetic])])))
            #{}))
        (catch Exception _ #{}))
-     :cljs #{}))
+     :cljs #{})))
 
-(def grammar-declared-heads
-  "See `load-grammar-declared-heads`. Empty on ClojureScript."
-  (load-grammar-declared-heads))
+;; Kotoba: an exported constant is a function, and the vendored grammar is not
+;; on a Kotoba module's classpath, so the value the JVM reads from it is the
+;; embedded copy in `frontend-tables` (compared with the resource by a test).
+#?(:kotoba
+   (defn grammar-declared-heads [] [:ref :form/r]
+     (tables/grammar-declared-heads))
+   :default
+   (def grammar-declared-heads
+     "See `load-grammar-declared-heads`. Empty on ClojureScript."
+     (load-grammar-declared-heads)))
 
+#?(:kotoba
+   (defn forbidden-heads [] [:ref :form/r]
+     (tables/forbidden-heads))
+   :default
 (def forbidden-heads
   ;; `atom` left this set on 2026-09-02: local-state slice 1 (kotoba-lang
   ;; `lang/local-state.edn`) admits a non-escaping, function-local atom by
@@ -97,10 +116,11 @@
            require use import ns-resolve resolve alter-var-root
            future pmap agent send send-off new . .. set! defmacro
            locking dosync ref volatile!}
-        (load-catalog-forbidden)))
+        (load-catalog-forbidden))))
 
 #?(:kotoba nil :default (def ^:private capability-registry-cljs-fallback tables/capability-registry-cljs-fallback))
 
+#?(:kotoba nil :default
 (defn- load-capability-catalog []
   #?(:clj
      (try
@@ -124,28 +144,47 @@
       (into {} (map (fn [[name id]]
                       [name {:source-operation (symbol (namespace name) (clojure.core/name name))
                              :effect name :compiler-wire-id id}]))
-            capability-registry-cljs-fallback)}))
+            capability-registry-cljs-fallback)})))
 
-(def capability-catalog (load-capability-catalog))
+;; Kotoba: no classpath to read the catalog resource from, so the closed
+;; fallback (the same one ClojureScript uses) is the catalog; `frontend-tables`
+;; holds the three derived tables written out, and its test compares them.
+#?(:kotoba
+   (defn capability-catalog [] [:ref :form/r]
+     (tables/capability-catalog-fallback))
+   :default
+   (def capability-catalog (load-capability-catalog)))
 
-(def capability-registry
-  "Semantic capability name -> stable compiler wire ID."
-  (into {} (map (fn [[name entry]] [name (:compiler-wire-id entry)]))
-        (:capabilities capability-catalog)))
+#?(:kotoba
+   (defn capability-registry [] [:ref :form/r]
+     (tables/capability-registry-cljs-fallback))
+   :default
+   (def capability-registry
+     "Semantic capability name -> stable compiler wire ID."
+     (into {} (map (fn [[name entry]] [name (:compiler-wire-id entry)]))
+           (:capabilities capability-catalog))))
 
-(def source-operation-registry
-  "Friendly qualified source operation -> semantic capability name."
-  (into {} (map (fn [[name entry]] [(:source-operation entry) name]))
-        (:capabilities capability-catalog)))
+#?(:kotoba
+   (defn source-operation-registry [] [:ref :form/r]
+     (tables/source-operation-registry-fallback))
+   :default
+   (def source-operation-registry
+     "Friendly qualified source operation -> semantic capability name."
+     (into {} (map (fn [[name entry]] [(:source-operation entry) name]))
+           (:capabilities capability-catalog))))
 
 #?(:kotoba nil :default (def named-operation-default-results tables/named-operation-default-results))
 
+#?(:kotoba
+   (defn capability-id->name [] [:ref :form/r]
+     (tables/capability-id->name-fallback))
+   :default
 (def capability-id->name
   "Inverse of capability-registry for diagnostics and effect ceilings. Two names
   may share a wire id when they are payload variants of one capability
   (`:fs/app-data` and `:fs/app-data-bytes`, wire 35); the inverse names the
   primary one, which sorts after its variants and so is written last."
-  (into {} (map (fn [[k v]] [v k]) (sort-by (comp str key) #(compare %2 %1) capability-registry))))
+  (into {} (map (fn [[k v]] [v k]) (sort-by (comp str key) #(compare %2 %1) capability-registry)))))
 
 ;; Dataspace v1 is a language-owned typed capability contract. These
 ;; descriptors intentionally match capability-kits/dataspace-v1.edn. Keeping
@@ -395,6 +434,65 @@
 #?(:kotoba nil :default (def ^:private float-arithmetic-resolution tables/float-arithmetic-resolution))
 #?(:kotoba nil :default (def ^:private float-negation-resolution tables/float-negation-resolution))
 #?(:kotoba nil :default (def ^:private explicit-numeric-conversions tables/explicit-numeric-conversions))
+#?(:kotoba
+   (defn- heads-kids [t [:ref :form/r]] [:list [:ref :form/r]]
+     (if (form/is-map? t)
+       (form/kids-of (form/keys-of t))
+       (form/kids-of t))))
+
+#?(:kotoba
+   (defn reserved-function-names [] [:ref :form/r]
+     ;; The same union the host `def` below computes, built from the Form
+     ;; tables. Duplicates across the tables are harmless: a set Form answers
+     ;; membership by scanning its kids.
+     (let [r0 (form/kids-of (forbidden-heads))
+           r1 (form/append-many r0 (heads-kids (tables/arithmetic)))
+           r2 (form/append-many r1 (heads-kids (tables/comparisons)))
+           r3 (form/append-many r2 (heads-kids (tables/float-division-heads)))
+           r4 (form/append-many r3 (heads-kids (tables/heap-operations)))
+           r5 (form/append-many r4 (heads-kids (tables/kgraph-operations)))
+           r6 (form/append-many r5 (heads-kids (tables/kernel-memory-operations)))
+           r7 (form/append-many r6 (heads-kids (tables/slice-value-operations)))
+           r8 (form/append-many r7 (heads-kids (tables/kernel-privileged-operations)))
+           r9 (form/append-many r8 (heads-kids (tables/rodata-literal-operations)))
+           r10 (form/append-many r9 (heads-kids (tables/image-symbol-operations)))
+           r11 (form/append-many r10 (heads-kids (tables/list-operations)))
+           r12 (form/append-many r11 (heads-kids (tables/predicate-operations)))
+           r13 (form/append-many r12 (heads-kids (tables/logical-operations)))
+           r14 (form/append-many r13 (heads-kids (tables/map-operations)))
+           r15 (form/append-many r14 (heads-kids (tables/map-presence-operations)))
+           r16 (form/append-many r15 (heads-kids (tables/set-operations)))
+           r17 (form/append-many r16 (heads-kids (tables/collection-count-operations)))
+           r18 (form/append-many r17 (heads-kids (tables/vector-end-operations)))
+           r19 (form/append-many r18 (heads-kids (tables/map-projection-operations)))
+           r20 (form/append-many r19 (heads-kids (tables/typed-map-operations)))
+           r21 (form/append-many r20 (heads-kids (tables/typed-safe-value-operations)))
+           r22 (form/append-many r21 (heads-kids (tables/parametric-result-operations)))
+           r23 (form/append-many r22 (heads-kids (tables/variant-operations)))
+           r24 (form/append-many r23 (heads-kids (tables/generic-option-operations)))
+           r25 (form/append-many r24 (heads-kids (tables/canonical-list-operations)))
+           r26 (form/append-many r25 (heads-kids (tables/bytes-operations)))
+           r27 (form/append-many r26 (heads-kids (tables/heterogeneous-vector-operations)))
+           r28 (form/append-many r27 (heads-kids (tables/typed-set-operations)))
+           r29 (form/append-many r28 (heads-kids (tables/canonical-typed-map-operations)))
+           r30 (form/append-many r29 (heads-kids (tables/record-operations)))
+           r31 (form/append-many r30 (heads-kids (tables/typed-vector-operations)))
+           r32 (form/append-many r31 (heads-kids (tables/typed-f64-vector-operations)))
+           r33 (form/append-many r32 (heads-kids (tables/compact-graph-operations)))
+           r34 (form/append-many r33 (heads-kids (tables/document-fixed-operations)))
+           r35 (form/append-many r34 (heads-kids (tables/document-variadic-operations)))
+           r36 (form/append-many r35 (heads-kids (tables/string-operations)))
+           r37 (form/append-many r36 (heads-kids (tables/region-operations)))
+           r38 (form/append-many r37 (heads-kids (tables/xml-operations)))
+           r39 (form/append-many r38 (heads-kids (tables/decimal-operations)))
+           r40 (form/append-many r39 (heads-kids (tables/f64-operations)))
+           r41 (form/append-many r40 (heads-kids (tables/f32-operations)))
+           r42 (form/append-many r41 (heads-kids (tables/i32-operations)))
+           r43 (form/append-many r42 (heads-kids (tables/i64-operations)))
+           r44 (form/append-many r43 (heads-kids (tables/lazy-sequence-operations)))
+           r45 (form/append-many r44 (form/kids-of (form/edn-form "#{atom swap! reset! deref let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new hetero-vector typed-set record match-result match-variant match-option}")))]
+       (form/form-set r45)))
+   :default
 (def reserved-function-names
   (set/union forbidden-heads arithmetic comparisons float-division-heads
              (set (keys heap-operations))
@@ -448,7 +546,7 @@
              ;; could define `(defn swap! ...)` and shadow the head silently.
              '#{atom swap! reset! deref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
-                hetero-vector typed-set record match-result match-variant match-option}))
+                hetero-vector typed-set record match-result match-variant match-option})))
 (def max-functions 1024)
 (def max-arity-clauses 8)
 (def max-expression-nodes 50000)
@@ -486,7 +584,7 @@
                    :option-i64 :result-i64
                    :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
 
-(declare reject! closure-result-type?)
+(declare reject! closure-result-type? binding-symbols)
 
 (defn- callable-type? [type]
   (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6)))
@@ -5040,17 +5138,36 @@
                          [[rest-name (list 'vector-drop tmp (count positional))]]))))
 
               (map? candidate)
-              (let [keys-vec (get candidate :keys [])
+              (let [;; `:keys [a ns/b]` and the namespaced form `:ns/keys [a b]`
+                    ;; (ADR 0207): a qualified key symbol binds its bare name
+                    ;; and looks up the qualified keyword.
+                    keys-slots (filterv (fn [k] (and (keyword? k) (= "keys" (name k))))
+                                        (keys candidate))
+                    keys-vec (vec (mapcat (fn [slot]
+                                            (let [v (get candidate slot)]
+                                              (if (vector? v) v [slot])))
+                                          keys-slots))
+                    key-entries (vec (mapcat
+                                      (fn [slot]
+                                        (let [v (get candidate slot)]
+                                          (when (and (vector? v) (every? symbol? v))
+                                            (map (fn [k]
+                                                   [(symbol (name k))
+                                                    (keyword (or (namespace k) (namespace slot))
+                                                             (name k))])
+                                                 v))))
+                                      keys-slots))
+                    key-names (mapv first key-entries)
                     defaults (get candidate :or {})
                     as-name (:as candidate)
-                    explicit (apply dissoc candidate [:keys :or :as])
+                    explicit (apply dissoc candidate (concat keys-slots [:or :as]))
                     explicit (sort-by (comp pr-str val) explicit)
                     direct-symbols
-                    (into (set keys-vec)
+                    (into (set key-names)
                           (keep (fn [[binding-pattern _]]
                                   (when (symbol? binding-pattern) binding-pattern)))
                           explicit)]
-                (when-not (and (vector? keys-vec) (every? symbol? keys-vec)
+                (when-not (and (every? symbol? keys-vec)
                                (map? defaults) (every? symbol? (keys defaults))
                                (every? direct-symbols (keys defaults))
                                (or (nil? as-name) (symbol? as-name))
@@ -5058,13 +5175,12 @@
                                          (and (supported-pattern? binding-pattern)
                                               (keyword? lookup-key)))
                                        explicit)
-                               (or (seq keys-vec) (seq explicit) as-name))
+                               (or (seq key-entries) (seq explicit) as-name))
                   (reject! (str "map destructuring requires :keys, :as, or keyword-valued "
                                 "explicit entries, with :or defaults for direct symbol bindings")
                            candidate))
                 (let [tmp (synthetic "destr-map")
-                      entries (concat (map (fn [name] [name (keyword name)]) keys-vec)
-                                      explicit)]
+                      entries (concat key-entries explicit)]
                   (into [[tmp value]]
                         (concat
                          (mapcat
@@ -6981,15 +7097,19 @@
                     (let [[_ params & body] f-form]
                       ;; `single-expr` is the sentence's word for a NON-EMPTY
                       ;; body: several forms are one `do` (`implicit-do-body`).
+                      ;; A parameter may be a destructuring pattern
+                      ;; (`(fn [{:keys [a]} [i x]] ...)`): it is bound by the
+                      ;; ordinary `let` destructuring below.
                       (when-not (and (vector? params) (= 2 (count params))
-                                     (every? symbol? params)
+                                     (every? #(or (symbol? %) (vector? %) (map? %)) params)
+                                     (not-any? #{'&} (tree-seq coll? seq params))
                                      (seq body))
                         (reject! "reduce fn must be (fn [acc x] single-expr)" f-form))
                       (let [[a b] params]
                         (list 'let [a acc
                                     b item]
                               (binding [*lexical-bindings*
-                                        (into *lexical-bindings* params)
+                                        (into *lexical-bindings* (binding-symbols params))
                                         *abort-lexical-context* :fn]
                                 (desugar-expr (implicit-do-body body))))))
 

@@ -11,7 +11,7 @@
   function. So each table is a zero-argument function returning the
   kotoba.form Form of the printed table, with `table-get` / `table-has?`
   as the readers (map lookup and set/map membership)."
-  {:kotoba/export [capability-registry-cljs-fallback named-operation-default-results arithmetic i32-operations i64-operations comparisons heap-operations kgraph-operations kernel-memory-operations slice-value-operations slice-constructor-elements kernel-base-positions kernel-privileged-operations rodata-literal-operations image-symbol-operations rodata-literal-encodings list-operations predicate-operations logical-operations map-operations map-presence-operations set-operations collection-count-operations vector-end-operations map-projection-operations typed-map-operations typed-safe-value-operations parametric-result-operations variant-operations generic-option-operations canonical-list-operations bytes-operations heterogeneous-vector-operations typed-set-operations canonical-typed-map-operations record-operations typed-vector-operations contextual-string-argument-indexes contextual-document-argument-indexes contextual-f64-argument-indexes contextual-f32-argument-indexes contextual-vector-f64-argument-types typed-f64-vector-operations compact-graph-operations document-fixed-operations document-variadic-operations sequencing-operations region-operations lazy-sequence-operations string-operations xml-operations decimal-operations f64-operations f32-operations type-directed-numeric-heads float-division-heads float-arithmetic-resolution float-negation-resolution explicit-numeric-conversions definition-heads pure-product-disallowed-heads non-shadowable-special-heads str-integer-heads intrinsic-helper-heads intrinsic-helper-order map-literal-value-constructors document-returning-heads document-constructor-heads document-head-set i64-answer-predicates local-state-write-heads local-state-scope-heads local-state-conditional-heads local-state-effect-heads row-operation-heads library-predicate-heads library-predicate-document-kinds document-of-constructors row-binding-heads state-perform-heads state-handle-heads stateful-def-heads effectful-def-heads structural-heads protocol-declaration-heads table-get table-has?]}
+  {:kotoba/export [capability-registry-cljs-fallback named-operation-default-results arithmetic i32-operations i64-operations comparisons heap-operations kgraph-operations kernel-memory-operations slice-value-operations slice-constructor-elements kernel-base-positions kernel-privileged-operations rodata-literal-operations image-symbol-operations rodata-literal-encodings list-operations predicate-operations logical-operations map-operations map-presence-operations set-operations collection-count-operations vector-end-operations map-projection-operations typed-map-operations typed-safe-value-operations parametric-result-operations variant-operations generic-option-operations canonical-list-operations bytes-operations heterogeneous-vector-operations typed-set-operations canonical-typed-map-operations record-operations typed-vector-operations contextual-string-argument-indexes contextual-document-argument-indexes contextual-f64-argument-indexes contextual-f32-argument-indexes contextual-vector-f64-argument-types typed-f64-vector-operations compact-graph-operations document-fixed-operations document-variadic-operations sequencing-operations region-operations lazy-sequence-operations string-operations xml-operations decimal-operations f64-operations f32-operations type-directed-numeric-heads float-division-heads float-arithmetic-resolution float-negation-resolution explicit-numeric-conversions definition-heads pure-product-disallowed-heads non-shadowable-special-heads str-integer-heads intrinsic-helper-heads intrinsic-helper-order map-literal-value-constructors document-returning-heads document-constructor-heads document-head-set i64-answer-predicates local-state-write-heads local-state-scope-heads local-state-conditional-heads local-state-effect-heads row-operation-heads library-predicate-heads library-predicate-document-kinds document-of-constructors row-binding-heads state-perform-heads state-handle-heads stateful-def-heads effectful-def-heads structural-heads protocol-declaration-heads grammar-declared-heads forbidden-heads capability-catalog-fallback source-operation-registry-fallback capability-id->name-fallback table-get table-has?]}
   #?(:kotoba (:require [kotoba.form :as form]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -1640,3 +1640,410 @@
      chose. The error CODE stays a literal regardless -- the head travels in the
      sentence, never in `:kotoba.error/code`."
      '#{defprotocol definterface}))
+
+;; ---- heads read from lang/guest-grammar.edn ------------------------------
+;;
+;; Host: the frontend keeps reading the classpath resource itself (JVM only;
+;; ClojureScript cannot read a resource synchronously and answers empty), so the
+;; sets below are NOT what the host analyser consults. They are the Kotoba
+;; route's copy: a Kotoba module has no classpath, so the values the JVM reads
+;; from the vendored grammar are embedded here. `frontend-tables-test` compares
+;; them with the resource, so a grammar bump that is not carried here fails a
+;; test instead of silently changing what the self-hosted compiler refuses.
+
+#?(:kotoba
+   (defn grammar-declared-heads [] [:ref :form/r]
+     (form/edn-form "#{* + - -> ->> / < <= = > >= alloc alloc-checked and apply arena-scope as-> assert assoc atom-local bit-and bit-or bit-shift-left bit-shift-right bit-xor byte-at byte-store! bytes bytes-at bytes-concat bytes-count bytes-empty bytes-from-vector-i64 bytes-len bytes-ptr bytes-slice call-indirect cap-acquire case closed-multimethod cond cond->> condp conj cons contains? count data-host-arg dataspace dec defdesugar disj dissoc do document doseq dotimes drop empty? eval expression-absence f32 f32* f32+ f32- f32-add f32-div f32-max f32-min f32-mul f32-sub f32< f32<= f32= f32> f32>= f32div f32neg f32sqrt f64-add f64-div f64-max f64-min f64-mul f64-sub filter first fn fn-ref get has-capability? host-i64-roundtrip i32-store! i64 i64* i64+ i64- i64and i64or i64shl i64shr i64ushr i64xor if-let if-not if-some inc inline-fn-callback integer? interface-contract invoke kernel-atomic-add-u32 kernel-atomic-add-u64 kernel-boot-info kernel-cli kernel-cmpxchg-u32 kernel-cmpxchg-u64 kernel-configure-double-fault-ist kernel-configure-page-fault-recovery kernel-cpuid-eax kernel-cpuid-ebx kernel-cpuid-ecx kernel-cpuid-edx kernel-dequant-dot-ptq1-0 kernel-dequant-dot-q4-k kernel-dequant-dot-q6-k kernel-dequant-dot-q8-0 kernel-dot-f32 kernel-double-fault-handler-address kernel-fence-full kernel-fence-load kernel-fence-store kernel-hlt kernel-in-u32 kernel-in-u8 kernel-invlpg kernel-isr-entry-address kernel-jump-to kernel-load-gdt-tss kernel-load-idt kernel-load-ptr kernel-load-u16 kernel-load-u16-16k kernel-load-u16-4k kernel-load-u16-64k kernel-load-u32 kernel-load-u32-16k kernel-load-u32-4k kernel-load-u32-64k kernel-load-u64 kernel-load-u64-16k kernel-load-u64-4k kernel-load-u64-64k kernel-load-u8 kernel-load-u8-16k kernel-load-u8-4k kernel-load-u8-64k kernel-out-u32 kernel-out-u8 kernel-page-fault-handler-address kernel-page-fault-recovery-handler-address kernel-pause kernel-probe-double-fault kernel-probe-guard-write kernel-probe-nx-execute kernel-probe-recoverable-guard-write kernel-probe-text-write kernel-rdtsc kernel-rdtscp kernel-read-cr0 kernel-read-cr2 kernel-read-cr3 kernel-read-cr4 kernel-read-cs kernel-read-msr kernel-rt-timer-handler-address kernel-scratch-region kernel-sti kernel-store-u16 kernel-store-u16-16k kernel-store-u16-4k kernel-store-u16-64k kernel-store-u32 kernel-store-u32-16k kernel-store-u32-4k kernel-store-u32-64k kernel-store-u64 kernel-store-u64-16k kernel-store-u64-4k kernel-store-u64-64k kernel-store-u8 kernel-store-u8-16k kernel-store-u8-4k kernel-store-u8-64k kernel-subregion kernel-swapgs kernel-system-table kernel-try-lock-u32 kernel-uefi-alloc-region kernel-uefi-call2 kernel-uefi-call4 kernel-uefi-call6 kernel-undefined-opcode-handler-address kernel-unlock-u32 kernel-write-cr0 kernel-write-cr3 kernel-write-cr4 kernel-write-msr kernel-xchg-u32 kernel-xchg-u64 kernel-xgetbv kernel-xsetbv keys keyword-literal keyword? lazy-cons lazy-empty? lazy-filter lazy-first lazy-map lazy-rest list loop-recur map map-indexed map-literal match max mem-byte-at mem-i32-at memory-grow memory-pages min mod neg? nested-destructuring not not= nth option-or or pair pair-first pair-second peek pop portable-string-symbol-values pos? protocol-dispatch protocol-extension pure-s-expression-core quot record-constructor reduce rem rest result-err? result-ok? result-status result-value result-write! second set-literal slice-get slice-length slice-load-u16 slice-load-u32 slice-load-u64 slice-load-u8 slice-of-u16 slice-of-u32 slice-of-u64 slice-of-u8 slice-set! slice-store-u16 slice-store-u32 slice-store-u64 slice-store-u8 slice-sub some-> some->> state-ability str-len str-ptr string-append-range string-compare string-compare-lines string-concat string-contains? string-equality string-find-blank string-find-byte string-fold-ascii string-from-utf8 string-host-arg string-index-of string-index-of-from string-length string-skip-blank string-split-count string-substring string= string? symbol symbol? take throw true? try type-directed-arithmetic type-predicates typed-capability-call unsigned-bit-shift-right vals variadic-comparison vector-i64-from-bytes vector-literal when when-let when-not when-some zero?}"))
+   :default
+   (def grammar-declared-heads
+     "Every head `lang/guest-grammar.edn` names (`:admitted-builtins`, the
+     `:sugar` keys, `:arithmetic`, `:comparisons`, `:predicates`, the float
+     `:arithmetic`), as the JVM frontend reads them."
+     '#{* + - -> ->> / < <= = > >= alloc alloc-checked and apply arena-scope
+       as-> assert assoc atom-local bit-and bit-or bit-shift-left
+       bit-shift-right bit-xor byte-at byte-store! bytes bytes-at bytes-concat
+       bytes-count bytes-empty bytes-from-vector-i64 bytes-len bytes-ptr
+       bytes-slice call-indirect cap-acquire case closed-multimethod cond
+       cond->> condp conj cons contains? count data-host-arg dataspace dec
+       defdesugar disj dissoc do document doseq dotimes drop empty? eval
+       expression-absence f32 f32* f32+ f32- f32-add f32-div f32-max f32-min
+       f32-mul f32-sub f32< f32<= f32= f32> f32>= f32div f32neg f32sqrt f64-add
+       f64-div f64-max f64-min f64-mul f64-sub filter first fn fn-ref get
+       has-capability? host-i64-roundtrip i32-store! i64 i64* i64+ i64- i64and
+       i64or i64shl i64shr i64ushr i64xor if-let if-not if-some inc
+       inline-fn-callback integer? interface-contract invoke
+       kernel-atomic-add-u32 kernel-atomic-add-u64 kernel-boot-info kernel-cli
+       kernel-cmpxchg-u32 kernel-cmpxchg-u64 kernel-configure-double-fault-ist
+       kernel-configure-page-fault-recovery kernel-cpuid-eax kernel-cpuid-ebx
+       kernel-cpuid-ecx kernel-cpuid-edx kernel-dequant-dot-ptq1-0
+       kernel-dequant-dot-q4-k kernel-dequant-dot-q6-k kernel-dequant-dot-q8-0
+       kernel-dot-f32 kernel-double-fault-handler-address kernel-fence-full
+       kernel-fence-load kernel-fence-store kernel-hlt kernel-in-u32
+       kernel-in-u8 kernel-invlpg kernel-isr-entry-address kernel-jump-to
+       kernel-load-gdt-tss kernel-load-idt kernel-load-ptr kernel-load-u16
+       kernel-load-u16-16k kernel-load-u16-4k kernel-load-u16-64k
+       kernel-load-u32 kernel-load-u32-16k kernel-load-u32-4k
+       kernel-load-u32-64k kernel-load-u64 kernel-load-u64-16k
+       kernel-load-u64-4k kernel-load-u64-64k kernel-load-u8 kernel-load-u8-16k
+       kernel-load-u8-4k kernel-load-u8-64k kernel-out-u32 kernel-out-u8
+       kernel-page-fault-handler-address
+       kernel-page-fault-recovery-handler-address kernel-pause
+       kernel-probe-double-fault kernel-probe-guard-write
+       kernel-probe-nx-execute kernel-probe-recoverable-guard-write
+       kernel-probe-text-write kernel-rdtsc kernel-rdtscp kernel-read-cr0
+       kernel-read-cr2 kernel-read-cr3 kernel-read-cr4 kernel-read-cs
+       kernel-read-msr kernel-rt-timer-handler-address kernel-scratch-region
+       kernel-sti kernel-store-u16 kernel-store-u16-16k kernel-store-u16-4k
+       kernel-store-u16-64k kernel-store-u32 kernel-store-u32-16k
+       kernel-store-u32-4k kernel-store-u32-64k kernel-store-u64
+       kernel-store-u64-16k kernel-store-u64-4k kernel-store-u64-64k
+       kernel-store-u8 kernel-store-u8-16k kernel-store-u8-4k
+       kernel-store-u8-64k kernel-subregion kernel-swapgs kernel-system-table
+       kernel-try-lock-u32 kernel-uefi-alloc-region kernel-uefi-call2
+       kernel-uefi-call4 kernel-uefi-call6
+       kernel-undefined-opcode-handler-address kernel-unlock-u32
+       kernel-write-cr0 kernel-write-cr3 kernel-write-cr4 kernel-write-msr
+       kernel-xchg-u32 kernel-xchg-u64 kernel-xgetbv kernel-xsetbv keys
+       keyword-literal keyword? lazy-cons lazy-empty? lazy-filter lazy-first
+       lazy-map lazy-rest list loop-recur map map-indexed map-literal match max
+       mem-byte-at mem-i32-at memory-grow memory-pages min mod neg?
+       nested-destructuring not not= nth option-or or pair pair-first
+       pair-second peek pop portable-string-symbol-values pos?
+       protocol-dispatch protocol-extension pure-s-expression-core quot
+       record-constructor reduce rem rest result-err? result-ok? result-status
+       result-value result-write! second set-literal slice-get slice-length
+       slice-load-u16 slice-load-u32 slice-load-u64 slice-load-u8 slice-of-u16
+       slice-of-u32 slice-of-u64 slice-of-u8 slice-set! slice-store-u16
+       slice-store-u32 slice-store-u64 slice-store-u8 slice-sub some-> some->>
+       state-ability str-len str-ptr string-append-range string-compare
+       string-compare-lines string-concat string-contains? string-equality
+       string-find-blank string-find-byte string-fold-ascii string-from-utf8
+       string-host-arg string-index-of string-index-of-from string-length
+       string-skip-blank string-split-count string-substring string= string?
+       symbol symbol? take throw true? try type-directed-arithmetic
+       type-predicates typed-capability-call unsigned-bit-shift-right vals
+       variadic-comparison vector-i64-from-bytes vector-literal when when-let
+       when-not when-some zero?}))
+
+#?(:kotoba
+   (defn forbidden-heads [] [:ref :form/r]
+     (form/edn-form "#{. .. agent alter-var-root binding compile defmacro dosync future import load load-file load-string locking new ns-resolve pmap read-string ref require resolve send send-off set! use var volatile!}"))
+   :default
+   (def forbidden-heads
+     "The frontend's literal forbidden set plus the grammar's `:forbidden-heads`,
+     as the JVM frontend computes it."
+     '#{. .. agent alter-var-root binding compile defmacro dosync future import
+       load load-file load-string locking new ns-resolve pmap read-string ref
+       require resolve send send-off set! use var volatile!}))
+
+;; ---- the capability catalog the Kotoba route sees ----------------------------
+;;
+;; The frontend derives these from `capability-registry-cljs-fallback` when it
+;; cannot read the catalog resource (ClojureScript, and a Kotoba module, which
+;; has no classpath). These three are that derivation, written out; the test
+;; compares them with what the frontend derives.
+
+#?(:kotoba
+   (defn capability-catalog-fallback [] [:ref :form/r]
+     (form/edn-form "{:capabilities {:can/frame {:source-operation can/frame :effect :can/frame :compiler-wire-id 29}
+                    :cli/args {:source-operation cli/args :effect :cli/args :compiler-wire-id 38}
+                    :clock/now {:source-operation clock/now :effect :clock/now :compiler-wire-id 7}
+                    :code/eval {:source-operation code/eval :effect :code/eval :compiler-wire-id 30}
+                    :dataspace/transact {:source-operation dataspace/transact :effect :dataspace/transact :compiler-wire-id 24}
+                    :entropy/draw {:source-operation entropy/draw :effect :entropy/draw :compiler-wire-id 23}
+                    :env/read {:source-operation env/read :effect :env/read :compiler-wire-id 33}
+                    :fs/app-data {:source-operation fs/app-data :effect :fs/app-data :compiler-wire-id 35}
+                    :fs/app-data-bytes {:source-operation fs/app-data-bytes :effect :fs/app-data-bytes :compiler-wire-id 35}
+                    :fs/browse {:source-operation fs/browse :effect :fs/browse :compiler-wire-id 34}
+                    :fs/browse-dir {:source-operation fs/browse-dir :effect :fs/browse-dir :compiler-wire-id 36}
+                    :fs/transact {:source-operation fs/transact :effect :fs/transact :compiler-wire-id 19}
+                    :git/run {:source-operation git/run :effect :git/run :compiler-wire-id 22}
+                    :gpu/compute {:source-operation gpu/compute :effect :gpu/compute :compiler-wire-id 42}
+                    :hash/sha256 {:source-operation hash/sha256 :effect :hash/sha256 :compiler-wire-id 3}
+                    :http/accept {:source-operation http/accept :effect :http/accept :compiler-wire-id 17}
+                    :http/get-stream {:source-operation http/get-stream :effect :http/get-stream :compiler-wire-id 13}
+                    :http/post {:source-operation http/post :effect :http/post :compiler-wire-id 4}
+                    :http/reply {:source-operation http/reply :effect :http/reply :compiler-wire-id 18}
+                    :identity/sign {:source-operation identity/sign :effect :identity/sign :compiler-wire-id 1}
+                    :identity/verify {:source-operation identity/verify :effect :identity/verify :compiler-wire-id 2}
+                    :io/read {:source-operation io/read :effect :io/read :compiler-wire-id 41}
+                    :io/write {:source-operation io/write :effect :io/write :compiler-wire-id 37}
+                    :io/write-error {:source-operation io/write-error :effect :io/write-error :compiler-wire-id 39}
+                    :link/frame {:source-operation link/frame :effect :link/frame :compiler-wire-id 28}
+                    :llm/generate {:source-operation llm/generate :effect :llm/generate :compiler-wire-id 11}
+                    :log/append {:source-operation log/append :effect :log/append :compiler-wire-id 6}
+                    :log/read {:source-operation log/read :effect :log/read :compiler-wire-id 5}
+                    :net/accept {:source-operation net/accept :effect :net/accept :compiler-wire-id 44}
+                    :net/datagram {:source-operation net/datagram :effect :net/datagram :compiler-wire-id 27}
+                    :net/dial {:source-operation net/dial :effect :net/dial :compiler-wire-id 45}
+                    :net/listen {:source-operation net/listen :effect :net/listen :compiler-wire-id 43}
+                    :net/read {:source-operation net/read :effect :net/read :compiler-wire-id 46}
+                    :net/write {:source-operation net/write :effect :net/write :compiler-wire-id 47}
+                    :object/compare-and-set-ref {:source-operation object/compare-and-set-ref :effect :object/compare-and-set-ref :compiler-wire-id 16}
+                    :object/get-stream {:source-operation object/get-stream :effect :object/get-stream :compiler-wire-id 14}
+                    :object/put-block {:source-operation object/put-block :effect :object/put-block :compiler-wire-id 15}
+                    :process/spawn {:source-operation process/spawn :effect :process/spawn :compiler-wire-id 20}
+                    :screen/act {:source-operation screen/act :effect :screen/act :compiler-wire-id 32}
+                    :screen/observe {:source-operation screen/observe :effect :screen/observe :compiler-wire-id 31}
+                    :secret/get {:source-operation secret/get :effect :secret/get :compiler-wire-id 21}
+                    :state/transact {:source-operation state/transact :effect :state/transact :compiler-wire-id 8}
+                    :storage/transact {:source-operation storage/transact :effect :storage/transact :compiler-wire-id 12}
+                    :stream/accept {:source-operation stream/accept :effect :stream/accept :compiler-wire-id 25}
+                    :stream/send {:source-operation stream/send :effect :stream/send :compiler-wire-id 26}
+                    :sys/cwd {:source-operation sys/cwd :effect :sys/cwd :compiler-wire-id 40}
+                    :ui/commit {:source-operation ui/commit :effect :ui/commit :compiler-wire-id 9}
+                    :ui/next-event {:source-operation ui/next-event :effect :ui/next-event :compiler-wire-id 10}}}"))
+   :default
+   (def capability-catalog-fallback
+     "`{:capabilities {name {:source-operation :effect :compiler-wire-id}}}` built from the fallback registry."
+     '{:capabilities {:can/frame {:source-operation can/frame :effect :can/frame :compiler-wire-id 29}
+                    :cli/args {:source-operation cli/args :effect :cli/args :compiler-wire-id 38}
+                    :clock/now {:source-operation clock/now :effect :clock/now :compiler-wire-id 7}
+                    :code/eval {:source-operation code/eval :effect :code/eval :compiler-wire-id 30}
+                    :dataspace/transact {:source-operation dataspace/transact :effect :dataspace/transact :compiler-wire-id 24}
+                    :entropy/draw {:source-operation entropy/draw :effect :entropy/draw :compiler-wire-id 23}
+                    :env/read {:source-operation env/read :effect :env/read :compiler-wire-id 33}
+                    :fs/app-data {:source-operation fs/app-data :effect :fs/app-data :compiler-wire-id 35}
+                    :fs/app-data-bytes {:source-operation fs/app-data-bytes :effect :fs/app-data-bytes :compiler-wire-id 35}
+                    :fs/browse {:source-operation fs/browse :effect :fs/browse :compiler-wire-id 34}
+                    :fs/browse-dir {:source-operation fs/browse-dir :effect :fs/browse-dir :compiler-wire-id 36}
+                    :fs/transact {:source-operation fs/transact :effect :fs/transact :compiler-wire-id 19}
+                    :git/run {:source-operation git/run :effect :git/run :compiler-wire-id 22}
+                    :gpu/compute {:source-operation gpu/compute :effect :gpu/compute :compiler-wire-id 42}
+                    :hash/sha256 {:source-operation hash/sha256 :effect :hash/sha256 :compiler-wire-id 3}
+                    :http/accept {:source-operation http/accept :effect :http/accept :compiler-wire-id 17}
+                    :http/get-stream {:source-operation http/get-stream :effect :http/get-stream :compiler-wire-id 13}
+                    :http/post {:source-operation http/post :effect :http/post :compiler-wire-id 4}
+                    :http/reply {:source-operation http/reply :effect :http/reply :compiler-wire-id 18}
+                    :identity/sign {:source-operation identity/sign :effect :identity/sign :compiler-wire-id 1}
+                    :identity/verify {:source-operation identity/verify :effect :identity/verify :compiler-wire-id 2}
+                    :io/read {:source-operation io/read :effect :io/read :compiler-wire-id 41}
+                    :io/write {:source-operation io/write :effect :io/write :compiler-wire-id 37}
+                    :io/write-error {:source-operation io/write-error :effect :io/write-error :compiler-wire-id 39}
+                    :link/frame {:source-operation link/frame :effect :link/frame :compiler-wire-id 28}
+                    :llm/generate {:source-operation llm/generate :effect :llm/generate :compiler-wire-id 11}
+                    :log/append {:source-operation log/append :effect :log/append :compiler-wire-id 6}
+                    :log/read {:source-operation log/read :effect :log/read :compiler-wire-id 5}
+                    :net/accept {:source-operation net/accept :effect :net/accept :compiler-wire-id 44}
+                    :net/datagram {:source-operation net/datagram :effect :net/datagram :compiler-wire-id 27}
+                    :net/dial {:source-operation net/dial :effect :net/dial :compiler-wire-id 45}
+                    :net/listen {:source-operation net/listen :effect :net/listen :compiler-wire-id 43}
+                    :net/read {:source-operation net/read :effect :net/read :compiler-wire-id 46}
+                    :net/write {:source-operation net/write :effect :net/write :compiler-wire-id 47}
+                    :object/compare-and-set-ref {:source-operation object/compare-and-set-ref :effect :object/compare-and-set-ref :compiler-wire-id 16}
+                    :object/get-stream {:source-operation object/get-stream :effect :object/get-stream :compiler-wire-id 14}
+                    :object/put-block {:source-operation object/put-block :effect :object/put-block :compiler-wire-id 15}
+                    :process/spawn {:source-operation process/spawn :effect :process/spawn :compiler-wire-id 20}
+                    :screen/act {:source-operation screen/act :effect :screen/act :compiler-wire-id 32}
+                    :screen/observe {:source-operation screen/observe :effect :screen/observe :compiler-wire-id 31}
+                    :secret/get {:source-operation secret/get :effect :secret/get :compiler-wire-id 21}
+                    :state/transact {:source-operation state/transact :effect :state/transact :compiler-wire-id 8}
+                    :storage/transact {:source-operation storage/transact :effect :storage/transact :compiler-wire-id 12}
+                    :stream/accept {:source-operation stream/accept :effect :stream/accept :compiler-wire-id 25}
+                    :stream/send {:source-operation stream/send :effect :stream/send :compiler-wire-id 26}
+                    :sys/cwd {:source-operation sys/cwd :effect :sys/cwd :compiler-wire-id 40}
+                    :ui/commit {:source-operation ui/commit :effect :ui/commit :compiler-wire-id 9}
+                    :ui/next-event {:source-operation ui/next-event :effect :ui/next-event :compiler-wire-id 10}}}))
+
+#?(:kotoba
+   (defn source-operation-registry-fallback [] [:ref :form/r]
+     (form/edn-form "{can/frame :can/frame
+ cli/args :cli/args
+ clock/now :clock/now
+ code/eval :code/eval
+ dataspace/transact :dataspace/transact
+ entropy/draw :entropy/draw
+ env/read :env/read
+ fs/app-data :fs/app-data
+ fs/app-data-bytes :fs/app-data-bytes
+ fs/browse :fs/browse
+ fs/browse-dir :fs/browse-dir
+ fs/transact :fs/transact
+ git/run :git/run
+ gpu/compute :gpu/compute
+ hash/sha256 :hash/sha256
+ http/accept :http/accept
+ http/get-stream :http/get-stream
+ http/post :http/post
+ http/reply :http/reply
+ identity/sign :identity/sign
+ identity/verify :identity/verify
+ io/read :io/read
+ io/write :io/write
+ io/write-error :io/write-error
+ link/frame :link/frame
+ llm/generate :llm/generate
+ log/append :log/append
+ log/read :log/read
+ net/accept :net/accept
+ net/datagram :net/datagram
+ net/dial :net/dial
+ net/listen :net/listen
+ net/read :net/read
+ net/write :net/write
+ object/compare-and-set-ref :object/compare-and-set-ref
+ object/get-stream :object/get-stream
+ object/put-block :object/put-block
+ process/spawn :process/spawn
+ screen/act :screen/act
+ screen/observe :screen/observe
+ secret/get :secret/get
+ state/transact :state/transact
+ storage/transact :storage/transact
+ stream/accept :stream/accept
+ stream/send :stream/send
+ sys/cwd :sys/cwd
+ ui/commit :ui/commit
+ ui/next-event :ui/next-event}"))
+   :default
+   (def source-operation-registry-fallback
+     "Friendly source operation -> semantic capability name, from the fallback."
+     '{can/frame :can/frame
+ cli/args :cli/args
+ clock/now :clock/now
+ code/eval :code/eval
+ dataspace/transact :dataspace/transact
+ entropy/draw :entropy/draw
+ env/read :env/read
+ fs/app-data :fs/app-data
+ fs/app-data-bytes :fs/app-data-bytes
+ fs/browse :fs/browse
+ fs/browse-dir :fs/browse-dir
+ fs/transact :fs/transact
+ git/run :git/run
+ gpu/compute :gpu/compute
+ hash/sha256 :hash/sha256
+ http/accept :http/accept
+ http/get-stream :http/get-stream
+ http/post :http/post
+ http/reply :http/reply
+ identity/sign :identity/sign
+ identity/verify :identity/verify
+ io/read :io/read
+ io/write :io/write
+ io/write-error :io/write-error
+ link/frame :link/frame
+ llm/generate :llm/generate
+ log/append :log/append
+ log/read :log/read
+ net/accept :net/accept
+ net/datagram :net/datagram
+ net/dial :net/dial
+ net/listen :net/listen
+ net/read :net/read
+ net/write :net/write
+ object/compare-and-set-ref :object/compare-and-set-ref
+ object/get-stream :object/get-stream
+ object/put-block :object/put-block
+ process/spawn :process/spawn
+ screen/act :screen/act
+ screen/observe :screen/observe
+ secret/get :secret/get
+ state/transact :state/transact
+ storage/transact :storage/transact
+ stream/accept :stream/accept
+ stream/send :stream/send
+ sys/cwd :sys/cwd
+ ui/commit :ui/commit
+ ui/next-event :ui/next-event}))
+
+#?(:kotoba
+   (defn capability-id->name-fallback [] [:ref :form/r]
+     (form/edn-form "{1 :identity/sign
+ 2 :identity/verify
+ 3 :hash/sha256
+ 4 :http/post
+ 5 :log/read
+ 6 :log/append
+ 7 :clock/now
+ 8 :state/transact
+ 9 :ui/commit
+ 10 :ui/next-event
+ 11 :llm/generate
+ 12 :storage/transact
+ 13 :http/get-stream
+ 14 :object/get-stream
+ 15 :object/put-block
+ 16 :object/compare-and-set-ref
+ 17 :http/accept
+ 18 :http/reply
+ 19 :fs/transact
+ 20 :process/spawn
+ 21 :secret/get
+ 22 :git/run
+ 23 :entropy/draw
+ 24 :dataspace/transact
+ 25 :stream/accept
+ 26 :stream/send
+ 27 :net/datagram
+ 28 :link/frame
+ 29 :can/frame
+ 30 :code/eval
+ 31 :screen/observe
+ 32 :screen/act
+ 33 :env/read
+ 34 :fs/browse
+ 35 :fs/app-data
+ 36 :fs/browse-dir
+ 37 :io/write
+ 38 :cli/args
+ 39 :io/write-error
+ 40 :sys/cwd
+ 41 :io/read
+ 42 :gpu/compute
+ 43 :net/listen
+ 44 :net/accept
+ 45 :net/dial
+ 46 :net/read
+ 47 :net/write}"))
+   :default
+   (def capability-id->name-fallback
+     "Wire id -> primary capability name, from the fallback."
+     '{1 :identity/sign
+ 2 :identity/verify
+ 3 :hash/sha256
+ 4 :http/post
+ 5 :log/read
+ 6 :log/append
+ 7 :clock/now
+ 8 :state/transact
+ 9 :ui/commit
+ 10 :ui/next-event
+ 11 :llm/generate
+ 12 :storage/transact
+ 13 :http/get-stream
+ 14 :object/get-stream
+ 15 :object/put-block
+ 16 :object/compare-and-set-ref
+ 17 :http/accept
+ 18 :http/reply
+ 19 :fs/transact
+ 20 :process/spawn
+ 21 :secret/get
+ 22 :git/run
+ 23 :entropy/draw
+ 24 :dataspace/transact
+ 25 :stream/accept
+ 26 :stream/send
+ 27 :net/datagram
+ 28 :link/frame
+ 29 :can/frame
+ 30 :code/eval
+ 31 :screen/observe
+ 32 :screen/act
+ 33 :env/read
+ 34 :fs/browse
+ 35 :fs/app-data
+ 36 :fs/browse-dir
+ 37 :io/write
+ 38 :cli/args
+ 39 :io/write-error
+ 40 :sys/cwd
+ 41 :io/read
+ 42 :gpu/compute
+ 43 :net/listen
+ 44 :net/accept
+ 45 :net/dial
+ 46 :net/read
+ 47 :net/write}))
+
