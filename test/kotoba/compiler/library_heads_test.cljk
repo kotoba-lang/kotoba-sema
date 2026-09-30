@@ -127,8 +127,9 @@
     (is (= 2 (w (run src 'msg [(i 2)]))))
     (is (= 7 (w (run src 'msg [(i 5)]))))
     (is (= 9 (w (run src 'limit [(i 9)])))))
-  (is (= "ex-info takes a message and a data document; the cause arity has no Throwable to name"
-         (refusal "(defn main [] :i64 (throw (ex-info \"m\" {:a 1} \"cause\")))")))
+  (is (= "ex-info takes a message, a data document and an optional cause"
+         (refusal "(defn main [] :i64 (throw (ex-info \"m\" {:a 1} \"cause\" 4)))"))
+      "the cause arity is admitted (the cause is kept as the data's :cause); a fourth argument is not")
   (is (= "ex-info data map keys must be keywords"
          (refusal "(defn main [] :i64 (throw (ex-info \"m\" {\"a\" 1})))"))))
 

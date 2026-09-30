@@ -7,7 +7,11 @@
   (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.sema :as sema]
+            [kotoba.kir :as kir]
             [kotoba.compiler.frontend :as frontend]))
+
+(defn- kir-run [defs]
+  (kir/execute (kir/lower (sema/analyze (str "(ns m.probe)\n" defs))) 'main [] {}))
 
 (deftest the-bytes-capability-shares-the-wire-and-the-authority
   (is (= 35 (get frontend/capability-registry :fs/app-data)))
@@ -37,3 +41,41 @@
               "(ns m.probe {:kotoba/export [f]})
 (defn inner [x :i64] :i64 (if (< x 0) (throw (ex-info \"inner\" {:x x})) x))
 (defn f [x :i64] :i64 (try (inner x) (catch :default e 0)))"))))
+
+(deftest a-write-is-one-framed-bytes-request
+  ;; nbb's host layer takes `(fs/app-data-bytes request content)`; the wire
+  ;; carries ONE request, so the frame is the request text then the content.
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [w]})
+(defn w [path :string data :bytes] :bytes
+  (fs/app-data-bytes (str path \"WRITE_SEP\") data))"))))
+
+(deftest a-statement-position-app-data-call-needs-no-result-context
+  ;; Its result is fixed by its NAME (text / bytes), so a `do` statement and a
+  ;; `try` body can make one.
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [f]})
+(defn f [p :string] :string
+  (do (fs/app-data (str p \"FSYNC_SEP\"))
+      (fs/app-data-bytes (str p \"WRITE_SEP\") (bytes-empty))
+      p))"))))
+
+(deftest a-record-field-may-carry-bytes
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [k]})
+(defrecord Entry [path :string data :bytes])
+(defn k [e [:record :m.probe/Entry [[:path :string] [:data :bytes]]]] :bytes (:data e))"))))
+
+(deftest a-record-field-read-inside-try-resolves-its-descriptor
+  ;; The abort passes run before `rewrite-record-projections`; a descriptor-less
+  ;; `(:k e)` in a try body used to reach them as a value in the type slot.
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [s]})
+(defrecord Entry [path :string kind :i64])
+(defn boom [x :i64] :i64 (if (< x 0) (throw (ex-info \"neg\" {:x x})) x))
+(defn s [e [:record :m.probe/Entry [[:path :string] [:kind :i64]]]] :i64
+  (try (boom (:kind e)) (catch :default err 0)))"))))
+
+(deftest str-prints-an-integer-part-as-decimal-digits
+  (is (= "a-7-b" (let [v (kir-run "(defn main [] :string (str \"a-\" 7 \"-b\"))")] v)))
+  (is (= "n=4" (kir-run "(defn main [] :string (let [n 3] (str \"n=\" (+ n 1))))"))))

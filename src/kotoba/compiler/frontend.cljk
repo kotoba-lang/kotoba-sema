@@ -224,6 +224,12 @@
   (into {} (map (fn [[name entry]] [(:source-operation entry) name]))
         (:capabilities capability-catalog)))
 
+(def named-operation-default-results
+  "Friendly operation -> its result type when the context gives none. Only
+  operations whose result is fixed by their NAME are here (statement position
+  and `try` bodies have no expected type to read it from)."
+  '{fs/app-data :string fs/app-data-bytes :bytes})
+
 (def capability-id->name
   "Inverse of capability-registry for diagnostics and effect ceilings. Two names
   may share a wire id when they are payload variants of one capability
@@ -3712,6 +3718,26 @@
       (with-meta elaborated (merge (meta elaborated) m))
       elaborated)))
 
+(declare ^:private string-from-i64-helper-name)
+
+(def ^:private str-integer-heads
+  "Call heads whose value is an i64 wherever they are admitted, so `str` may
+  print them without a declared type."
+  '#{+ - * quot mod rem inc dec count string-length string-byte-length
+     bit-and bit-or bit-xor bit-shift-left bit-shift-right})
+
+(defn- str-part
+  "One `str` argument as a :string operand. Clojure's `str` prints an integer
+  as its decimal digits, so an integer literal, a parameter typed :i64 and an
+  arithmetic form are wrapped in `string-from-i64`; everything else must
+  already be a string and fails closed at type check as it always did."
+  [part]
+  (if (or (kotoba-integer? part)
+          (and (symbol? part) (= :i64 (get *local-types* part)))
+          (and (seq? part) (contains? str-integer-heads (first part))))
+    (list string-from-i64-helper-name (desugar-expr part))
+    (desugar-result-expr :string part)))
+
 (defn- elaborate-named-operation
   "W1 safety elaboration validates an ordinary namespaced operation and keeps
   it named until parameter/result types are available. The later contextual
@@ -4029,6 +4055,24 @@
       (or (intrinsic-helper-name? name)
           (contains? owned name)
           (and (loop-helper? name) (contains? abort-error-types name))))))
+
+(defn- expand-app-data-bytes-writes
+  "`(fs/app-data-bytes request content)` -- the WRITE / APPEND spelling -- as
+  the ONE bytes request the wire carries: the request text followed by the
+  content, which the handler splits at the request's separator. nbb's host
+  layer takes the two as separate arguments; this is the same call with the
+  frame built for it. Done on SOURCE forms, before the library-head pass, so
+  the `string-to-utf8` it writes is a head that pass resolves."
+  [form]
+  (cond
+    (seq? form)
+    (let [form* (apply list (map expand-app-data-bytes-writes form))]
+      (if (and (= 'fs/app-data-bytes (first form*)) (= 3 (count form*)))
+        (list 'fs/app-data-bytes
+              (list 'bytes-concat (list 'string-to-utf8 (second form*)) (nth form* 2)))
+        form*))
+    (vector? form) (mapv expand-app-data-bytes-writes form)
+    :else form))
 
 (defn- expand-intrinsic-helper-forms
   "Rename every call to a library head the module does not define itself, and
@@ -7700,8 +7744,8 @@
               (desugar-expr (first args))
               (reduce (fn [acc part]
                         (list 'string-concat acc part))
-                      (desugar-result-expr :string (first args))
-                      (mapv #(desugar-result-expr :string %) (rest args)))))
+                      (str-part (first args))
+                      (mapv str-part (rest args)))))
         string-length
         (do (when-not (= 1 (count args))
               (reject! "string-length requires one string" form))
@@ -10891,6 +10935,13 @@
           (library-predicate-answer! op (first types) (first args))
           :bool)
 
+      ;; A friendly capability operation whose result is the same wherever it
+      ;; is written (the app-data reads/writes answer text or bytes by NAME).
+      ;; It is typed here so the abort passes, which run before named-ability
+      ;; elaboration, can see a `try` body that makes one.
+      (contains? named-operation-default-results op)
+      (get named-operation-default-results op)
+
       :else (unknown-operation! op op signatures))))
 
 (declare infer-expression-type-impl)
@@ -11587,7 +11638,18 @@
                                        field-type item field))
           type)
         record-get
-        (let [[type value field] args
+        (let [[type value field] (if (= 2 (count args))
+                                   ;; The descriptor-less spelling reaches the
+                                   ;; abort passes (they run before
+                                   ;; `rewrite-record-projections`); the value's
+                                   ;; own type is the descriptor.
+                                   (let [value-type (infer-expression-type (first args) locals signatures)]
+                                     (when-not (record-type? value-type)
+                                       (reject! (str "record-get without a type descriptor requires a record "
+                                                     "value; got " (pr-str value-type))
+                                                form))
+                                     [value-type (first args) (second args)])
+                                   args)
               field-type (first-truthy (fn [[declared-field declared-type]]
                                  (when (= declared-field field) declared-type))
                                (nth type 2))]
@@ -11641,9 +11703,10 @@
         (do
           (when-not (= 1 (count args))
             (reject! "named capability operation requires exactly one request" form))
-          (when-not expected
+          (when-not (or expected (contains? named-operation-default-results op))
             (reject! "named capability operation requires a typed result context" form))
-          (let [request (elaborate-named-ability
+          (let [expected (or expected (get named-operation-default-results op))
+                request (elaborate-named-ability
                          (first args) nil locals signatures used)
                 request-type (infer-expression-type request locals signatures)
                 capability (get source-operation-registry op)
@@ -19601,7 +19664,7 @@
             (check-pure-product-source-forms! forms))
         ;; Library heads (adr-2609242330): after the reserved-prefix check,
         ;; because the helpers it appends use the reserved prefix.
-        forms (expand-intrinsic-helper-forms forms)
+        forms (expand-intrinsic-helper-forms (mapv expand-app-data-bytes-writes forms))
         ;; State ability, slice 1: after the reserved-prefix check, because
         ;; what it writes uses the reserved prefix. `defhandler` becomes
         ;; private defns; the state spellings become reserved heads.
