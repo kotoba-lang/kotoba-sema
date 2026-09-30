@@ -56,3 +56,7 @@
      ;; the JVM reads the catalog resource, which is a subset of the fallback
      (is (every? (fn [[k v]] (= v (get tables/capability-registry-cljs-fallback k)))
                  frontend/capability-registry))))
+
+(deftest the-kotoba-dataspace-wire-ids-equal-the-derived-set
+  ;; the Kotoba route writes the set out (`#{24}`); the host derives it
+  (is (= #{24} @#'frontend/dataspace-capability-ids)))

@@ -2743,6 +2743,10 @@
                     #(or (dispatcher-parameter-label (nth % 2 nil)) ""))
               requested))))
 
+#?(:kotoba
+   (defn- closure-apply-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_closure_apply :params [__kotoba_apply_closure __kotoba_apply_args] :i64-pair-chain-param-indexes [1] :result :i64 :effects #{} :body (if (= __kotoba_apply_args 0) (__kotoba_invoke$arity0 __kotoba_apply_closure) (let [a0 (pair-first __kotoba_apply_args) t1 (pair-second __kotoba_apply_args)] (if (= t1 0) (__kotoba_invoke$arity1 __kotoba_apply_closure a0) (let [a1 (pair-first t1) t2 (pair-second t1)] (if (= t2 0) (__kotoba_invoke$arity2 __kotoba_apply_closure a0 a1) (let [a2 (pair-first t2) t3 (pair-second t2)] (if (= t3 0) (__kotoba_invoke$arity3 __kotoba_apply_closure a0 a1 a2) (let [a3 (pair-first t3) t4 (pair-second t3)] (if (= t4 0) (__kotoba_invoke$arity4 __kotoba_apply_closure a0 a1 a2 a3) 0)))))))))}"))
+   :default
 (def ^:private closure-apply-helper
   {:name '__kotoba_closure_apply
    :params '[__kotoba_apply_closure __kotoba_apply_args]
@@ -2764,11 +2768,23 @@
                   (let [a3 (pair-first t3) t4 (pair-second t3)]
                     (if (= t4 0)
                       (__kotoba_invoke$arity4 __kotoba_apply_closure a0 a1 a2 a3)
-                      0)))))))))})
+                      0)))))))))}))
 
-(def ^:private lazy-take-helper-name '__kotoba_lazy_take)
-(def ^:private lazy-drop-helper-name '__kotoba_lazy_drop)
+#?(:kotoba
+   (defn- lazy-take-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_lazy_take"))
+   :default
+(def ^:private lazy-take-helper-name '__kotoba_lazy_take))
+#?(:kotoba
+   (defn- lazy-drop-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_lazy_drop"))
+   :default
+(def ^:private lazy-drop-helper-name '__kotoba_lazy_drop))
 
+#?(:kotoba
+   (defn- lazy-take-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_lazy_take :params [__kotoba_lazy_n __kotoba_lazy_seq] :result :i64 :effects #{} :body (if (<= __kotoba_lazy_n 0) 0 (if (= __kotoba_lazy_seq 0) 0 (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)] (if (= __kotoba_lazy_cell 0) 0 (pair (__kotoba_invoke$arity0 (pair-first __kotoba_lazy_cell)) (__kotoba_lazy_take (- __kotoba_lazy_n 1) (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell))))))))}"))
+   :default
 (def ^:private lazy-take-helper
   {:name lazy-take-helper-name
    :params '[__kotoba_lazy_n __kotoba_lazy_seq]
@@ -2784,8 +2800,12 @@
             (pair (__kotoba_invoke$arity0 (pair-first __kotoba_lazy_cell))
                   (__kotoba_lazy_take
                    (- __kotoba_lazy_n 1)
-                   (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell))))))))})
+                   (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell))))))))}))
 
+#?(:kotoba
+   (defn- lazy-drop-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_lazy_drop :params [__kotoba_lazy_n __kotoba_lazy_seq] :result :i64 :effects #{} :body (if (<= __kotoba_lazy_n 0) __kotoba_lazy_seq (if (= __kotoba_lazy_seq 0) 0 (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)] (if (= __kotoba_lazy_cell 0) 0 (__kotoba_lazy_drop (- __kotoba_lazy_n 1) (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell)))))))}"))
+   :default
 (def ^:private lazy-drop-helper
   {:name lazy-drop-helper-name
    :params '[__kotoba_lazy_n __kotoba_lazy_seq]
@@ -2800,7 +2820,7 @@
             0
             (__kotoba_lazy_drop
              (- __kotoba_lazy_n 1)
-             (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell)))))))})
+             (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell)))))))}))
 
 ;; ADR-2607182410: bound (via `binding`, once per `analyze` call, same
 ;; lifetime as `*loop-counter*` above -- not per-defn) to a `volatile!` set
@@ -3141,9 +3161,31 @@
 
 #?(:kotoba nil :default (def ^:private intrinsic-helper-order tables/intrinsic-helper-order))
 
+#?(:kotoba
+   (defn- intrinsic-helper-forms-from [kids [:list [:ref :form/r]] i :i64
+                                       acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count kids))
+       acc
+       (let [f (typed-list-nth [:list [:ref :form/r]] kids i)]
+         (intrinsic-helper-forms-from
+          kids (+ i 1)
+          (typed-list-conj [:list [:ref :form/r]]
+                           (typed-list-conj [:list [:ref :form/r]] acc (form/nth-of f 1))
+                           f)))))
+   :default nil)
+
+;; Kotoba: the name -> defn form map, built from the same source text (every
+;; helper is EDN-shaped, so the Form reader reads them wrapped in a vector).
+#?(:kotoba
+   (defn- intrinsic-helper-forms [] [:ref :form/r]
+     (form/form-map
+      (intrinsic-helper-forms-from
+       (form/kids-of (form/edn-form (str "[" intrinsic-helper-source "]")))
+       0 (form/no-forms)))))
+#?(:kotoba nil :default
 (def ^:private intrinsic-helper-forms
   (delay (into {} (map (fn [form] [(second form) form]))
-               (read-forms intrinsic-helper-source))))
+               (read-forms intrinsic-helper-source)))))
 
 (defn- intrinsic-helper-name?
   "Is NAME one of the frontend-supplied library-head helpers?"
@@ -4527,9 +4569,21 @@
                         form)
     :else false))
 
-(def ^:private string-from-i64-helper-name '__kotoba_string_from_i64)
-(def ^:private string-from-i64-nat-helper-name '__kotoba_string_from_i64_nat)
+#?(:kotoba
+   (defn- string-from-i64-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_string_from_i64"))
+   :default
+(def ^:private string-from-i64-helper-name '__kotoba_string_from_i64))
+#?(:kotoba
+   (defn- string-from-i64-nat-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_string_from_i64_nat"))
+   :default
+(def ^:private string-from-i64-nat-helper-name '__kotoba_string_from_i64_nat))
 
+#?(:kotoba
+   (defn- string-from-i64-nat-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_string_from_i64_nat :params [n] :param-types [:i64] :result :string :effects #{} :body (if (< n 10) (string-substring \"0123456789\" n (+ n 1)) (string-concat (__kotoba_string_from_i64_nat (quot n 10)) (string-substring \"0123456789\" (- n (* (quot n 10) 10)) (+ (- n (* (quot n 10) 10)) 1))))}"))
+   :default
 (def ^:private string-from-i64-nat-helper
   "Unsigned decimal digits for string-from-i64 (Product Value ABI v1).
   Uses only string-substring/string-concat already qualified for wasm."
@@ -4543,8 +4597,12 @@
             (string-concat
              (__kotoba_string_from_i64_nat (quot n 10))
              (string-substring "0123456789" (- n (* (quot n 10) 10))
-                               (+ (- n (* (quot n 10) 10)) 1))))})
+                               (+ (- n (* (quot n 10) 10)) 1))))}))
 
+#?(:kotoba
+   (defn- string-from-i64-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_string_from_i64 :params [n] :param-types [:i64] :result :string :effects #{} :body (if (< n 0) (string-concat \"-\" (__kotoba_string_from_i64_nat (- 0 n))) (__kotoba_string_from_i64_nat n))}"))
+   :default
 (def ^:private string-from-i64-helper
   "Signed decimal printer for string-from-i64 surface (Product Value ABI v1)."
   {:name string-from-i64-helper-name
@@ -4554,10 +4612,18 @@
    :effects #{}
    :body '(if (< n 0)
             (string-concat "-" (__kotoba_string_from_i64_nat (- 0 n)))
-            (__kotoba_string_from_i64_nat n))})
+            (__kotoba_string_from_i64_nat n))}))
 
-(def ^:private char-helper-name '__kotoba_char)
+#?(:kotoba
+   (defn- char-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_char"))
+   :default
+(def ^:private char-helper-name '__kotoba_char))
 
+#?(:kotoba
+   (defn- char-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_char :params [n] :param-types [:i64] :result :string :effects #{} :body (string-from-utf8 (bytes-from-vector-i64 (if (< n 128) (vector-conj (vector-alloc 0) n) (if (< n 2048) (vector-conj (vector-conj (vector-alloc 0) (+ 192 (quot n 64))) (+ 128 (- n (* (quot n 64) 64)))) (if (< n 65536) (vector-conj (vector-conj (vector-conj (vector-alloc 0) (+ 224 (quot n 4096))) (+ 128 (- (quot n 64) (* (quot n 4096) 64)))) (+ 128 (- n (* (quot n 64) 64)))) (vector-conj (vector-conj (vector-conj (vector-conj (vector-alloc 0) (+ 240 (quot n 262144))) (+ 128 (- (quot n 4096) (* (quot n 262144) 64)))) (+ 128 (- (quot n 64) (* (quot n 4096) 64)))) (+ 128 (- n (* (quot n 64) 64)))))))))}"))
+   :default
 (def ^:private char-helper
   "`(char n)`: the one-code-point string for code point N (Clojure's char, read
   as a string because this language has no char type; the compiler's own sources
@@ -4586,7 +4652,7 @@
                                                                       (+ 240 (quot n 262144)))
                                                          (+ 128 (- (quot n 4096) (* (quot n 262144) 64))))
                                             (+ 128 (- (quot n 64) (* (quot n 4096) 64))))
-                               (+ 128 (- n (* (quot n 64) 64)))))))))})
+                               (+ 128 (- n (* (quot n 64) 64)))))))))}))
 
 (defn- uses-char? [form]
   (cond
@@ -4602,14 +4668,46 @@
 ;; only when it uses documents (a module that does not lowers byte for byte as
 ;; before). Written directly in primitive form, like the other helpers.
 
-(def ^:private doc-nth-helper-name '__kotoba_doc_nth)
-(def ^:private doc-rest-from-helper-name '__kotoba_doc_rest_from)
-(def ^:private doc-rest-helper-name '__kotoba_doc_rest)
-(def ^:private doc-part-from-helper-name '__kotoba_doc_part_from)
-(def ^:private doc-keys-helper-name '__kotoba_doc_keys)
-(def ^:private doc-vals-helper-name '__kotoba_doc_vals)
-(def ^:private doc-append-from-helper-name '__kotoba_doc_append_from)
+#?(:kotoba
+   (defn- doc-nth-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_nth"))
+   :default
+(def ^:private doc-nth-helper-name '__kotoba_doc_nth))
+#?(:kotoba
+   (defn- doc-rest-from-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_rest_from"))
+   :default
+(def ^:private doc-rest-from-helper-name '__kotoba_doc_rest_from))
+#?(:kotoba
+   (defn- doc-rest-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_rest"))
+   :default
+(def ^:private doc-rest-helper-name '__kotoba_doc_rest))
+#?(:kotoba
+   (defn- doc-part-from-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_part_from"))
+   :default
+(def ^:private doc-part-from-helper-name '__kotoba_doc_part_from))
+#?(:kotoba
+   (defn- doc-keys-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_keys"))
+   :default
+(def ^:private doc-keys-helper-name '__kotoba_doc_keys))
+#?(:kotoba
+   (defn- doc-vals-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_vals"))
+   :default
+(def ^:private doc-vals-helper-name '__kotoba_doc_vals))
+#?(:kotoba
+   (defn- doc-append-from-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_append_from"))
+   :default
+(def ^:private doc-append-from-helper-name '__kotoba_doc_append_from))
 
+#?(:kotoba
+   (defn- document-helpers [] [:ref :form/r]
+     (form/edn-form "[{:name __kotoba_doc_nth :params [d i] :param-types [:document :i64] :result :document :effects #{} :body (if (= (document-kind d) :vector) (option-value-of [:option :document] (document-vector-at d i) (document-null)) (if (= (document-kind d) :list) (option-value-of [:option :document] (document-list-at d i) (document-null)) (if (= (document-kind d) :map) (option-value-of [:option :document] (document-map-entry-at d i) (document-null)) (document-null))))} {:name __kotoba_doc_rest_from :params [d i acc] :param-types [:document :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_rest_from d (+ i 1) (document-vector-conj acc (__kotoba_doc_nth d i))) acc)} {:name __kotoba_doc_rest :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_rest_from d 1 (document-vector))} {:name __kotoba_doc_part_from :params [d i j acc] :param-types [:document :i64 :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_part_from d (+ i 1) j (document-vector-conj acc (__kotoba_doc_nth (__kotoba_doc_nth d i) j))) acc)} {:name __kotoba_doc_keys :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_part_from d 0 0 (document-vector))} {:name __kotoba_doc_vals :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_part_from d 0 1 (document-vector))} {:name __kotoba_doc_append_from :params [d i acc] :param-types [:document :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_append_from d (+ i 1) (document-vector-conj acc (__kotoba_doc_nth d i))) acc)}]"))
+   :default
 (def ^:private document-helpers
   [{:name doc-nth-helper-name
     :params '[d i] :param-types [:document :i64] :result :document :effects #{}
@@ -4653,7 +4751,7 @@
     :body '(if (< i (document-count d))
              (__kotoba_doc_append_from d (+ i 1)
                                        (document-vector-conj acc (__kotoba_doc_nth d i)))
-             acc)}])
+             acc)}]))
 
 (defn- uses-documents?
   "True when a function set mentions `:document` in a signature or calls a
@@ -4842,8 +4940,16 @@
     (coll? form) (first-truthy uses-string-from-i64? form)
     :else false))
 
-(def ^:private map-get-helper-name '__kotoba_map_get)
+#?(:kotoba
+   (defn- map-get-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_map_get"))
+   :default
+(def ^:private map-get-helper-name '__kotoba_map_get))
 
+#?(:kotoba
+   (defn- map-get-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_map_get :params [m k default] :result :i64 :effects #{} :body (if (= m 0) default (if (= (pair-first (pair-first m)) k) (pair-second (pair-first m)) (__kotoba_map_get (pair-second m) k default)))}"))
+   :default
 (def ^:private map-get-helper
   "Compiler-synthesized recursive linear scan over a desugar-map cons-list,
   injected into a module's function set only when `get` is actually used
@@ -4862,7 +4968,7 @@
             default
             (if (= (pair-first (pair-first m)) k)
               (pair-second (pair-first m))
-              (__kotoba_map_get (pair-second m) k default)))})
+              (__kotoba_map_get (pair-second m) k default)))}))
 
 (defn- uses-map-get? [form]
   (cond
@@ -4871,8 +4977,16 @@
     (coll? form) (first-truthy uses-map-get? form)
     :else false))
 
-(def ^:private map-without-helper-name '__kotoba_map_without)
+#?(:kotoba
+   (defn- map-without-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_map_without"))
+   :default
+(def ^:private map-without-helper-name '__kotoba_map_without))
 
+#?(:kotoba
+   (defn- map-without-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_map_without :params [m k] :result :i64 :effects #{} :body (if (= m 0) 0 (if (= (pair-first (pair-first m)) k) (__kotoba_map_without (pair-second m) k) (pair (pair-first m) (__kotoba_map_without (pair-second m) k))))}"))
+   :default
 (def ^:private map-without-helper
   "Compiler-synthesized recursive filter over a desugar-map cons-list,
   removing every entry whose key equals `k` while preserving the relative
@@ -4895,7 +5009,7 @@
             0
             (if (= (pair-first (pair-first m)) k)
               (__kotoba_map_without (pair-second m) k)
-              (pair (pair-first m) (__kotoba_map_without (pair-second m) k))))})
+              (pair (pair-first m) (__kotoba_map_without (pair-second m) k))))}))
 
 (defn- uses-map-without? [form]
   (cond
@@ -4923,7 +5037,11 @@
 ;; map pattern lowered as projection alone would be irrefutable and every
 ;; `match` on a map would take its first arm.
 
-(def ^:private match-has-marker '__kotoba_match_has)
+#?(:kotoba
+   (defn- match-has-marker [] [:ref :form/r]
+     (form/edn-form "__kotoba_match_has"))
+   :default
+(def ^:private match-has-marker '__kotoba_match_has))
 
 (def max-match-arms 32)
 (def max-match-pattern-keys 8)
@@ -14303,8 +14421,16 @@
 
 #?(:kotoba nil :default (def ^:private state-handle-heads tables/state-handle-heads))
 
-(def ^:private state-all-heads
-  (into '#{__kotoba_state_resume} (concat state-perform-heads state-handle-heads)))
+#?(:kotoba
+   (defn- state-all-heads [] [:ref :form/r]
+     (form/form-set
+      (form/append-many
+       (form/append-many (form/kids-of (form/edn-form "#{__kotoba_state_resume}"))
+                         (heads-kids (tables/state-perform-heads)))
+       (heads-kids (tables/state-handle-heads)))))
+   :default
+   (def ^:private state-all-heads
+     (into '#{__kotoba_state_resume} (concat state-perform-heads state-handle-heads))))
 
 (defn- state-head-form? [x heads]
   (and (seq? x) (seq x) (contains? heads (first x))))
@@ -15045,11 +15171,18 @@
            ;; realized above, so every join helper the walk made is here
            @extra))))))
 
-(def ^:private dataspace-capability-ids
-  "The wire IDs of every `:dataspace/*` capability -- the facet operations
+#?(:kotoba
+   ;; The one `:dataspace/*` wire id in the capability catalog
+   ;; (`:dataspace/transact` 24); frontend-tables-test compares it with the
+   ;; set the host derives from the registry.
+   (defn- dataspace-capability-ids [] [:ref :form/r]
+     (form/edn-form "#{24}"))
+   :default
+   (def ^:private dataspace-capability-ids
+     "The wire IDs of every `:dataspace/*` capability -- the facet operations
   whose unwind the abort ability has no checked form for yet."
-  (into #{} (keep (fn [[name id]] (when (= "dataspace" (namespace name)) id)))
-        capability-registry))
+     (into #{} (keep (fn [[name id]] (when (= "dataspace" (namespace name)) id)))
+           capability-registry)))
 
 (defn- check-abort-facet-unwind!
   "Precondition :checked-lexical-facet-unwind, refused where it would be
@@ -15122,11 +15255,21 @@
              zero? #(and (kotoba-integer? %) (zero? %))]
          (or (and (generated? a) (zero? b)) (and (zero? a) (generated? b))))))
 
-(def ^:private closure-number-operations
-  "The operations that read a word as a number, which a closure handle is not
+#?(:kotoba
+   (defn- closure-number-operations [] [:ref :form/r]
+     (form/form-set
+      (form/append-many
+       (form/append-many
+        (form/append-many (heads-kids (tables/arithmetic))
+                          (heads-kids (tables/comparisons)))
+        (heads-kids (tables/i64-operations)))
+       (heads-kids (tables/i32-operations)))))
+   :default
+   (def ^:private closure-number-operations
+     "The operations that read a word as a number, which a closure handle is not
   (ADR 0353 floor :function-values)."
-  (into (set/union arithmetic comparisons)
-        (concat (keys i64-operations) (keys i32-operations))))
+     (into (set/union arithmetic comparisons)
+           (concat (keys i64-operations) (keys i32-operations)))))
 
 (defn- infer-closure-refinements
   "Infer checked closure positions without adding a public closure value type.
@@ -17711,6 +17854,25 @@
 
 #?(:kotoba nil :default (def ^:private structural-heads tables/structural-heads))
 
+#?(:kotoba
+   (defn- intersect-heads-from [xs [:list [:ref :form/r]] i :i64 other [:ref :form/r]
+                                acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count xs))
+       acc
+       (let [x (typed-list-nth [:list [:ref :form/r]] xs i)]
+         (intersect-heads-from
+          xs (+ i 1) other
+          (if (tables/table-has? other x)
+            (typed-list-conj [:list [:ref :form/r]] acc x)
+            acc)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- unspellable-definition-heads [] [:ref :form/r]
+     (form/form-set
+      (intersect-heads-from (form/kids-of (tables/definition-heads)) 0
+                            (reserved-function-names) (form/no-forms))))
+   :default
 (def ^:private unspellable-definition-heads
   "The declaration heads a TEMPLATE BODY may hold that can be nothing at all.
 
@@ -17729,7 +17891,7 @@
   BOTH can be neither. `#{ns defn defn-}`, today. Written as the intersection
   so that it follows either vocabulary if one of them moves -- a hand-listed
   copy would keep refusing a head that had just become spellable."
-  (set/intersection definition-heads reserved-function-names))
+  (set/intersection definition-heads reserved-function-names)))
 
 (defn- desugar-template-parts
   "Read one `(defdesugar name [params] body)` into `{:name :params :body}`."
