@@ -111,3 +111,13 @@
                nil
                (catch #?(:clj Throwable :cljs :default) e (ex-message e)))]
     (is (= "def value is stateful/effectful: (env/read ...) -- move it into a function or a capability" r))))
+
+(deftest the-reserved-prefix-is-refused-in-a-binding-and-allowed-as-quoted-data
+  ;; The prefix is reserved to stop capture; a quoted symbol or a `case` test
+  ;; constant is data and cannot capture (the compiler's own source writes its
+  ;; synthetic names that way).
+  (let [try-it (fn [src] (try (sema/analyze src) :ok
+                              (catch #?(:clj Throwable :cljs :default) e (ex-message e))))]
+    (is (= "symbol uses the reserved __kotoba_ prefix"
+           (try-it "(ns m.p)\n(defn main [] :i64 (let [__kotoba_x 1] __kotoba_x))")))
+    (is (= :ok (try-it "(ns m.p)\n(defn main [] :i64 (do '__kotoba_q 1))")))))

@@ -3830,6 +3830,8 @@
 (defn- reserved-binding-name? [value]
   (and (simple-symbol? value) (= "__kotoba_" (subs (str value) 0 (min 9 (count (str value)))))))
 
+(declare quote-form?)
+
 (defn- reject-reserved-source-symbols!
   "`__kotoba_` is the prefix every synthesized binding uses. Deterministic
   synthesized names are only safe if a program cannot write one: a user local
@@ -3842,8 +3844,23 @@
   prefix is reserved outright rather than only in binding position: a program
   that cannot mention the name cannot capture, shadow or read one."
   [forms]
-  (doseq [value (mapcat #(tree-seq coll? seq %) forms)]
-    (when (reserved-binding-name? value)
+  ;; A quoted symbol is DATA: it is never a binding, so it cannot capture or be
+  ;; captured, which is the whole reason the prefix is reserved. The same holds
+  ;; for a `case` TEST constant, which is compared and never evaluated. The
+  ;; compiler's own source writes synthetic names both ways, and refusing them
+  ;; made the compiler unable to check itself.
+  (letfn [(reserved-in [x]
+            (cond
+              (quote-form? x) nil
+              (reserved-binding-name? x) x
+              (and (seq? x) (= 'case (first x)) (seq (rest x)))
+              (let [tail (drop 2 x)
+                    results (map second (partition 2 tail))
+                    default (when (odd? (count tail)) [(last tail)])]
+                (first-truthy reserved-in (concat [(second x)] results default)))
+              (coll? x) (first-truthy reserved-in (seq x))
+              :else nil))]
+    (when-let [value (first-truthy reserved-in forms)]
       (reject! "symbol uses the reserved __kotoba_ prefix" value))))
 
 ;; ---------------------------------------------------------------------------
