@@ -88,3 +88,17 @@
 
 (deftest str-prints-a-loop-binding-that-started-as-an-integer
   (is (= "0,1,2," (kir-run "(defn main [] :string (loop [i 0 acc \"\"] (if (< i 3) (recur (inc i) (str acc i \",\")) acc)))"))))
+
+(deftest host-command-operations-need-no-result-context
+  ;; env/read, clock/now, cli/args, io/write, io/write-error, sys/cwd and io/read
+  ;; answer text by NAME, so an untyped `=` operand or a statement can make one.
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [f]})
+(defn f [x :string] :bool
+  (do (io/write x)
+      (io/write-error x)
+      (= \"1\" (env/read \"K\"))))")))
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [g]})
+(defn g [x :string] :string
+  (str (clock/now \"monotonic\") (cli/args \"\") (sys/cwd \"\") (io/read \"\")))"))))

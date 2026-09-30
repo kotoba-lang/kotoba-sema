@@ -228,7 +228,13 @@
   "Friendly operation -> its result type when the context gives none. Only
   operations whose result is fixed by their NAME are here (statement position
   and `try` bodies have no expected type to read it from)."
-  '{fs/app-data :string fs/app-data-bytes :bytes})
+  '{fs/app-data :string fs/app-data-bytes :bytes
+    ;; The host-command family is `:string -> :string` by catalog contract
+    ;; (text in, text out: a value, a decimal count, or an argument).
+    env/read :string clock/now :string cli/args :string io/write :string
+    io/write-error :string sys/cwd :string io/read :string
+    ;; Answers documented as text: "<exit>\n<stdout>" and lowercase hex.
+    process/spawn :string entropy/draw :string})
 
 (def capability-id->name
   "Inverse of capability-registry for diagnostics and effect ceilings. Two names
