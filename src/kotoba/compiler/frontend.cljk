@@ -2122,7 +2122,7 @@
   LIMIT is answered as LIMIT + 1, so a long name is never fully walked."
   [a b limit]
   (let [la (count a) lb (count b)]
-    (if (> (Math/abs (- la lb)) limit)
+    (if (> #?(:kotoba (if (< la lb) (- lb la) (- la lb)) :default (Math/abs (- la lb))) limit)
       (inc limit)
       (loop [i 1 previous (vec (range (inc lb)))]
         (if (> i la)
