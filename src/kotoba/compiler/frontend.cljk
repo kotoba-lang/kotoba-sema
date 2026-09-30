@@ -34,7 +34,7 @@
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
                                  :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
-                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]]]]
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
@@ -301,7 +301,7 @@
    (defn- fe-env [counter :i64 result [:ref :form/r] none :bool arities [:ref :form/r] tbl [:ref :form/r]] [:ref :fe/env]
      (record-new [:ref :fe/env] counter result none arities
                  (form/form-set (form/no-forms)) (form/nil-form) (form/form-set (form/no-forms)) -1 tbl
-                 (form/nil-form) false "" (form/nil-form)))
+                 (form/nil-form) false "" (form/nil-form) (form/nil-form)))
    :default nil)
 
 #?(:kotoba
@@ -803,7 +803,7 @@
 ;; arms land. A head outside this set and outside the ported arms is an ordinary call (`desugar-ordinary-call`).
 #?(:kotoba
    (defn- unported-heads [] [:ref :form/r]
-     (form/edn-form "#{fn fn-ref invoke apply eval lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop document loop dotimes doseq assert! retract! observe! facet-enter! facet-leave! match if-some when-some cap-call typed-cap-call char string-join reduce mapv filterv into map map-indexed filter remove}"))
+     (form/edn-form "#{fn fn-ref invoke apply eval lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop document loop dotimes doseq assert! retract! observe! facet-enter! facet-leave! match cap-call typed-cap-call char string-join reduce mapv filterv into map map-indexed filter remove}"))
    :default nil)
 
 #?(:kotoba
@@ -1191,6 +1191,8 @@
          (string=? name "cond->>") (desugar-cond-thread env form true)
          (string=? name "assert") (desugar-assert env form)
          (string=? name "case") (desugar-case env form)
+         (string=? name "if-some") (desugar-binding-some env form false)
+         (string=? name "when-some") (desugar-binding-some env form true)
          (string=? name "if-let") (desugar-binding-if env form false)
          (string=? name "when-let") (desugar-binding-if env form true)
          (string=? name "if-not") (desugar-if-not env form)
@@ -1959,6 +1961,50 @@
      (let [used (record-get [:ref :fe/env] env :used-caps)]
        (record-assoc [:ref :fe/env] env :used-caps
                      (if (form/is-set? used) (form/form-set (form/append-form (form/kids-of used) kw)) used))))
+   :default nil)
+
+;; ---- if-some / when-some ----
+;; `resolve-option-type`: the option type of a value form as far as sugar lowering can tell without inference
+;; (nil-form: a symbol with no recorded option type); [:option :i64] is the legacy fallback
+#?(:kotoba
+   (defn- option-descriptor? [t [:ref :form/r]] :bool
+     (and (form/is-vec? t) (kw-head? t "option")))
+   :default nil)
+
+#?(:kotoba
+   (defn- binding-some-then [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :fe/dr]
+     (if when?
+       (if (= 1 (- (form/count-of form) 2))
+         (dr env (form/nth-of form 2))
+         (desugar-do env form 2))
+       (dr env (form/nth-of form 2))))
+   :default nil)
+
+;; ---- quoted data: a symbol, a vector of symbols, or an atom that holds none (maps and sets print in pr-str order: unported) ----
+#?(:kotoba
+   (defn- holds-symbol-from? [kids [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count kids))
+       false
+       (or (holds-symbol? (typed-list-nth [:list [:ref :form/r]] kids i)) (holds-symbol-from? kids (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- all-symbols? [v [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of v))
+       true
+       (and (form/is-symbol? (form/nth-of v i)) (all-symbols? v (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- symbol-literal-forms [v [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of v))
+       acc
+       (symbol-literal-forms v (+ i 1) (form/append-form acc (form/call1 "symbol" (form/string-form (form/symbol-value (form/nth-of v i))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- symbol-type-list [n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (<= n 0) acc (symbol-type-list (- n 1) (form/append-form acc (form/keyword-form :symbol)))))
    :default nil)
 
 ;; ---- Kotoba-route string readings (host regexes, spelled as scans) --------
@@ -6015,6 +6061,28 @@
     (and (option-vector-type? a) (= b (second a))) a
     :else nil))
 
+#?(:kotoba
+   (defn- resolve-option-type [env [:ref :fe/env] v [:ref :form/r]] [:ref :form/r]
+     (let [fallback (form/vec2 (form/keyword-form :option) (form/keyword-form :i64))]
+       (cond
+         (and (simple-symbol-form? v) (form/is-map? (record-get [:ref :fe/env] env :options)))
+         (form/form-get (record-get [:ref :fe/env] env :options) v)
+         (and (form/is-seq? v) (> (form/count-of v) 0)
+              (or (head-is? v "option-some-of") (head-is? v "option-none-of") (head-is? v "option-some?-of")
+                  (head-is? v "option-value-of") (head-is? v "option-match"))
+              (option-descriptor? (form/nth-of v 1)))
+         (form/nth-of v 1)
+         (head-is? v "record-get")
+         (let [n (argc v)
+               ft (cond
+                    (and (= 3 n) (form/is-keyword? (arg v 2)))
+                    (record-field-type (arg v 0) (arg v 2) (env-schemas env))
+                    (and (= 2 n) (form/is-symbol? (arg v 0)) (form/is-keyword? (arg v 1)) (form/is-map? (env-types env)))
+                    (record-field-type (form/form-get (env-types env) (arg v 0)) (arg v 1) (env-schemas env))
+                    :else (form/nil-form))]
+           (if (option-descriptor? ft) ft fallback))
+         :else fallback)))
+   :default
 (defn- resolve-option-type
   "Best-effort option type for sugar lowering (Product Value ABI v1).
 
@@ -6058,8 +6126,19 @@
         field-type
         [:option :i64]))
 
-    :else [:option :i64]))
+    :else [:option :i64])))
 
+#?(:kotoba
+   (defn- option-payload-fallback [t [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/eq t (form/keyword-form :i64)) (form/int-form 0)
+       (form/eq t (form/keyword-form :bool)) (form/bool-form false)
+       (form/eq t (form/keyword-form :string)) (form/string-form "")
+       (form/eq t (form/keyword-form :keyword)) (form/keyword-form :none)
+       (form/eq t (form/keyword-form :f64)) (form/f64-form 0)
+       (form/eq t (form/keyword-form :f32)) (form/f64-form 0)
+       :else (form/int-form 0)))
+   :default
 (defn- option-payload-fallback
   "Typed bottom value for option-value-of's unused fallback arm.
   Must match payload type so typecheck accepts the if-some lowering."
@@ -6071,7 +6150,7 @@
     (= payload-type :keyword) :none
     (= payload-type :f64) 0.0
     (= payload-type :f32) 0.0
-    :else 0))
+    :else 0)))
 
 #?(:kotoba
    (defn- desugar-some-thread [env [:ref :fe/env] form [:ref :form/r] last? :bool] [:ref :fe/dr]
@@ -6151,6 +6230,37 @@
                    (list 'let [pattern (list '__kotoba_present tmp)] then-form)
                    else-form)))))))
 
+#?(:kotoba
+   (defn- desugar-binding-some [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :fe/dr]
+     (let [binding (arg form 0)
+           nb (- (form/count-of form) 2)
+           _ (require-k (and (form/is-vec? binding) (= 2 (form/count-of binding)))
+                        (if when? "when-some requires one binding pair" "if-some requires one binding pair")
+                        "kotoba.error/subset-reject" form)
+           _ (require-k (if when? (> nb 0) (and (<= 1 nb) (<= nb 2)))
+                        (if when? "when-some requires at least one body expression"
+                            "if-some requires then and optional else expressions")
+                        "kotoba.error/subset-reject" form)
+           pattern (form/nth-of binding 0)
+           value (form/nth-of binding 1)
+           t (synthetic env "binding-some")
+           tmp (dr-form t)
+           found (resolve-option-type (dr-env t) value)
+           option-type (if (form/is-nil? found) (form/vec2 (form/keyword-form :option) (form/keyword-form :i64)) found)
+           th (binding-some-then (dr-env t) form when?)
+           else-form (binding-if-else (dr-env th) form when?)
+           payload-type (if (option-descriptor? option-type) (form/nth-of option-type 1) (form/nil-form))
+           fallback (option-payload-fallback payload-type)
+           _ (require-k (option-descriptor? option-type)
+                        "if-some/when-some value must have an option type; use match-option with an explicit type or a typed local"
+                        "kotoba.error/subset-reject" form)]
+       (desugar-expr (dr-env th)
+                     (form/call2 "let" (form/vec2 tmp value)
+                                 (form/call3 "if" (form/call2 "option-some?-of" option-type tmp)
+                                             (form/call2 "let" (form/vec2 pattern (form/call3 "option-value-of" option-type tmp fallback))
+                                                         (dr-form th))
+                                             else-form)))))
+   :default
 (defn- desugar-binding-some [args form when?]
   (let [[binding & bodies] args]
     (when-not (and (vector? binding) (= 2 (count binding)))
@@ -6184,7 +6294,7 @@
              (list 'if (list 'option-some?-of option-type tmp)
                    (list 'let [pattern (list 'option-value-of option-type tmp fallback)]
                          then-form)
-                   else-form))))))
+                   else-form)))))))
 
 (defn- uniqueness-key
   "A stand-in for `v` that is safe to HASH on every runtime.
@@ -7992,8 +8102,16 @@
 (defn- quote-form? [form]
   (and (seq? form) (= 'quote (first form)) (= 2 (count form))))
 
+#?(:kotoba
+   (defn- holds-symbol? [datum [:ref :form/r]] :bool
+     (if (form/is-symbol? datum)
+       true
+       (if (or (form/is-seq? datum) (form/is-vec? datum) (form/is-set? datum) (form/is-map? datum))
+         (holds-symbol-from? (form/kids-of datum) 0)
+         false)))
+   :default
 (defn- holds-symbol? [datum]
-  (first-truthy symbol? (tree-seq coll? seq datum)))
+  (first-truthy symbol? (tree-seq coll? seq datum))))
 
 (defn- quoted-scalar-type
   "The value type of a scalar inside a quoted symbol-key map, or nil."
@@ -8082,6 +8200,21 @@
 
 (declare desugar-expr* desugar-ordinary-call)
 
+#?(:kotoba
+   (defn- desugar-quoted-datum [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [datum (form/nth-of form 1)]
+       (cond
+         (not (holds-symbol? datum))
+         (if (form/is-seq? datum)
+           (throw (fe-unported "quoted list refusal" form))
+           (desugar-expr* (with-result env (form/nil-form)) datum ctx))
+         (form/is-symbol? datum) (dr env (form/call1 "symbol" (form/string-form (form/symbol-value datum))))
+         (and (form/is-vec? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) 128) (all-symbols? datum 0))
+         (dr env (head-call (form/symbol-form "hetero-vector-new")
+                            (form/cons-onto (form/vec2 (form/keyword-form :vector) (form/form-vec (symbol-type-list (form/count-of datum) (form/no-forms))))
+                                            (symbol-literal-forms datum 0 (form/no-forms)))))
+         :else (throw (fe-unported "quoted symbol set, map or refusal" form)))))
+   :default
 (defn- desugar-quoted-datum
   "`(quote datum)` as an expression. Symbol data lowers to the same forms
   the unquoted `(symbol \"...\")` / typed constructors are; a quoted datum
@@ -8103,7 +8236,7 @@
                                          (sort-by (comp pr-str key) datum)))
           :symbol-vector (list* 'hetero-vector-new [:vector (vec (repeat (count datum) :symbol))]
                                 (map symbol-literal-form datum))
-          (reject-quoted-symbol-datum! form))))))
+          (reject-quoted-symbol-datum! form)))))))
 
 #?(:kotoba
    (defn- desugar-expr* [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
@@ -8118,7 +8251,7 @@
        (form/is-bool? form) (dr env form)
        (form/is-nil? form) (dr env (form/call0 "option-none"))
        (not (form/is-seq? form)) (dr env form)
-       (head-is? form "quote") (throw (fe-unported "quote" form))
+       (and (head-is? form "quote") (= 2 (form/count-of form))) (desugar-quoted-datum env form ctx)
        :else (desugar-call env form ctx)))
    :default
 (defn- desugar-expr* [form contextual-result-type]
