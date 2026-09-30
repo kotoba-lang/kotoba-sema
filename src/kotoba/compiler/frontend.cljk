@@ -4193,6 +4193,23 @@
   literal to a reader in another without either declaring a `defrecord`."
   "kotoba.map-literal")
 
+#?(:kotoba
+   (defn- keyword-text-body [k [:ref :form/r]] :string
+     ;; "ns/name" or "name": the keyword's printed form without the colon.
+     (let [txt (document-edn-print (document-keyword (form/keyword-value k)))]
+       (string-substring txt 1 (string-length txt))))
+   :default nil)
+
+#?(:kotoba
+   (defn- map-literal-record-field-segment [key [:ref :form/r]] :string
+     (let [body (keyword-text-body key)
+           slash (string-find-byte body 47 0)]
+       (if (< slash 0)
+         body
+         (string-concat (string-substring body 0 slash)
+                        (string-concat "."
+                                       (string-substring body (+ slash 1) (string-length body)))))))
+   :default
 (defn- map-literal-record-field-segment
   "One key of the literal, as a segment of the record id's name. A keyword
   name cannot carry `/`, so a namespaced key folds its namespace in with `.`:
@@ -4201,8 +4218,29 @@
   [key]
   (if (namespace key)
     (str (namespace key) "." (name key))
-    (name key)))
+    (name key))))
 
+#?(:kotoba
+   (defn- map-literal-record-segments [fields [:ref :form/r] i :i64 acc :string] :string
+     (if (>= i (form/count-of fields))
+       acc
+       (map-literal-record-segments
+        fields (+ i 1)
+        (string-concat (if (= i 0) acc (string-concat acc "+"))
+                       (map-literal-record-field-segment (form/nth-of (form/nth-of fields i) 0))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- map-literal-record-type [fields [:ref :form/r]] [:ref :form/r]
+     ;; Type descriptors are Form trees on this route (docs/selfhost-frontend-typemodel-design.md).
+     (form/form-vec
+      (form/three-forms
+       (form/keyword-form :record)
+       (form/keyword-form
+        (keyword-from-string
+         (string-concat "kotoba.map-literal/" (map-literal-record-segments fields 0 ""))))
+       fields)))
+   :default
 (defn- map-literal-record-type
   "The anonymous closed record type of a keyword-keyed literal, from its
   already-ordered fields: `[:record :kotoba.map-literal/a+b [[:a T] [:b U]]]`.
@@ -4213,7 +4251,7 @@
   [:record (keyword map-literal-record-namespace
                     (str/join "+" (map (comp map-literal-record-field-segment first)
                                        fields)))
-   fields])
+   fields]))
 
 (declare map-literal-lowered-type)
 
@@ -18272,11 +18310,41 @@
                                     [method-name (:types (get parts method-name))]))
                           methods)})))
 
+#?(:kotoba
+   (defn- record-descriptor-fields [parts [:ref :form/r] i :i64
+                                    acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of parts))
+       acc
+       (let [part (form/nth-of parts i)
+             field-name (form/form-get part (form/keyword-form :name))
+             field-type (form/form-get part (form/keyword-form :type))]
+         (record-descriptor-fields
+          parts (+ i 1)
+          (form/append-form
+           acc
+           (form/form-vec
+            (form/two-forms
+             (form/keyword-form (keyword-from-string (form/symbol-value field-name)))
+             field-type)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- record-descriptor [namespace-symbol [:ref :form/r] record-name [:ref :form/r]
+                             field-parts [:ref :form/r]] [:ref :form/r]
+     (form/form-vec
+      (form/three-forms
+       (form/keyword-form :record)
+       (form/keyword-form
+        (keyword-from-string
+         (string-concat (form/symbol-value namespace-symbol)
+                        (string-concat "/" (form/symbol-value record-name)))))
+       (form/form-vec (record-descriptor-fields field-parts 0 (form/no-forms))))))
+   :default
 (defn- record-descriptor [namespace-symbol record-name field-parts]
   [:record (keyword (str namespace-symbol) (name record-name))
    (mapv (fn [{field-name :name field-type :type}]
            [(keyword (name field-name)) field-type])
-         field-parts)])
+         field-parts)]))
 
 (defn- record-field-parts [fields form]
   (let [typed? (or (first-truthy keyword? fields)
