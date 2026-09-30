@@ -79,3 +79,12 @@
 (deftest str-prints-an-integer-part-as-decimal-digits
   (is (= "a-7-b" (let [v (kir-run "(defn main [] :string (str \"a-\" 7 \"-b\"))")] v)))
   (is (= "n=4" (kir-run "(defn main [] :string (let [n 3] (str \"n=\" (+ n 1))))"))))
+
+(deftest rem-truncates-and-mod-floors
+  (is (= [1 -1 1 -1] (mapv #(#?(:clj long :cljs js/Number) (kir-run (str "(defn main [] :i64 " % ")")))
+                           ["(rem 7 3)" "(rem -7 3)" "(rem 7 -3)" "(rem -7 -3)"])))
+  (is (= [1 2 -2 -1] (mapv #(#?(:clj long :cljs js/Number) (kir-run (str "(defn main [] :i64 " % ")")))
+                           ["(mod 7 3)" "(mod -7 3)" "(mod 7 -3)" "(mod -7 -3)"]))))
+
+(deftest str-prints-a-loop-binding-that-started-as-an-integer
+  (is (= "0,1,2," (kir-run "(defn main [] :string (loop [i 0 acc \"\"] (if (< i 3) (recur (inc i) (str acc i \",\")) acc)))"))))

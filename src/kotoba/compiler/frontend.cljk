@@ -3724,7 +3724,16 @@
   "Call heads whose value is an i64 wherever they are admitted, so `str` may
   print them without a declared type."
   '#{+ - * quot mod rem inc dec count string-length string-byte-length
-     bit-and bit-or bit-xor bit-shift-left bit-shift-right})
+     bit-and bit-or bit-xor bit-shift-left bit-shift-right
+     vector-count vector-at})
+
+(defn- str-integer-form?
+  "Is PART certainly an i64 without a type inference: an integer literal, a
+  parameter or `let` local known as :i64, or an arithmetic form."
+  [part]
+  (boolean (or (kotoba-integer? part)
+               (and (symbol? part) (= :i64 (get *local-types* part)))
+               (and (seq? part) (contains? str-integer-heads (first part))))))
 
 (defn- str-part
   "One `str` argument as a :string operand. Clojure's `str` prints an integer
@@ -3732,9 +3741,7 @@
   arithmetic form are wrapped in `string-from-i64`; everything else must
   already be a string and fails closed at type check as it always did."
   [part]
-  (if (or (kotoba-integer? part)
-          (and (symbol? part) (= :i64 (get *local-types* part)))
-          (and (seq? part) (contains? str-integer-heads (first part))))
+  (if (str-integer-form? part)
     (list string-from-i64-helper-name (desugar-expr part))
     (desugar-result-expr :string part)))
 
@@ -6975,9 +6982,15 @@
                                             *local-types* types]
                                     (destructure-binding pattern
                                                          (desugar-expr value)))
-                                  next-types (if document?
-                                               (assoc (or types {}) pattern :document)
-                                               types)
+                                  integer? (and (symbol? pattern)
+                                                (not document?)
+                                                (binding [*local-types* types]
+                                                  (str-integer-form? value)))
+                                  next-types (cond
+                                               document? (assoc (or types {}) pattern :document)
+                                               ;; so `str` can print it later
+                                               integer? (assoc (or types {}) pattern :i64)
+                                               :else types)
                                   next-env (into env (map first expanded))
                                   next-contracts
                                   (if (and (symbol? pattern) value-contract)
@@ -7061,7 +7074,15 @@
             (reject! "loop requires exactly one body expression (this profile has no `do`)" form))
           (let [loop-names (vec (take-nth 2 bindings))
                 loop-inits (mapv desugar-expr (take-nth 2 (rest bindings)))
-                desugared-body (binding [*abort-lexical-context* :loop]
+                ;; a binding whose init is certainly an i64 stays one across
+                ;; `recur`, so `str` may print it
+                integer-names (keep (fn [[name init]]
+                                      (when (str-integer-form? init) name))
+                                    (partition 2 bindings))
+                desugared-body (binding [*abort-lexical-context* :loop
+                                         *local-types* (reduce #(assoc %1 %2 :i64)
+                                                               (or *local-types* {})
+                                                               integer-names)]
                                  (desugar-expr (first body)))
                 captured (vec (sort-by str (form-free-symbols desugared-body (set loop-names))))
                 helper-name (symbol (str "__kotoba_loop_" (vswap! *loop-counter* inc)))
@@ -7793,6 +7814,24 @@
         (do (when-not (= 1 (count args))
               (reject! "dec requires one i64" form))
             (list '- (desugar-expr (first args)) 1))
+        ;; `rem` truncates toward zero, as `quot` does; `mod` floors, so its
+        ;; result takes the divisor's sign. Both evaluate each operand once.
+        rem
+        (do (when-not (= 2 (count args))
+              (reject! "rem requires two i64 operands" form))
+            (let [a (synthetic "rem_a") b (synthetic "rem_b")]
+              (list 'let [a (desugar-expr (first args)) b (desugar-expr (second args))]
+                    (list '- a (list '* (list 'quot a b) b)))))
+        mod
+        (do (when-not (= 2 (count args))
+              (reject! "mod requires two i64 operands" form))
+            (let [a (synthetic "mod_a") b (synthetic "mod_b") r (synthetic "mod_r")]
+              (list 'let [a (desugar-expr (first args)) b (desugar-expr (second args))
+                          r (list '- a (list '* (list 'quot a b) b))]
+                    (list 'if (list '= r 0) r
+                          (list 'if (list '< r 0)
+                                (list 'if (list '< b 0) r (list '+ r b))
+                                (list 'if (list '< b 0) (list '+ r b) r))))))
         ;; T4.5: bounded reduce over vector-i64 → zero-charge loop.
         ;; With an explicit init, admits arithmetic, inline, named, or stored
         ;; binary callbacks.  Without an init, the callback must provide the
