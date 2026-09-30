@@ -18,6 +18,7 @@
             ;; written in the language, specialization, state passing, refusals
             [kotoba.compiler.state-ability-test]
             [kotoba.compiler.arena-scope-test]
+            [kotoba.compiler.frontend-tables-test]
             [kotoba.compiler.text-slots-test]
             [kotoba.compiler.line-slots-test]
             [kotoba.compiler.range-slots-test]
@@ -208,6 +209,7 @@
              'kotoba.compiler.protocol-method-diagnostic-test
              'kotoba.compiler.call-arity-test
              'kotoba.compiler.arena-scope-test
+             'kotoba.compiler.frontend-tables-test
              'kotoba.compiler.text-slots-test
              'kotoba.compiler.line-slots-test
              'kotoba.compiler.range-slots-test

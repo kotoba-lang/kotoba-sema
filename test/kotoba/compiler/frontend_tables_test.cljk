@@ -1,0 +1,20 @@
+(ns kotoba.compiler.frontend-tables-test
+  "The frontend's quoted host data tables live in kotoba.compiler.frontend-tables
+  and the frontend re-exports them: on the host the values are the same objects,
+  and table-get / table-has? read them as `get` / `contains?` do."
+  (:require #?(:clj  [kotoba.test :refer [deftest is]]
+               :cljs [cljs.test :refer [deftest is] :include-macros true])
+            [kotoba.compiler.frontend :as frontend]
+            [kotoba.compiler.frontend-tables :as tables]))
+
+(deftest the-frontend-re-exports-the-tables-unchanged
+  (is (identical? tables/kernel-memory-operations frontend/kernel-memory-operations))
+  (is (identical? tables/kernel-privileged-operations frontend/kernel-privileged-operations))
+  (is (identical? tables/document-fixed-operations frontend/document-fixed-operations))
+  (is (identical? tables/arithmetic frontend/arithmetic)))
+
+(deftest the-readers-agree-with-get-and-contains
+  (is (tables/table-has? tables/arithmetic '+))
+  (is (not (tables/table-has? tables/arithmetic 'nope)))
+  (is (= 1 (tables/table-get tables/heap-operations 'pair-first)))
+  (is (= [0] (frontend/kernel-base-argument-positions 'not-a-kernel-op))))

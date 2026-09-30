@@ -14,6 +14,7 @@
             [kotoba.compiler.affine :as affine]
             [kotoba.artifact.core :as artifact]
             [kotoba.compiler.schema :as schema]
+            [kotoba.compiler.frontend-tables :as tables]
             [kotoba.hir :as hir]
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
@@ -98,94 +99,7 @@
            locking dosync ref volatile!}
         (load-catalog-forbidden)))
 
-;; The language-owned semantic catalog is vendored byte-for-byte from
-;; kotoba-lang/kotoba-lang. The compiler derives both semantic-name -> wire ID
-;; and friendly source-operation -> semantic-name maps from that one authority.
-;; CLJS cannot synchronously read classpath resources, so its closed fallback
-;; is checked against the resource by JVM tests.
-(def ^:private capability-registry-cljs-fallback
-  '{:identity/sign 1 :identity/verify 2 :hash/sha256 3 :http/post 4
-    :log/read 5 :log/append 6 :clock/now 7 :state/transact 8
-    :ui/commit 9 :ui/next-event 10 :llm/generate 11
-    :storage/transact 12 :http/get-stream 13 :object/get-stream 14
-    :object/put-block 15 :object/compare-and-set-ref 16
-    :http/accept 17 :http/reply 18
-    :fs/transact 19 :process/spawn 20 :secret/get 21
-    :git/run 22 :entropy/draw 23
-    :dataspace/transact 24
-    ;; Stream ingress (root ADR-2608150900): frames in and frames out are
-    ;; separate authorities -- hearing a stream is not permission to speak
-    ;; into it.
-    :stream/accept 25 :stream/send 26
-    :net/datagram 27 :link/frame 28 :can/frame 29
-    :code/eval 30
-    ;; Screen surface kit (kotoba-lang/screen, ADR-2609031100): observing a
-    ;; screen and acting on it are separate authorities -- seeing is not
-    ;; permission to press.
-    :screen/observe 31 :screen/act 32
-    ;; kbb ops-script surface (ADR-2607181900 readiness gate slice 3):
-    ;; compiler wire ids for the host capabilities kbb's bootstrap host
-    ;; already implements (runtime ids 258 env/read / 253 fs/browse in
-    ;; kotoba-core-contracts — distinct id space; the kbb host maps
-    ;; wire id -> runtime op).
-    :env/read 33 :fs/browse 34
-    ;; fs/browse-dir (runtime id 261, kotoba-core-contracts): directory
-    ;; listing WITH is-dir per entry. Compiler wire 36 — distinct from
-    ;; the runtime id; same effect family as fs/browse.
-    :fs/browse-dir 36
-    ;; fs/app-data (runtime id 202): sandboxed read/write on the
-    ;; granted path scope — wire id 35 for the native loader provider
-    ;; table (ADR-2609051100 slice 4).
-    :fs/app-data 35
-    ;; fs/app-data-bytes: the `:bytes` payload of the SAME wire, the same
-    ;; authority (both are effect :host/fs-app-data); the compiler reads and
-    ;; publishes binary files, which are not UTF-8.
-    :fs/app-data-bytes 35
-    ;; io/write (kotoba-lang a0408d81): the bytes a COMMAND writes to its
-    ;; standard output, `:string -> :string` answering the decimal byte
-    ;; count. Wire 37. Before it this compiler had no capability for stdout
-    ;; and none for argv, so a guest could compute an answer and had no way
-    ;; to say one.
-    :io/write 37
-    ;; cli/args (kotoba-lang): the arguments a COMMAND was invoked with,
-    ;; `:string -> :string` -- the empty request answers the count, a decimal
-    ;; answers that argument. Wire 38. With :io/write it is the pair a
-    ;; command cannot be built without: one to see what it was asked, one to
-    ;; answer.
-    :cli/args 38
-    ;; io/write-error (kotoba-lang): a command's DIAGNOSTIC output, wire 39.
-    ;; Its own capability and its own effect -- stdout is the answer, stderr
-    ;; is not, and one grant must not carry both.
-    :io/write-error 39
-    ;; sys/cwd (kotoba-lang 7483551c): where the process was started, wire 40.
-    ;; The empty request answers an absolute path. Its own capability and NOT
-    ;; a form of :env/read -- /bin/pwd -L validates $PWD against the real
-    ;; directory rather than trusting it, so a grant to read environment
-    ;; variables cannot answer this question.
-    :sys/cwd 40
-    ;; io/read (kotoba-lang #697): a command's STANDARD INPUT, wire 41. The
-    ;; empty request answers everything to EOF; a decimal request answers at
-    ;; most that many bytes not yet answered, the empty string at EOF. Its own
-    ;; capability -- not a form of :fs/app-data (no path, no scope) and not
-    ;; of :cli/args (argv is bounded and known at start; stdin is not).
-    ;; Measured 2026-09-16: head/tail/cut/tr/sort/uniq are invoked as a
-    ;; LATER pipeline segment 94-99% of the time in agent tool use, and a
-    ;; later segment reads standard input.
-    :io/read 41
-    ;; gpu/compute (kotoba-lang 26f1bb3, root ADR-2609182400 C): a compute
-    ;; dispatch on the host GPU, wire 42. One ASCII request line (INFO /
-    ;; ALLOC / MAP / WRITE / READ / PIPELINE / BEGIN / DISPATCH / SUBMIT /
-    ;; FREE), decimal or hex answer; the native loader brokers it to the
-    ;; supervisor's Vulkan mechanism. Its own capability -- not a form of
-    ;; :fs/app-data though MAP/PIPELINE name a path: the grant is "run compute
-    ;; and read back", and a file grant must not carry that.
-    :gpu/compute 42
-    ;; net/listen .. net/write (kotoba-lang, root ADR-2609261900 stage B):
-    ;; native TCP, wires 43..47, one authority per direction (as
-    ;; :stream/accept / :stream/send). `:string -> :string`; the kexe loader
-    ;; answers them as a broker -- its supervisor owns the sockets and the
-    ;; guest's sandbox is not widened.
-    :net/listen 43 :net/accept 44 :net/dial 45 :net/read 46 :net/write 47})
+#?(:kotoba nil :default (def ^:private capability-registry-cljs-fallback tables/capability-registry-cljs-fallback))
 
 (defn- load-capability-catalog []
   #?(:clj
@@ -224,17 +138,7 @@
   (into {} (map (fn [[name entry]] [(:source-operation entry) name]))
         (:capabilities capability-catalog)))
 
-(def named-operation-default-results
-  "Friendly operation -> its result type when the context gives none. Only
-  operations whose result is fixed by their NAME are here (statement position
-  and `try` bodies have no expected type to read it from)."
-  '{fs/app-data :string fs/app-data-bytes :bytes
-    ;; The host-command family is `:string -> :string` by catalog contract
-    ;; (text in, text out: a value, a decimal count, or an argument).
-    env/read :string clock/now :string cli/args :string io/write :string
-    io/write-error :string sys/cwd :string io/read :string
-    ;; Answers documented as text: "<exit>\n<stdout>" and lowercase hex.
-    process/spawn :string entropy/draw :string})
+#?(:kotoba nil :default (def named-operation-default-results tables/named-operation-default-results))
 
 (def capability-id->name
   "Inverse of capability-registry for diagnostics and effect ceilings. Two names
@@ -272,513 +176,26 @@
     [:error [:record :kotoba.dataspace/error
              [[:code :keyword] [:message :string]]]]]])
 
-(def arithmetic '#{+ - * quot bit-xor bit-and bit-or})
-(def i32-operations
-  '{i32-wrap 1 u32-wrap 1 i32-wrapping-add 2 i32-wrapping-mul 2 i32-xor 2
-    i32-shift-left 2 i32-shift-right 2 u32-shift-right 2 xorshift32 1})
-;; ADR-2607254600 D1/D2. `bit-and`/`bit-xor` were already 64-bit
-;; (`i64.and` 0x83 / `i64.xor` 0x85) while the only shifts were 32-bit, so a
-;; 64-bit lane rotation -- the body of Keccak-f[1600], and the natural shape of
-;; u256 limb arithmetic -- could not be written at all. Wasm has had
-;; `i64.shl`/`i64.shr_s`/`i64.shr_u` since the MVP; this was an unimplemented
-;; op, not a spec limit.
-;;
-;; The shift count is restricted to a literal in [0,63], mirroring the existing
-;; [0,31] rule for the i32 shifts. Wasm itself masks the count modulo the
-;; width, so a dynamic count would be safe to emit; the literal rule is a
-;; frontend admission choice that keeps the emitted shift auditable. A dynamic
-;; count (needed for EVM SHL/SHR, whose amount is a stack value) is a separate
-;; change with its own reasoning.
-;;
-;; Rotation is deliberately absent: with a literal count `n`, `64 - n` is also
-;; a literal, so `rotl(x, n)` is exactly
-;; `(bit-or (i64-shift-left x n) (u64-shift-right x (- 64 n)))`. Adding
-;; `i64.rotl`/`i64.rotr` as single instructions is a follow-up once these
-;; primitives are proven, not a prerequisite.
-(def i64-operations
-  '{bit-not 1 i64-shift-left 2 i64-shift-right 2 u64-shift-right 2 min 2 max 2})
-(def comparisons '#{= < > <= >=})
-(def heap-operations '{pair 2 pair-first 1 pair-second 1})
-;; kgraph-* (ADR-2607198300): all-integer EAVT datom store, the native
-;; (JVM/Node/browser-free) analog of kotoba-lang/kotoba's string/EDN-based
-;; kgraph-assert!/kgraph-query -- this backend has no addressable buffer for
-;; EDN text, so entity/attribute/value are caller-assigned integer ids.
-(def kgraph-operations '{kgraph-assert! 3 kgraph-get 2 kgraph-count 1 kgraph-entity-at 2})
-(def kernel-memory-operations
-  ;; memwidth: four transfer widths by four window tiers, plus the ADR 0285
-  ;; slice family. Was seven entries, and the seven said something nobody had
-  ;; decided: that `kernel-store-u8` could name a 4 KiB window and not a 16 KiB
-  ;; one, that the u32 pair could name neither, and that 16-bit and 64-bit
-  ;; accesses did not exist -- which is what a PCI vendor/device ID pair and a
-  ;; descriptor ring pointer respectively are.
-  ;;
-  ;; Every entry here is `base length index [value]`, so every one of them gets
-  ;; the SAME provenance treatment: `kernel-memory-op?` below reads this map,
-  ;; so a new width inherits the taint analysis on its first argument without
-  ;; anything else being written. That is the reason to widen a table rather
-  ;; than add a family beside it.
-  ;;
-  ;; The slice family differs from the window family in what its `length` and
-  ;; `index` COUNT -- elements rather than bytes -- and in its ceiling, which
-  ;; is an address-space bound rather than a window profile. Neither difference
-  ;; is visible in the arity or in the provenance rule, which is why they share
-  ;; this table.
-  '{
-    kernel-load-u8 3 kernel-store-u8 4
-    kernel-load-u8-4k 3 kernel-store-u8-4k 4
-    kernel-load-u8-16k 3 kernel-store-u8-16k 4
-    kernel-load-u8-64k 3 kernel-store-u8-64k 4
-    kernel-load-u16 3 kernel-store-u16 4
-    kernel-load-u16-4k 3 kernel-store-u16-4k 4
-    kernel-load-u16-16k 3 kernel-store-u16-16k 4
-    kernel-load-u16-64k 3 kernel-store-u16-64k 4
-    kernel-load-u32 3 kernel-store-u32 4
-    kernel-load-u32-4k 3 kernel-store-u32-4k 4
-    kernel-load-u32-16k 3 kernel-store-u32-16k 4
-    kernel-load-u32-64k 3 kernel-store-u32-64k 4
-    kernel-load-u64 3 kernel-store-u64 4
-    kernel-load-u64-4k 3 kernel-store-u64-4k 4
-    kernel-load-u64-16k 3 kernel-store-u64-16k 4
-    kernel-load-u64-64k 3 kernel-store-u64-64k 4
-    slice-load-u8 3 slice-store-u8 4
-    slice-load-u16 3 slice-store-u16 4
-    slice-load-u32 3 slice-store-u32 4
-    slice-load-u64 3 slice-store-u64 4
-    ;; The lock pair. `(kernel-try-lock-u32 base length index)` -> 1 if this
-    ;; call moved the u32 at `index` from 0 to 1, else 0;
-    ;; `(kernel-unlock-u32 base length index)` -> 1 if it moved that word from
-    ;; 1 back to 0, else 0. Both are single atomic read-modify-writes with
-    ;; release/acquire ordering, and both are bounds-checked exactly like the
-    ;; loads and stores above -- same `base length index` shape, same taint
-    ;; analysis on `base`, same four-byte tail requirement.
-    ;;
-    ;; A LOCK rather than a general compare-exchange, and that is the decision
-    ;; rather than an abbreviation of one. Measured 2026-08-20 across the five
-    ;; `aiueos` value-runtime objects that need this: all eleven call sites are
-    ;; the same binary try-lock at offset 0 -- acquire expecting 0, release
-    ;; expecting 1. There is no counter, no CAS retry loop over data, and no
-    ;; second lock word. Exposing the general operation would widen the surface
-    ;; to cover no observed use, and would cost twice:
-    ;;
-    ;;   x86-64   `lock cmpxchg` fixes the comparand and result in EAX. As a
-    ;;            named operation the backend saves and restores RAX around a
-    ;;            fixed sequence, the way `x86-quotient` already does for its
-    ;;            own RAX/RDX pair. As a general operator, EAX becomes a new
-    ;;            kind of constraint for the register allocator to carry.
-    ;;   aarch64  there is no CAS below ARMv8.1-LSE, so the portable form is an
-    ;;            LDAXR/STLXR pair whose store can fail spuriously and must be
-    ;;            retried. A try-lock may report failure, so that retry is a
-    ;;            bounded sequence inside one selection. A general CAS would
-    ;;            put the retry in the guest, as control flow across blocks.
-    ;;
-    ;; A lock is also the honest description of what the value runtime holds:
-    ;; the arena's design is one u32 lock word at offset 0 of an RW/NX page,
-    ;; with everything else mutated only while it is held. amu#625.
-    kernel-try-lock-u32 3 kernel-unlock-u32 3
-    ;; sysops: the general atomics (kotoba-gmir ADR 0007). Everything the long
-    ;; note above says about a LOCK stands -- and it is precisely why the
-    ;; general form is now here beside it rather than instead of it.
-    ;;
-    ;; That note recorded a measurement: across the five aiueos value-runtime
-    ;; objects, all eleven call sites were the same binary try-lock at offset
-    ;; zero, so a general compare-exchange would have widened the surface to
-    ;; cover no observed use. The measurement was right and it was about the
-    ;; value runtime. A NIC's descriptor ring is a different program, and it
-    ;; has exactly the uses that measurement did not find: a producer index the
-    ;; guest advances by its own delta, an ownership word it swaps for its own
-    ;; value, a doorbell claimed against its own comparand. Fixing the
-    ;; comparand and the replacement makes those inexpressible.
-    ;;
-    ;; The two costs the note names are paid where it said they would be, and
-    ;; in the backend rather than here: x86-64 saves and restores RAX around a
-    ;; fixed sequence (`kotoba.native.machine-ir`), and the AArch64 retry stays
-    ;; inside one selection rather than becoming guest control flow.
-    ;;
-    ;;   (kernel-atomic-add-u32 base length index delta)     -> the old word
-    ;;   (kernel-xchg-u32       base length index new)       -> the old word
-    ;;   (kernel-cmpxchg-u32    base length index want new)  -> the old word
-    ;;
-    ;; and the u64 spelling of each. All six answer with the word memory held
-    ;; BEFORE the operation, which is what the machine leaves in the
-    ;; destination register; a compare-exchange answering with a success flag
-    ;; would force the caller to re-read on failure, which is the race it
-    ;; exists to close.
-    ;;
-    ;; Bounds-checked exactly like the loads and stores -- same `base length
-    ;; index` prefix, same taint analysis on `base`, and a tail requirement of
-    ;; the operation's own width.
-    kernel-atomic-add-u32 4 kernel-atomic-add-u64 4
-    kernel-xchg-u32 4 kernel-xchg-u64 4
-    kernel-cmpxchg-u32 5 kernel-cmpxchg-u64 5
-    ;; (kernel-subregion base length offset sublen) -> base+offset, trapping
-    ;; unless offset+sublen fits inside length. Listed here so its first
-    ;; argument is checked as a base like every other kernel op's: a derived
-    ;; window is only as good as the window it was derived from.
-    kernel-subregion 4
-    ;; simd: the f32 dot product (kotoba-gmir ADR 0010).
-    ;;
-    ;;   (kernel-dot-f32 a-base a-length b-base b-length count) -> the sum
-    ;;
-    ;; The one entry in this table with TWO regions, and therefore the one
-    ;; whose provenance is not "argument 0". `kernel-base-positions` below
-    ;; carries that; it is a separate table rather than a widening of this
-    ;; one because arity and base positions are different facts, and folding
-    ;; them together would make every existing entry restate a fact it shares.
-    ;;
-    ;; The lengths count BYTES and the count counts ELEMENTS. The result is
-    ;; the binary32 pattern of the sum, sign-extended from bit 31 -- the
-    ;; canonical f32 word, so `(f32-from-bits (kernel-dot-f32 ...))` is total.
-    ;; It types as `:i64` like every other operation here, because the word it
-    ;; answers with IS an i64; the f32 reading of it is what `f32-from-bits`
-    ;; is for.
-    kernel-dot-f32 5
-    ;; dequant: the fused dequantize-and-dot family (kotoba-gmir ADR 0023).
-    ;;
-    ;;   (kernel-dequant-dot-q8-0 w-base w-length x-base x-length blocks)
-    ;;
-    ;; Same shape and same base positions as the f32 dot product, so the
-    ;; taint analysis needs nothing new. What differs is the last operand:
-    ;; it counts BLOCKS, because a quantized row is a vector of blocks whose
-    ;; byte stride and element stride are different numbers (34 bytes carry
-    ;; 32 elements in Q8_0). Both spans are derived from it downstream.
-    kernel-dequant-dot-q8-0 5
-    kernel-dequant-dot-q4-k 5
-    kernel-dequant-dot-q6-k 5
-    ;; PTQ1_0 (kotoba-gmir ADR 0031): 28 bytes carry 128 elements.
-    kernel-dequant-dot-ptq1-0 5})
+#?(:kotoba nil :default (def arithmetic tables/arithmetic))
+#?(:kotoba nil :default (def i32-operations tables/i32-operations))
+#?(:kotoba nil :default (def i64-operations tables/i64-operations))
+#?(:kotoba nil :default (def comparisons tables/comparisons))
+#?(:kotoba nil :default (def heap-operations tables/heap-operations))
+#?(:kotoba nil :default (def kgraph-operations tables/kgraph-operations))
+#?(:kotoba nil :default (def kernel-memory-operations tables/kernel-memory-operations))
 
-;; slice-value: the CARRIED form of the slice family (amu ADR 0285).
-;;
-;; These are deliberately NOT in `kernel-memory-operations`. That table is the
-;; machine layer: every entry there takes `base length index [value]` as three
-;; or four separate i64 words, and the provenance rule reads argument 0 of
-;; each. These eight take a `[:slice T]` VALUE instead, and are erased into
-;; that machine layer by `erase-slice-values` before anything downstream --
-;; type inference, `validate-expr`, the provenance check, HIR, KIR, both
-;; backends, the verifier -- ever runs. So the two families are the same
-;; operations written at two altitudes, and only the lower one has a lowering.
-;;
-;;   (slice-of-u8 base length)   -> [:slice :u8]    length counts ELEMENTS
-;;   (slice-length s)            -> :i64            elements, not bytes
-;;   (slice-get s index)         -> :i64            the element, zero-extended
-;;   (slice-set! s index value)  -> :i64            the value, per ADR 0049
-;;   (slice-sub s offset count)  -> [:slice T]      a CHECKED narrowing
-;;
-;; `slice-sub` lowers to `kernel-subregion`, which is why the narrowing is
-;; checked at runtime rather than trusted: the offset must lie inside the
-;; parent and the count inside the remainder, or the machine traps before it
-;; addresses anything. The element scale is applied here, in the erasure, so
-;; the narrowing arithmetic is in bytes exactly where `kernel-subregion`
-;; expects bytes and in elements everywhere a Kotoba author reads it.
-(def slice-value-operations
-  '{slice-of-u8 2 slice-of-u16 2 slice-of-u32 2 slice-of-u64 2
-    slice-length 1 slice-get 2 slice-set! 3 slice-sub 3})
+#?(:kotoba nil :default (def slice-value-operations tables/slice-value-operations))
 
-;; `slice-of-<width>` -> the element type it constructs. One map rather than a
-;; string suffix parse, so a new width is one entry in two tables and not a
-;; naming convention a reader has to reverse.
-(def ^:private slice-constructor-elements
-  '{slice-of-u8 :u8 slice-of-u16 :u16 slice-of-u32 :u32 slice-of-u64 :u64})
+#?(:kotoba nil :default (def ^:private slice-constructor-elements tables/slice-constructor-elements))
 
-;; simd: which ARGUMENT POSITIONS of a kernel memory operation name a region.
-;;
-;; This existed as the literal `(first args)` until an operation had two
-;; regions. Reading only argument 0 of `kernel-dot-f32` would leave the second
-;; base unchecked -- an untraceable pointer in a position the taint analysis
-;; never looked at, which is precisely the hole `traceable-base?` exists to
-;; close, reopened for one operation.
-;;
-;; Fixed by naming the positions per operation rather than by reshaping the
-;; operation to put both bases first: an operation's argument order should
-;; read the way a caller thinks (region, then that region's length), not the
-;; way a scanner finds convenient.
-(def kernel-base-positions
-  '{kernel-dot-f32 [0 2]
-    ;; dequant: the packed row at 0, the activations at 2.
-    kernel-dequant-dot-q8-0 [0 2]
-    kernel-dequant-dot-q4-k [0 2]
-    kernel-dequant-dot-q6-k [0 2]
-    kernel-dequant-dot-ptq1-0 [0 2]})
+#?(:kotoba nil :default (def kernel-base-positions tables/kernel-base-positions))
 
 (defn kernel-base-argument-positions
   "The argument positions of OP that name a region. Every operation in
   `kernel-memory-operations` has at least argument 0."
   [op]
   (get kernel-base-positions op [0]))
-;; `kernel-in-u8`/`kernel-in-u32` are the READ half of x86 port I/O, and take
-;; only the port -- `(kernel-in-u8 port)` -> the byte that port yields,
-;; zero-extended to i64. Their absence, next to a write half that had been
-;; here from the start, was not a small gap: PCI configuration space is
-;; addressed by WRITING 0xCF8 and then READING 0xCFC, so with port I/O that
-;; could only write, PCI enumeration -- and therefore every device driver --
-;; could not be expressed in Kotoba at all and had to stay in C.
-;;
-;; A port read is an effect in both directions: it observes device state that
-;; may differ on each read, and on many devices reading is itself a write
-;; (interrupt acknowledgement, FIFO pop). It is therefore listed here among
-;; the privileged operations, never treated as pure, and never oracled -- the
-;; same treatment `kernel-out-u8` already receives.
-;;
-;; `kernel-read-msr`/`kernel-write-msr` are the model-specific registers, the
-;; other half of x86's out-of-band CPU state. Unlike a port they are not a bus
-;; transaction, but they are privileged for the same reason control registers
-;; are: `rdmsr`/`wrmsr` fault outside ring 0, and what they name -- EFER's NX
-;; enable, the APIC base address, the SYSCALL entry point (STAR/LSTAR/FMASK) --
-;; is machine configuration, not a value.
-;;
-;; `(kernel-read-msr index)` -> the register's 64 bits, arity 1;
-;; `(kernel-write-msr index value)` -> writes them, arity 2, mirroring
-;; `kernel-out-*`. A read is never oracled: the value is whatever the CPU (or
-;; firmware, or a previous write from another core) put there, and a compile
-;; time answer would be an invention.
-;;
-;; The gap this closes is a duplication, not an absence: aiueos carries three
-;; independent `read_msr`/`write_msr` inline-asm pairs -- apic.c, paging.c and
-;; process.c -- because C had no other way to spell it. One primitive replaces
-;; all three, and is what lets the SYSCALL transport setup (STAR, LSTAR, EFER,
-;; FMASK) leave C at all.
-;;
-;; `kernel-cpuid-eax`/`-ebx`/`-ecx`/`-edx` are CPU FEATURE DETECTION, the
-;; question every one of the six `cpuid` sites in aiueos is actually asking:
-;; does this CPU support NX (paging.c), does it support SYSCALL (process.c),
-;; what does this virtio device advertise (pci.c). Each site queries a leaf,
-;; tests a bit, and DECIDES -- and the decision is exactly the part that
-;; belongs in Kotoba rather than in inline asm.
-;;
-;; `(kernel-cpuid-eax leaf subleaf)` -> the EAX the CPU returned for that
-;; (leaf, subleaf), zero-extended to i64; `-ebx`, `-ecx` and `-edx` the same
-;; for their own result register. Arity 2 for all four, because `cpuid` reads
-;; TWO inputs -- the leaf in `eax` and the subleaf in `ecx` -- and a leaf whose
-;; subleaf was whatever happened to be in `ecx` is a different query. Leaves
-;; that ignore the subleaf (0x80000001, the NX one) simply pass 0.
-;;
-;; FOUR primitives, each executing its own `cpuid`, is deliberate. One
-;; instruction writes all four of `eax`/`ebx`/`ecx`/`edx`, so a single
-;; primitive returning all of them would have to return a tuple -- a heap pair
-;; chain, in a language whose kernel profile is trying to avoid exactly that --
-;; or else be four primitives sharing hidden state between calls. Splitting it
-;; keeps each one a PURE FUNCTION OF ITS TWO INPUTS, which is what makes it
-;; safe to admit individually and safe to verify by arity alone. The cost is a
-;; repeated `cpuid`; feature detection runs a handful of times at boot, so it
-;; is not a cost that matters.
-;;
-;; Privileged, and never oracled, for the strongest form of the reason the MSR
-;; read is: a `cpuid` result is a property of the MACHINE, not of the program.
-;; A compile-time answer would not merely be an invention, it would be an
-;; invention that the kernel then branches on -- "this CPU has NX" decided by a
-;; compiler that has never seen the CPU.
-(def kernel-privileged-operations
-  '{kernel-boot-info 0 kernel-read-cr0 0 kernel-write-cr0 1
-    kernel-read-cr2 0 kernel-read-cr3 0 kernel-write-cr3 1 kernel-invlpg 1
-    kernel-read-cs 0 kernel-page-fault-handler-address 0
-    kernel-rt-timer-handler-address 0
-    kernel-page-fault-recovery-handler-address 0
-    kernel-configure-page-fault-recovery 2 kernel-load-idt 2
-    kernel-double-fault-handler-address 0
-    kernel-undefined-opcode-handler-address 0
-    kernel-configure-double-fault-ist 2 kernel-load-gdt-tss 2
-    kernel-probe-guard-write 0 kernel-probe-text-write 0 kernel-probe-nx-execute 0
-    kernel-probe-recoverable-guard-write 0 kernel-probe-double-fault 0
-    kernel-cli 0 kernel-sti 0 kernel-hlt 0 kernel-pause 0
-    kernel-out-u8 2 kernel-out-u32 2
-    kernel-in-u8 1 kernel-in-u32 1
-    kernel-read-msr 1 kernel-write-msr 2
-    kernel-cpuid-eax 2 kernel-cpuid-ebx 2 kernel-cpuid-ecx 2 kernel-cpuid-edx 2
-    ;; simdprep: `(kernel-xgetbv index)` -> the extended control register at
-    ;; that index, its EDX:EAX halves joined into one i64. Arity 1, because
-    ;; `xgetbv` reads exactly one input, the XCR index in ECX.
-    ;;
-    ;; The `cpuid` four cannot express an AVX2 guard on their own, and that is
-    ;; the gap this closes. Leaf 1 ECX bit 28 says the CPU implements AVX; XCR0
-    ;; bits 1 and 2 say the OPERATING SYSTEM has agreed to save and restore the
-    ;; SSE and YMM register state across a context switch. A kernel that reads
-    ;; only the first and uses YMM anyway does not fault -- it computes wrong
-    ;; answers intermittently and only under load, because its vector registers
-    ;; are not preserved. aiueos asks both questions today, in inline asm
-    ;; (`kernel/qwen35_infer.c`), for want of this operator.
-    ;;
-    ;; Privileged and never oracled, for a reason one step stronger than the
-    ;; `cpuid` four's. A `cpuid` result is a property of the MACHINE. XCR0 is a
-    ;; property of the machine AND of the kernel running on it AT THE MOMENT OF
-    ;; THE READ: it changes when that kernel enables the YMM state bit, so the
-    ;; same expression yields different values five instructions apart. There
-    ;; is no compile-time answer, and the one the caller branches on is
-    ;; "may I use AVX2".
-    ;;
-    ;; ORDERING, which no arity check can enforce: `xgetbv` raises #UD when
-    ;; CR4.OSXSAVE is clear, and leaf 1 ECX bit 27 is what reports that bit. A
-    ;; guard must test 27 BEFORE it reads XCR0, or feature detection faults in
-    ;; the middle of itself. See kotoba-native docs/avx2-guard-sequence.md.
-    kernel-xgetbv 1
-    ;; xsave: the WRITE half of the same feature check (kotoba-gmir ADR 0012,
-    ;; kotoba-kir ADR 0239). The paragraph above says a guard must test
-    ;; CR4.OSXSAVE before it reads XCR0; it does not say who SETS
-    ;; CR4.OSXSAVE, and until these three existed the answer was a C function.
-    ;;
-    ;; `(kernel-read-cr4)` and `(kernel-write-cr4 value)` take what
-    ;; `kernel-read-cr0` and `kernel-write-cr0` take, because a control
-    ;; register is one machine word read whole and written whole. CR4 is where
-    ;; the extended-state bits live: OSFXSR (9), OSXMMEXCPT (10), OSXSAVE (18).
-    ;;
-    ;; `(kernel-xsetbv index value)` takes what `kernel-write-msr` takes --
-    ;; index in ECX, value split across EDX:EAX -- because at the machine level
-    ;; it IS `wrmsr` with a different opcode. Arity 2 rather than 1: XCR0 is
-    ;; index 0, but the architecture reserves an index space, and an `xsetbv`
-    ;; whose index was whatever the previous expression left in ECX would write
-    ;; a register nobody named.
-    ;;
-    ;; There is NO `kernel-write-cr2`, and the absence is a decision: CR2 is
-    ;; written by the CPU when a page fault is taken, so a kernel that wrote it
-    ;; would be lying to its own handler about the faulting address.
-    ;;
-    ;; TWO THINGS NO ARITY CHECK CAN SEE, both faults rather than wrong
-    ;; answers. (1) A sequence: `xsetbv` needs CR4.OSXSAVE already set, so the
-    ;; order is `cpuid` leaf 1 ECX bit 26 (XSAVE) -> set CR4 bit 18 -> `xsetbv`
-    ;; -> `xgetbv`. (2) A value: `xsetbv` raises #GP for a bit XCR0 does not
-    ;; define, for bit 0 clear, and for bit 2 (YMM) without bit 1 (SSE) --
-    ;; and `(kernel-xsetbv 0 6)` and `(kernel-xsetbv 0 4)` have the same shape.
-    ;; Both live in kotoba-native docs/avx2-guard-sequence.md.
-    kernel-read-cr4 0 kernel-write-cr4 1
-    kernel-xsetbv 2
-    ;; boot: the UEFI firmware boundary (kotoba-kir ADR-0229, kotoba-gmir
-    ;; ADR-0008). A BOOTX64.EFI written in Kotoba needs to name four things
-    ;; this family could not.
-    ;;
-    ;; `(kernel-system-table)` -> the EFI_SYSTEM_TABLE* UEFI passed the image
-    ;; entry point. Zero-arity, and the twin of `kernel-boot-info`: the entry
-    ;; shim parks RCX at context+0x50 and RDX at +0x58, and the two operations
-    ;; read those two slots. Under the UEFI entry contract v2 that makes
-    ;; `kernel-boot-info` the ImageHandle -- the same instruction, a meaning
-    ;; the target profile fixes.
-    ;;
-    ;; `(kernel-load-ptr base byte-offset)` -> the 64-bit word there. UNCHECKED,
-    ;; unlike every `kernel-load-*` above, and that is the decision rather than
-    ;; an omission: the checked family takes a window LENGTH from the guest,
-    ;; and a guest has no length for EFI_SYSTEM_TABLE or for a protocol
-    ;; structure hanging off it. The firmware owns both. A declared length
-    ;; would be invented, and a bounds check against an invented length is
-    ;; worse than none because it reads as a guarantee. This reads the boundary
-    ;; the way `kernel-in-u8` reads a device; everything past the boundary uses
-    ;; the checked family.
-    ;;
-    ;; `(kernel-uefi-call2 base slot-offset a b)` -> the status returned by the
-    ;; Microsoft x64 function pointer at `[base+slot-offset]`, called with `a`
-    ;; and `b`. FOUR operands and exactly two UEFI arguments, because the
-    ;; register allocator hands a privileged operation the scratch tier and
-    ;; that tier is four registers wide. Two arguments is what a bootloader's
-    ;; first calls need -- the ConOut methods, ExitBootServices. GetMemoryMap's
-    ;; five and OpenProtocol's six need an argument channel that does not fit
-    ;; in registers at all, which is a separate decision, not a wider version
-    ;; of this one.
-    ;;
-    ;; `(kernel-jump-to address boot-info)` does not return. It enters a kernel
-    ;; with the SysV first argument set -- the handoff the UEFI loader
-    ;; hand-assembles today. Its declared result is i64 because every operation
-    ;; here has one; nothing ever reads it.
-    kernel-system-table 0 kernel-load-ptr 2
-    kernel-uefi-call2 4 kernel-jump-to 2
-    ;; boot-lit: the two wider firmware calls (kotoba-gmir ADR-0011). The
-    ;; paragraph above says GetMemoryMap's five and OpenProtocol's six "need an
-    ;; argument channel that does not fit in registers at all". That was wrong
-    ;; about WHICH registers: kotoba-mir now draws privileged operands from the
-    ;; scratch tier FOLLOWED BY the preserved tier, and the preserved tier is
-    ;; callee-saved under Microsoft x64 as well as under the internal ABI -- so
-    ;; an operand parked there survives the call it is an operand to.
-    ;;
-    ;;   (kernel-uefi-call4 base slot a b c d)      -> four UEFI arguments
-    ;;   (kernel-uefi-call6 base slot a b c d e f)  -> six
-    ;;
-    ;; Two heads rather than one six-argument head used for everything: a call
-    ;; site with four arguments would have to invent two, and "the callee
-    ;; ignores the extra words" is a fact about the CALLEE.
-    kernel-uefi-call4 6 kernel-uefi-call6 8
-    ;; boot-scratch: `(kernel-scratch-region)` -> the base of the writable
-    ;; area the image packager reserves inside the image's own `.data`
-    ;; (kotoba-gmir ADR-0013). Zero-arity, and an ADDRESS rather than a load.
-    ;;
-    ;; Every remaining UEFI boot service takes an OUT-POINTER --
-    ;; `AllocatePages(type, memtype, pages, &addr)`,
-    ;; `HandleProtocol(handle, &guid, &iface)`, `GetMemoryMap`'s five -- and
-    ;; until this existed a Kotoba UEFI application had no address it was
-    ;; allowed to write. The literal pool of the four heads below lives in
-    ;; `.text`, which the packager marks read+execute; `kernel-boot-info` and
-    ;; `kernel-system-table` answer with words the FIRMWARE handed over, not
-    ;; with the address of the context slot they were parked in.
-    ;;
-    ;; The LENGTH is not a second head. It is the window length the source
-    ;; already writes at every `kernel-load-*`/`kernel-store-*`, and
-    ;; `image-scratch-bytes` below is the ceiling this file enforces on one.
-    kernel-scratch-region 0
-    ;; fwstore: `(kernel-uefi-alloc-region base slot allocate-type
-    ;; memory-type page-count address-hint)` -> the base of the pages the
-    ;; firmware just allocated, or ZERO (kotoba-gmir ADR-0030).
-    ;;
-    ;; `kernel-scratch-region` above gave a UEFI image an OUT-POINTER, so
-    ;; `AllocatePages` became callable and its answer readable. It did not
-    ;; make the answer USABLE. The page is at an address the firmware chose,
-    ;; so it reaches the program through a load, and `traceable-base?` below
-    ;; refuses a base that came from one -- in the caller as well as the
-    ;; callee, because the taint propagates by fixpoint. A Kotoba UEFI
-    ;; application could allocate a page and could not write it.
-    ;;
-    ;; The rule is not widened to admit loaded words. That would delete it:
-    ;; the reason every bounded access means anything is that its base is an
-    ;; address some layer of this toolchain can account for. What is added
-    ;; instead is a new ROOT whose guarantor is the UEFI specification, beside
-    ;; the entry contract (`kernel-boot-info`) and the packager
-    ;; (`kernel-scratch-region`). The instruction that OBTAINS the address is
-    ;; the instruction that produces it, and the out-word the firmware writes
-    ;; through lives in the action's own outgoing frame -- the program never
-    ;; names it, so there is no way to hand this head an address it did not
-    ;; get from `AllocatePages`.
-    ;;
-    ;; THE PAGE COUNT MUST BE A LITERAL, and that is what makes the root worth
-    ;; having rather than merely convenient: `page-count * 4096` is the length
-    ;; the firmware allocated under all three allocate types, so this pass
-    ;; holds the region's SIZE the way it holds the scratch reservation's, and
-    ;; a window declared wider than it is refused here (see
-    ;; `alloc-region-bytes` and `:kotoba.error/kernel-alloc-region-window`).
-    kernel-uefi-alloc-region 6
-    ;; sysops: barriers, the timestamp counter and the GS-base swap
-    ;; (kotoba-gmir ADR 0007). All zero-arity, all returning a word.
-    ;;
-    ;; `(kernel-fence-store)` before a doorbell write and
-    ;; `(kernel-fence-load)` after a status read are the ordering half of a
-    ;; device driver: a descriptor written before a doorbell is rung only if
-    ;; something says so, and on x86 that something is `sfence`/`lfence`.
-    ;; `(kernel-fence-full)` is the two-way barrier.
-    ;;
-    ;; `(kernel-rdtsc)` and `(kernel-rdtscp)` answer with the 64-bit timestamp
-    ;; counter. `(kernel-swapgs)` exchanges GS.base with KERNEL_GS_BASE and
-    ;; answers 0 -- the one instruction a ring-0 entry path cannot express any
-    ;; other way.
-    ;;
-    ;; They are privileged rather than memory operations because none of them
-    ;; names a region: there is no base, no length and no index to bound, so
-    ;; the region-provenance rule below has nothing to say about them.
-    kernel-fence-load 0 kernel-fence-store 0 kernel-fence-full 0
-    kernel-rdtsc 0 kernel-rdtscp 0
-    kernel-swapgs 0
-    ;; isr: `(kernel-isr-entry-address vector)` -> the address of the
-    ;; toolchain-generated interrupt entry for that vector. An IDT gate
-    ;; descriptor carries that address split across three offset fields, so a
-    ;; kernel installing its own IDT cannot do it without naming an entry.
-    ;;
-    ;; Arity 1, and the one argument is the vector NUMBER. An entry is declared
-    ;; as `aiueos-isr-<vector>` (see `interrupt-entry-vector`), so the name and
-    ;; the number carry the same information and neither is derived from the
-    ;; other; taking the number is what lets this ride the privileged channel,
-    ;; whose operands are ordinary values. It need not be a literal here --
-    ;; the backend bounds it at run time and traps above the table.
-    ;;
-    ;; It is privileged and never oracled for the strongest form of the
-    ;; `cpuid` reason. A `cpuid` answer invented at compile time is a wrong
-    ;; branch; an address invented here is what the CPU jumps to on an
-    ;; interrupt, because the caller's next act is to write it into a gate.
-    ;; kotoba-kir refuses it outright, and it has no answer at all in the
-    ;; relocatable-object route, where the context is the object's own private
-    ;; 80 bytes.
-    kernel-isr-entry-address 1})
+#?(:kotoba nil :default (def kernel-privileged-operations tables/kernel-privileged-operations))
 
 ;; isr: an interrupt entry is a function whose NAME is its vector.
 ;;
@@ -813,58 +230,9 @@
       (let [vector (#?(:clj Long/parseLong :cljs js/parseInt)
                     (subs text (count interrupt-entry-prefix)))]
         (when (< vector interrupt-entry-vector-limit) vector)))))
-;; boot-lit: read-only literals (kotoba-gmir ADR-0011).
-;;
-;; Each takes ONE argument and that argument must be a STRING LITERAL, which is
-;; what makes this its own family rather than four more entries in the
-;; privileged map above. Every operation there takes i64 EXPRESSIONS; these
-;; take a piece of the source text, and the compiler places bytes for it in the
-;; image.
-;;
-;;   (ucs2 "AIUEOS")     -> address of UCS-2 code units, little endian, NUL
-;;                          terminated. What UEFI calls a `CHAR16 *`.
-;;   (guid "5B1B31A1-9562-11D2-8E3F-00A0C969723B")
-;;                       -> address of the 16-byte EFI_GUID. The first three
-;;                          fields are little-endian INTEGERS, which is why a
-;;                          hex decode of the canonical text is the wrong
-;;                          answer and why the shape is checked here.
-;;   (bytes-literal "48656c6c6f")        -> address of those five bytes
-;;   (bytes-literal-length "48656c6c6f") -> 5
-;;
-;; The last pair is two heads over the SAME literal text rather than one head
-;; returning a pair, because this language has no multi-value return and the
-;; value runtime's `pair` does not exist on a firmware target. Deriving both
-;; from one string is what keeps them together: there is no way to take the
-;; address of one literal and the length of another without writing two
-;; different strings, which a reader sees.
-;;
-;; All four are admitted target-independently here, exactly as
-;; `kernel-write-cr3` is. The target gate lives in amu, which is the only layer
-;; that sees a target keyword next to a module.
-(def rodata-literal-operations
-  '{ucs2 1 guid 1 bytes-literal 1 bytes-literal-length 1})
+#?(:kotoba nil :default (def rodata-literal-operations tables/rodata-literal-operations))
 
-;; boot-scratch: `(kernel-function-address f)` -> the address the layout pass
-;; gave `f` (kotoba-gmir ADR-0013). This is what `kernel-jump-to` has needed
-;; since it was admitted and never had: nothing produced the address of a
-;; Kotoba function.
-;;
-;; Its own family for the reason the four literal heads above are one: the
-;; argument is a piece of the SOURCE TEXT, not an expression. Every entry in
-;; `kernel-privileged-operations` takes i64 expressions and walks them; this
-;; takes a name, and walking it would report an unbound local for a program
-;; that is correct. `(kernel-function-address g)` where `g` is a parameter has
-;; no answer -- a function's address is decided by the layout pass, and a
-;; value that does not exist until the program runs has no label -- so it is
-;; refused at the source rather than lowered into something a backend has to
-;; refuse with a shape error.
-;;
-;; A different family from the literals rather than a fifth entry in it,
-;; because the two refusals differ in what they check: a literal's argument
-;; must DECODE under an encoding, and this one must NAME A FUNCTION THIS
-;; MODULE DEFINES. Nothing about a GUID's grammar bears on the second.
-(def image-symbol-operations
-  '{kernel-function-address 1})
+#?(:kotoba nil :default (def image-symbol-operations tables/image-symbol-operations))
 
 ;; boot-scratch: the reservation, in bytes.
 ;;
@@ -937,10 +305,7 @@
            :cljs (* alloc-region-page-bytes (js/Number pages)))))))
 
 
-(def rodata-literal-encodings
-  "Which `kotoba.gmir` encoding each head names. `bytes-literal-length` is
-  absent: it produces a count, not an address, and no pool entry."
-  '{ucs2 :utf-16le-nul guid :guid-mixed-endian bytes-literal :hex-bytes})
+#?(:kotoba nil :default (def rodata-literal-encodings tables/rodata-literal-encodings))
 
 (defn- hex-text? [text]
   (and (even? (count text))
@@ -985,335 +350,51 @@
          false)))
 ;; boot-lit: end
 
-(def list-operations '#{list cons first second rest empty?})
-(def predicate-operations '#{not zero? pos? neg?})
-;; ADR-2607150000: and/or/when mirror kotoba-lang/kotoba's already-proven
-;; desugar-and/desugar-or (runtime.clj) -- ported here rather than reinvented,
-;; closing the divergence ADR-2607141600/2607150000 identified between the
-;; two independently-evolved grammars. Keyword literals are now owned typed
-;; values and are never reduced to probabilistic i64 hashes. The legacy
-;; untagged pair-map lowering therefore fails closed when it encounters a
-;; keyword key until the bounded typed-map ABI is implemented.
-(def logical-operations '#{and or when})
-(def map-operations '#{get assoc})
-;; `contains?` and `dissoc` are declared admitted heads by the language
-;; authority (`lang/guest-grammar.edn`: "bounded set membership scan",
-;; "persistent bounded map filter") and had no implementation here at all --
-;; `(contains? m k)` reached validation as an unknown call and was refused
-;; with `operation has no admitted lowering`, which says nothing about maps.
-;; They are RESERVED as well as implemented: a `(defn contains? ...)` would
-;; otherwise be shadowed silently, because the rewrite dispatches on the head
-;; name before signatures are consulted.
-(def map-presence-operations '#{contains? dissoc})
-;; `conj` and `disj` are declared admitted heads by the language authority
-;; (`lang/guest-grammar.edn`: "pair prepend after duplicate removal", "bounded
-;; set removal") and, like `contains?` and `dissoc` before them, had no
-;; implementation here at all. Measured 2026-09-03 against sema `1587f57`:
-;; `(conj #{:a} :b)` and `(disj #{:a} :a)` reached validation as unknown calls
-;; and were refused with `operation has no admitted lowering`, which says
-;; nothing about sets, on every receiver -- while `typed-set-conj` and
-;; `typed-set-disj` sat next to them, fully lowered on all three backends.
-;; RESERVED as well as implemented, for the reason `contains?` is: the rewrite
-;; dispatches on the head name before signatures are consulted, so a
-;; `(defn conj ...)` would otherwise be shadowed silently.
-(def set-operations '#{conj disj})
-;; `count` is declared admitted by the language authority
-;; (`lang/guest-grammar.edn`: "bounded pair-chain walk"; `surface-status.edn`
-;; `:persistent-collection-semantics` lists it first among the operations it
-;; claims on three backends) and had no implementation here at all. Measured
-;; 2026-09-03 against sema `df383ba0`: `(count [7 8 9])`, `(count #{:a})`,
-;; `(count (typed-map-new [:map :i64 :i64]))` -- every receiver, every
-;; collection -- reached validation as an unknown call and was refused
-;; `operation has no admitted lowering`, the message for a head nothing
-;; rewrote, which says nothing about collections. `vector-count`,
-;; `vector-f64-count`, `hetero-vector-count`, `typed-set-count` and
-;; `typed-map-count` all sat next to it, already lowered, already returning
-;; `:i64`. Nothing was missing but the dispatch. It is the same defect
-;; `contains?`, `dissoc`, `conj` and `disj` had earlier the same day.
-;;
-;; RESERVED as well as implemented, for the reason `conj` is: the rewrite
-;; dispatches on the head name before signatures are consulted, so before this
-;; a `(defn count ...)` was ACCEPTED -- measured -- and its calls would have
-;; been rewritten out from under it silently.
-(def collection-count-operations '#{count})
-;; `peek`, `pop`, `keys` and `vals`. Declared admitted by
-;; `lang/guest-grammar.edn` `:sugar` on #{:compiler :kotoba-wasm :kotoba-cljs}
-;; and by `lang/surface-status.edn` `:persistent-collection-semantics`, and
-;; implemented by nothing until 2026-09-03: measured against sema `7d46f89e`,
-;; all four are refused `operation has no admitted lowering` at every arity
-;; and every receiver shape. On that day an agent corrected the AUTHORITY to
-;; stop claiming them, for a sound reason -- there was no rear-truncating
-;; vector operation and no map key/value projection, so `pop`, and therefore
-;; `(peek (pop v))`, could not be lowered from anything that existed. The
-;; owner's direction the same day was the other way: add the primitives. They
-;; are `vector-take`, `vector-f64-take`, `typed-list-nth`, `typed-map-keys`
-;; and `typed-map-vals` in kotoba-kir, and this is the head half.
-;;
-;; RESERVED as well as implemented, for the reason `count` and `conj` are: the
-;; rewrite dispatches on the head name before signatures are consulted, so a
-;; `(defn peek ...)` would otherwise be accepted and its calls rewritten out
-;; from under it silently. `seq` and `last` are NOT reserved -- no authority
-;; claims them, nothing implements them, and taking a name away without
-;; implementing it is a regression.
-(def vector-end-operations '#{peek pop})
-(def map-projection-operations '#{keys vals})
-(def typed-map-operations '#{map-new map-get map-assoc})
-(def typed-safe-value-operations
-  '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
-    result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2})
-(def parametric-result-operations
-  '{result-ok-of 2 result-err-of 2 result-ok?-of 2 result-value-of 3 result-error-of 3
-    result-match-of 6})
-(def variant-operations '#{variant-new variant-match})
-(def generic-option-operations
-  '#{option-some-of option-none-of option-some?-of option-value-of option-match})
-;; `typed-list-nth` lands here with the constructor that could not be indexed.
-;; `vector-at`, `vector-get` and `vector-drop` all require `:vector-i64` and
-;; refuse a `[:list T]` by type, so a list could be built and counted --
-;; `vector-count` walks the list carrier, measured 2026-09-03 -- and never
-;; read an element out of. It arrives with `keys`/`vals`, whose projection IS
-;; a `[:list T]`. There is deliberately no `typed-list-count`: `vector-count`
-;; already does that work.
-(def canonical-list-operations
-  '#{typed-list-new typed-list-nth typed-list-conj})
-;; `:bytes` is the language's byte string: a distinct type from `:vector-i64`
-;; (a CBOR byte string and an array of small ints are different values, and
-;; every checker here refuses one where the other is expected). The last three
-;; heads (2026-09-25, superproject adr-2609242330) are the ones that BUILD
-;; values: before them a program could hold bytes only if a host handed them
-;; over, and could never build a string from bytes at all.
-;;   (bytes-from-vector-i64 v)  -> bytes; every item in [0,255] or it traps
-;;                                 :bytes/item-out-of-range
-;;   (vector-i64-from-bytes b)  -> vector-i64
-;;   (string-from-utf8 b)       -> string; canonical UTF-8 only, every other
-;;                                 sequence traps by name (:utf8/*), never
-;;                                 replaced
-(def bytes-operations
-  '{bytes-empty 0 bytes-count 1 bytes-at 2 bytes-slice 3 bytes-concat 2
-    bytes-from-vector-i64 1 vector-i64-from-bytes 1 string-from-utf8 1})
-(def heterogeneous-vector-operations
-  '#{hetero-vector-new hetero-vector-count hetero-vector-at
-     hetero-vector-assoc hetero-vector-equal})
-(def typed-set-operations
-  '#{typed-set-new typed-set-count typed-set-contains typed-set-conj
-     typed-set-disj typed-set-equal typed-set-nth})
-(def canonical-typed-map-operations
-  '#{typed-map-new typed-map-count typed-map-contains typed-map-get
-     typed-map-entry-at typed-map-assoc typed-map-dissoc typed-map-equal
-     typed-map-keys typed-map-vals})
-(def record-operations '#{record-new record-get record-assoc record-equal})
-;; `vector-take` is `vector-drop`'s mirror -- drop keeps the tail after the
-;; first n, take keeps the head. There was no rear truncation at all before
-;; 2026-09-03, which is the whole reason Clojure's vector `pop` -- every item
-;; but the LAST -- could not be lowered from anything that existed.
-(def typed-vector-operations
-  '{vector-count 1 vector-get 3 vector-at 2 vector-drop 2 vector-take 2 vector-assoc 3 vector-assoc! 3 vector-conj 2 vector-alloc 1})
-(def ^:private contextual-string-argument-indexes
-  "Builtin argument positions whose declared type selects the closed string
-  closure dispatcher. This is elaboration context, not dynamic overloading."
-  '{string-byte-length #{0}
-    string=? #{0 1}
-    string-concat #{0 1}
-    string-substring #{0}
-    string-replace-all #{0 1 2}
-    string-contains? #{0 1}
-    string-split-count #{0 1}
-    string-index-of #{0 1}
-    string-compare #{0 1}
-    string-fold-ascii #{0}
-    string-find-blank #{0}
-    string-skip-blank #{0}
-    string-index-of-from #{0 1}
-    string-compare-lines #{0 2}
-    string-find-byte #{0}
-    string-append-range #{0 1}
-    string-fold-case #{0}
-    string-upper #{0}
-    string-code-point-at #{0}
-    keyword-from-string #{0}
-    symbol #{0}
-    string-index-contains #{1}
-    string-index-get #{1}
-    string-index-assoc #{1}
-    document-string #{0}
-    document-read #{0}
-    document-edn-read #{0}
-    xml-path-count #{0 1}
-    xml-name-count #{0 1}
-    xml-name-text #{0 1}
-    xml-path-text #{0 1}
-    xml-path-attr #{0 1 3}
-    decimal-f64-parse #{0}
-    decimal-f64x3-parse #{0}})
-(def ^:private contextual-document-argument-indexes
-  "Builtin argument positions whose declared type selects the closed document
-  closure dispatcher. Ambiguous map keys remain uncontextualized."
-  '{document-count #{0}
-    document-kind #{0}
-    document-sha256 #{0}
-    document-print #{0}
-    document-edn-print #{0}
-    document-vector-at #{0}
-    document-list-at #{0}
-    document-map-entry-at #{0}
-    document-vector-assoc #{0 2}
-    document-vector-conj #{0 1}
-    document-vector-drop #{0}
-    document-vector-remove #{0}
-    document-vector-sort #{0}
-    document-equal? #{0 1}
-    document-set-contains? #{0 1}
-    document-contains #{0}
-    document-get #{0}
-    document-assoc #{0 2}
-    document-dissoc #{0}
-    document-merge #{0 1}
-    document-string-value #{0}
-    document-keyword-value #{0}
-    document-symbol-value #{0}
-    document-bool-value #{0}
-    document-i64-value #{0}
-    document-f64-value #{0}})
-(def ^:private contextual-f64-argument-indexes
-  "Builtin positions whose operands are f64 values. Conversion constructors
-  whose input is i64 are deliberately absent."
-  '{f64-to-bits #{0}
-    f64-to-i64-checked #{0} f64-to-i64-truncating #{0}
-    f64-add #{0 1} f64-sub #{0 1} f64-mul #{0 1} f64-div #{0 1}
-    f64-min #{0 1} f64-max #{0 1}
-    f64-neg #{0} f64-abs #{0} f64-sqrt #{0}
-    f64-sin-quarter-turn #{0} f64-cos-quarter-turn #{0}
-    f64-sin-bounded #{0} f64-cos-bounded #{0}
-    f64-exp-near-zero #{0} f64-log-near-one #{0}
-    f64-atan2-bounded #{0 1} f64-exp-bounded #{0} f64-log-bounded #{0}
-    f64-eq #{0 1} f64-lt #{0 1} f64-le #{0 1}
-    f64-gt #{0 1} f64-ge #{0 1} f64-unordered #{0 1}
-    f64-to-f32-rounded #{0}})
-(def ^:private contextual-f32-argument-indexes
-  "Builtin positions whose operands are f32 values."
-  '{f32-to-bits #{0} f32-to-f64-exact #{0}
-    f32-to-i64-checked #{0} f32-to-i64-truncating #{0}
-    f32-add #{0 1} f32-sub #{0 1} f32-mul #{0 1} f32-div #{0 1}
-    f32-min #{0 1} f32-max #{0 1}
-    f32-neg #{0} f32-abs #{0} f32-sqrt #{0}
-    f32-eq #{0 1} f32-lt #{0 1} f32-le #{0 1}
-    f32-gt #{0 1} f32-ge #{0 1} f32-unordered #{0 1}})
-(def ^:private contextual-vector-f64-argument-types
-  "Typed vector operands and f64 item/fallback positions."
-  '{vector-f64-count {0 :vector-f64}
-    vector-f64-get {0 :vector-f64 2 :f64}
-    vector-f64-at {0 :vector-f64}
-    vector-f64-drop {0 :vector-f64}
-    vector-f64-take {0 :vector-f64}
-    vector-f64-assoc {0 :vector-f64 2 :f64}
-    vector-f64-conj {0 :vector-f64 1 :f64}})
-(def typed-f64-vector-operations
-  '{vector-f64-count 1 vector-f64-get 3 vector-f64-at 2 vector-f64-drop 2
-    vector-f64-take 2 vector-f64-assoc 3 vector-f64-conj 2})
-(def compact-graph-operations
-  '{string-index-new 0 string-index-count 1 string-index-contains 2
-    string-index-get 2 string-index-assoc 3
-    disjoint-set-i64-new 1 disjoint-set-i64-count 1 disjoint-set-i64-union 3})
-(def document-fixed-operations
-  '{document-null 0 document-bool 1 document-i64 1 document-f64 1
-    document-string 1 document-keyword 1 document-symbol 1 document-count 1 document-kind 1 document-sha256 1 document-print 1 document-read 1
-    document-edn-print 1 document-edn-read 1
-    document-vector-at 2 document-list-at 2 document-map-entry-at 2 document-vector-assoc 3 document-vector-conj 2
-    document-vector-drop 2 document-vector-remove 2 document-vector-sort 1
-    document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2
-    document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1
-    document-i64-value 1 document-f64-value 1})
-(def document-variadic-operations '#{document-vector document-list document-set document-map})
-(def sequencing-operations '#{do})
-;; `(arena-scope body)` -- superproject ADR-2609160044, context ABI v6. On
-;; native every handle and byte allocated while BODY runs is released
-;; afterwards; the reference interpreter answers the body's value. The
-;; body's type is held to :i64 / :bool / :f64 in `infer-call-type-impl`,
-;; which is what makes the release safe: no handle can be the result.
-(def region-operations '{arena-scope 1})
-(def lazy-sequence-operations
-  '#{lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop})
-(def string-operations '{string-byte-length 1 string-length 1 string-from-i64 1
-                         bytes-task-byte-count 1 task-ready? 1
-                         object-cas-won 1
-                         bytes-response-byte-count 1 bool-result 1
-                         http-response-status 1 log-read-byte-count 1
-                         string=? 2 string-concat 2 string-substring 3
-                         string-replace-all 3 string-contains? 2 string-split-count 2
-                         string-index-of 2
-                         ;; ABI v7 text heads (2026-09-16): byte order, an
-                         ;; ASCII-only fold, and the blank scan pair.
-                         string-compare 2 string-fold-ascii 1
-                         string-find-blank 2 string-skip-blank 2
-                         ;; ABI v8 line heads (2026-09-16): an absolute search
-                         ;; from an offset, and byte order of two lines named
-                         ;; by their start offsets.
-                         string-index-of-from 3 string-compare-lines 4
-                         ;; ABI v10 range heads (2026-09-16): no view taken,
-                         ;; none minted.
-                         string-find-byte 3 string-append-range 4
-                         string-fold-case 1 string-upper 1
-                         string-code-point-at 2
-                         keyword-from-string 1 keyword-name 1 symbol 1})
-(def xml-operations
-  '{xml-path-count 2 xml-name-count 2 xml-name-text 3 xml-path-text 3 xml-path-attr 4})
-(def decimal-operations '{decimal-f64-parse 1 decimal-f64x3-parse 1})
-(def f64-operations
-  '{f64-to-bits 1 f64-from-bits 1
-    f64-add 2 f64-sub 2 f64-mul 2 f64-div 2 f64-min 2 f64-max 2
-    f64-neg 1 f64-abs 1 f64-sqrt 1
-    f64-sin-quarter-turn 1 f64-cos-quarter-turn 1
-    f64-sin-bounded 1 f64-cos-bounded 1
-    f64-exp-near-zero 1 f64-log-near-one 1 f64-atan2-bounded 2
-    f64-exp-bounded 1 f64-log-bounded 1
-    f64-eq 2 f64-lt 2 f64-le 2 f64-gt 2 f64-ge 2 f64-unordered 2
-    i64-to-f64-checked 1 i64-to-f64-rounded 1
-    f64-to-i64-checked 1 f64-to-i64-truncating 1})
+#?(:kotoba nil :default (def list-operations tables/list-operations))
+#?(:kotoba nil :default (def predicate-operations tables/predicate-operations))
+#?(:kotoba nil :default (def logical-operations tables/logical-operations))
+#?(:kotoba nil :default (def map-operations tables/map-operations))
+#?(:kotoba nil :default (def map-presence-operations tables/map-presence-operations))
+#?(:kotoba nil :default (def set-operations tables/set-operations))
+#?(:kotoba nil :default (def collection-count-operations tables/collection-count-operations))
+#?(:kotoba nil :default (def vector-end-operations tables/vector-end-operations))
+#?(:kotoba nil :default (def map-projection-operations tables/map-projection-operations))
+#?(:kotoba nil :default (def typed-map-operations tables/typed-map-operations))
+#?(:kotoba nil :default (def typed-safe-value-operations tables/typed-safe-value-operations))
+#?(:kotoba nil :default (def parametric-result-operations tables/parametric-result-operations))
+#?(:kotoba nil :default (def variant-operations tables/variant-operations))
+#?(:kotoba nil :default (def generic-option-operations tables/generic-option-operations))
+#?(:kotoba nil :default (def canonical-list-operations tables/canonical-list-operations))
+#?(:kotoba nil :default (def bytes-operations tables/bytes-operations))
+#?(:kotoba nil :default (def heterogeneous-vector-operations tables/heterogeneous-vector-operations))
+#?(:kotoba nil :default (def typed-set-operations tables/typed-set-operations))
+#?(:kotoba nil :default (def canonical-typed-map-operations tables/canonical-typed-map-operations))
+#?(:kotoba nil :default (def record-operations tables/record-operations))
+#?(:kotoba nil :default (def typed-vector-operations tables/typed-vector-operations))
+#?(:kotoba nil :default (def ^:private contextual-string-argument-indexes tables/contextual-string-argument-indexes))
+#?(:kotoba nil :default (def ^:private contextual-document-argument-indexes tables/contextual-document-argument-indexes))
+#?(:kotoba nil :default (def ^:private contextual-f64-argument-indexes tables/contextual-f64-argument-indexes))
+#?(:kotoba nil :default (def ^:private contextual-f32-argument-indexes tables/contextual-f32-argument-indexes))
+#?(:kotoba nil :default (def ^:private contextual-vector-f64-argument-types tables/contextual-vector-f64-argument-types))
+#?(:kotoba nil :default (def typed-f64-vector-operations tables/typed-f64-vector-operations))
+#?(:kotoba nil :default (def compact-graph-operations tables/compact-graph-operations))
+#?(:kotoba nil :default (def document-fixed-operations tables/document-fixed-operations))
+#?(:kotoba nil :default (def document-variadic-operations tables/document-variadic-operations))
+#?(:kotoba nil :default (def sequencing-operations tables/sequencing-operations))
+#?(:kotoba nil :default (def region-operations tables/region-operations))
+#?(:kotoba nil :default (def lazy-sequence-operations tables/lazy-sequence-operations))
+#?(:kotoba nil :default (def string-operations tables/string-operations))
+#?(:kotoba nil :default (def xml-operations tables/xml-operations))
+#?(:kotoba nil :default (def decimal-operations tables/decimal-operations))
+#?(:kotoba nil :default (def f64-operations tables/f64-operations))
 
-(def f32-operations
-  '{f32-to-bits 1 f32-from-bits 1
-    f64-to-f32-rounded 1 f32-to-f64-exact 1
-    i64-to-f32-checked 1 i64-to-f32-rounded 1
-    f32-to-i64-checked 1 f32-to-i64-truncating 1
-    f32-add 2 f32-sub 2 f32-mul 2 f32-div 2 f32-min 2 f32-max 2
-    f32-neg 1 f32-abs 1 f32-sqrt 1
-    f32-eq 2 f32-lt 2 f32-le 2 f32-gt 2 f32-ge 2 f32-unordered 2})
+#?(:kotoba nil :default (def f32-operations tables/f32-operations))
 
-;; Type-directed name resolution for the plain numeric operators (2026-09-02).
-;; `+ - * / < <= > >= =` are one spelling each; the operand types choose the
-;; typed operation the way Unison resolves `+` to `Nat.+` or `Float.+`:
-;; i64 operands stay the i64 forms KIR already executes, f64 operands lower to
-;; `f64-add`/`f64-lt`/..., f32 operands to the `f32-*` family. Only the plain
-;; spelling is overloaded -- `f64-add` and friends remain valid so a typed or
-;; ABI boundary can still name its operation exactly.
-;;
-;; There is NO implicit conversion. An i64 next to an f64, or an f32 next to
-;; an f64, is a rejection that names both types and the explicit conversion
-;; operations the author has to choose between, because widening and
-;; narrowing each have two spellings (`-checked` vs `-rounded`/`-truncating`)
-;; and choosing one silently would decide overflow and rounding behaviour
-;; the source never wrote. `quot` and the bit operations are integer-only and
-;; are not overloaded; `/` has no i64 reading at all (integer division is
-;; `quot`), so it resolves only through a float operand type.
-(def ^:private type-directed-numeric-heads '#{+ - * / < <= > >= =})
-(def ^:private float-division-heads '#{/})
-(def ^:private float-arithmetic-resolution
-  "Plain operator -> typed operation, per float operand type."
-  {:f64 '{+ f64-add - f64-sub * f64-mul / f64-div
-          < f64-lt <= f64-le > f64-gt >= f64-ge = f64-eq}
-   :f32 '{+ f32-add - f32-sub * f32-mul / f32-div
-          < f32-lt <= f32-le > f32-gt >= f32-ge = f32-eq}})
-(def ^:private float-negation-resolution '{:f64 f64-neg :f32 f32-neg})
-(def ^:private explicit-numeric-conversions
-  "[from to] -> the explicit conversion operations that take FROM to TO. Read
-  from `f64-operations`/`f32-operations`; the message that names them is
-  pinned by test, so a rename there must be a rename here."
-  {[:i64 :f64] '[i64-to-f64-checked i64-to-f64-rounded]
-   [:f64 :i64] '[f64-to-i64-checked f64-to-i64-truncating]
-   [:i64 :f32] '[i64-to-f32-checked i64-to-f32-rounded]
-   [:f32 :i64] '[f32-to-i64-checked f32-to-i64-truncating]
-   [:f32 :f64] '[f32-to-f64-exact]
-   [:f64 :f32] '[f64-to-f32-rounded]})
+#?(:kotoba nil :default (def ^:private type-directed-numeric-heads tables/type-directed-numeric-heads))
+#?(:kotoba nil :default (def ^:private float-division-heads tables/float-division-heads))
+#?(:kotoba nil :default (def ^:private float-arithmetic-resolution tables/float-arithmetic-resolution))
+#?(:kotoba nil :default (def ^:private float-negation-resolution tables/float-negation-resolution))
+#?(:kotoba nil :default (def ^:private explicit-numeric-conversions tables/explicit-numeric-conversions))
 (def reserved-function-names
   (set/union forbidden-heads arithmetic comparisons float-division-heads
              (set (keys heap-operations))
@@ -2183,25 +1264,7 @@
              symbol :kotoba.error/unbound-symbol
              {:kotoba.error/symbol symbol :kotoba.error/nearest nearest})))
 
-(def definition-heads
-  "The closed set of heads `analyze*` dispatches a TOP-LEVEL form on.
-
-  Its only job is to be the spellable vocabulary for `definition-failure!`,
-  the way `reserved-function-names` is for `internal-failure!`. The rule that
-  set enforces -- nothing a user chose may ride out in a `:kotoba.error/code`
-  -- holds here for a stronger reason than membership: a form reaches the
-  definition layer only because `analyze*` MATCHED its head against one of
-  these literals, so the value passed to the guard cannot be anything else.
-
-  Saying it separately is what makes that true. `def`, `defrecord`,
-  `defprotocol`, `definterface`, `extend-type`, `extend-protocol`,
-  `defdesugar`, `defmulti` and `defmethod` are NOT in
-  `reserved-function-names` -- a program is not forbidden to name a function
-  `def` -- so widening `internal-failure!`'s vocabulary to cover them would
-  have let a user-chosen function name reach the envelope from the expression
-  chokepoints. Two vocabularies, two call sites, no overlap."
-  '#{ns def defn defn- defrecord defprotocol definterface
-     extend-type extend-protocol defdesugar defmulti defmethod})
+#?(:kotoba nil :default (def definition-heads tables/definition-heads))
 
 (defn internal-failure!
   "Re-raise a HOST error that escaped a compiler pass, naming what it escaped
@@ -2378,16 +1441,7 @@
            form :kotoba.error/call-arity
            {:function op :expected expected :supplied supplied}))
 
-(def pure-product-disallowed-heads
-  "Control / ambient heads rejected under `:language-profile :pure-product`
-  even when the general subset might admit them (see pure-product-profile.edn)."
-  '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!
-     doseq dotimes defmulti defmethod throw try catch
-     future pmap agent send send-off
-     ;; local-state slice 1 left forbidden-heads on 2026-09-02; naming the
-     ;; heads here keeps the pure-product surface exactly what it was.
-     atom swap! reset! deref
-     condp cond-> cond->> some-> some->> as-> -> ->>})
+#?(:kotoba nil :default (def pure-product-disallowed-heads tables/pure-product-disallowed-heads))
 
 (defn- pure-product-form-head [form]
   (when (and (seq? form) (symbol? (first form)))
@@ -3047,7 +2101,7 @@
              (dispatcher-key result-type arity parameter-types)))
    (invoke-dispatcher-name result-type arity parameter-types)))
 
-(def ^:private non-shadowable-special-heads '#{let if do fn loop recur})
+#?(:kotoba nil :default (def ^:private non-shadowable-special-heads tables/non-shadowable-special-heads))
 
 (defn- lexical-call-form? [form]
   (and (seq? form)
@@ -3726,12 +2780,7 @@
 
 (declare ^:private string-from-i64-helper-name)
 
-(def ^:private str-integer-heads
-  "Call heads whose value is an i64 wherever they are admitted, so `str` may
-  print them without a declared type."
-  '#{+ - * quot mod rem inc dec count string-length string-byte-length
-     bit-and bit-or bit-xor bit-shift-left bit-shift-right
-     vector-count vector-at})
+#?(:kotoba nil :default (def ^:private str-integer-heads tables/str-integer-heads))
 
 (defn- str-integer-form?
   "Is PART certainly an i64 without a type inference: an integer literal, a
@@ -3990,26 +3039,9 @@
          (option-some-of [:option :i64] (result-value-of [:result :i64 :keyword] r 0))
          (option-none-of [:option :i64]))))")
 
-(def ^:private intrinsic-helper-heads
-  "Surface head -> [helper it calls, every helper definition it needs, in
-  source order]."
-  '{subvec [__kotoba_intrinsic_subvec [__kotoba_intrinsic_subvec]]
-    string-to-utf8 [__kotoba_intrinsic_string_to_utf8 [__kotoba_intrinsic_string_to_utf8]]
-    ;; not a surface head: the arity-2 half of `subvec`, recorded by the
-    ;; renaming so its one helper is appended.
-    subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]]
-    ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]]
-    ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]]
-    ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]]
-    string-parse-i64 [__kotoba_intrinsic_parse_i64 [__kotoba_intrinsic_parse_i64]]
-    parse-long [__kotoba_intrinsic_parse_long
-                [__kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]]})
+#?(:kotoba nil :default (def ^:private intrinsic-helper-heads tables/intrinsic-helper-heads))
 
-(def ^:private intrinsic-helper-order
-  '[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from
-    __kotoba_intrinsic_string_to_utf8
-    __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data
-    __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long])
+#?(:kotoba nil :default (def ^:private intrinsic-helper-order tables/intrinsic-helper-order))
 
 (def ^:private intrinsic-helper-forms
   (delay (into {} (map (fn [form] [(second form) form]))
@@ -4870,23 +3902,7 @@
       (and (seq? form)
            (true? (:kotoba.reader/f64-literal (meta form))))))
 
-(def ^:private map-literal-value-constructors
-  "Canonical constructors that DECLARE the type of the value they build, as
-  their first argument, and the descriptor head each one must produce.
-
-  Every head here is a reserved name (they are unioned into `reserved-names`
-  through `canonical-typed-map-operations`, `typed-set-operations`,
-  `record-operations` and `heterogeneous-vector-operations`), so a user
-  function cannot shadow one and make this read a descriptor off an unrelated
-  call. The descriptor's own head is checked as well, so a malformed first
-  argument falls through to `nil` -- unknown -- rather than becoming a map
-  value type nothing validated."
-  '{typed-map-new :map
-    typed-set-new :set
-    record-new :record
-    hetero-vector-new :vector
-    option-some-of :option
-    option-none-of :option})
+#?(:kotoba nil :default (def ^:private map-literal-value-constructors tables/map-literal-value-constructors))
 
 (defn- map-literal-value-type
   "The value type a literal's VALUE expression determines ON ITS OWN, or `nil`
@@ -5554,17 +4570,9 @@
                      (tree-seq coll? seq body))))
          functions)))
 
-(def ^:private document-returning-heads
-  "Heads whose answer is a `:document` when their receiver is one."
-  '#{keys vals rest next first second nth assoc dissoc merge select-keys update
-     get-in assoc-in map mapv filter filterv remove concat keep into})
+#?(:kotoba nil :default (def ^:private document-returning-heads tables/document-returning-heads))
 
-(def ^:private document-constructor-heads
-  '#{document-vector document-list document-map document-set document-null
-     document-assoc document-dissoc document-merge document-vector-conj
-     document-vector-drop document-string document-keyword document-symbol
-     document-i64 document-bool document-f64 document-read document-edn-read
-     __kotoba_document_of})
+#?(:kotoba nil :default (def ^:private document-constructor-heads tables/document-constructor-heads))
 
 (defn- guess-document-form?
   "Whether SOURCE form FORM is a `:document`, as far as desugaring can tell
@@ -5624,9 +4632,7 @@
                remove (list 'if call acc (list 'document-vector-conj acc x)))]
     (list 'reduce (list 'fn [acc x] step) '(document-vector) coll-form)))
 
-(def ^:private document-head-set
-  "Clojure heads rewritten to primitives when their collection is a `:document`."
-  '#{merge select-keys get-in assoc-in update empty? some every? concat keep into})
+#?(:kotoba nil :default (def ^:private document-head-set tables/document-head-set))
 
 (defn- document-conj-step
   "The reduce step that appends the item X to the document vector ACC."
@@ -8457,15 +7463,7 @@
                           args)
              (map desugar-expr args)))))
 
-(def ^:private i64-answer-predicates
-  "ADR 0353 floor :bool-predicates (amends ADR 0028). The predicate primitives
-  whose KIR operation still answers the legacy 0/1 `:i64`. The backends
-  (kotoba-wasm `typed`, kotoba-script, kotoba-native) type these operations
-  as `:i64` and are not changed; the LANGUAGE answers `:bool`, because every
-  source occurrence is elaborated once to `(= op 1)`. With that, no predicate
-  a program can write answers a number, and `if` refuses an `:i64` test."
-  '#{record-equal hetero-vector-equal typed-set-equal typed-map-equal
-     task-ready? object-cas-won})
+#?(:kotoba nil :default (def ^:private i64-answer-predicates tables/i64-answer-predicates))
 
 (defn- bool-predicate-answer
   "Wraps a desugared 0/1 predicate operation as `(= op 1)`, exactly once.
@@ -8583,23 +7581,13 @@
 (def ^:private local-state-note
   "atom slice 1 admits swap!/reset!/deref in straight-line code of the binding function only")
 
-(def ^:private local-state-write-heads '#{atom swap! reset!})
+#?(:kotoba nil :default (def ^:private local-state-write-heads tables/local-state-write-heads))
 
-(def ^:private local-state-scope-heads
-  "Heads that open a scope no cell can be threaded through: the body may run
-  zero times, many times, or later, so a rebinding chain cannot express it."
-  '#{fn fn* loop recur doseq dotimes lazy-seq})
+#?(:kotoba nil :default (def ^:private local-state-scope-heads tables/local-state-scope-heads))
 
-(def ^:private local-state-conditional-heads
-  "Heads whose operands are not all evaluated, or whose expansion moves them.
-  Hoisting a write out of one would make it unconditional, so a write inside
-  is refused rather than silently promoted."
-  '#{and or if-not when-not if-let when-let if-some when-some
-     some-> some->> cond-> cond->> condp match try catch throw assert
-     -> ->> as->})
+#?(:kotoba nil :default (def ^:private local-state-conditional-heads tables/local-state-conditional-heads))
 
-(def ^:private local-state-effect-heads
-  '#{cap-call typed-cap-call assert! retract! observe! facet-enter! facet-leave!})
+#?(:kotoba nil :default (def ^:private local-state-effect-heads tables/local-state-effect-heads))
 
 (defn- local-state-deref-head? [head]
   (or (= head 'deref) (= head 'clojure.core/deref)))
@@ -10008,7 +8996,7 @@
 ;; each to record-new / record-get / record-assoc: nothing new reaches KIR or
 ;; a backend.
 
-(def ^:private row-operation-heads '#{map-assoc dissoc select-keys merge})
+#?(:kotoba nil :default (def ^:private row-operation-heads tables/row-operation-heads))
 
 (def ^:dynamic *row-op-schemas*
   "The module's schemas for the whole analysis: `*schemas*` is bound only
@@ -10178,36 +9166,9 @@
                              (assoc data :kotoba.error/use-site (cons op args))))
              (throw error))))))
 
-;; Type predicates (superproject adr-2609242330). Clojure's answers are
-;; questions about a value's TYPE -- `(true? x)` is "x is the boolean true",
-;; `(integer? x)` "x is an integer", `(map? x)` "x is a map" -- and here a
-;; value's type is static EXCEPT inside a `:document`, the one value whose
-;; shape is decided at run time. So:
-;;   on a static type  -> decided here, as Clojure answers for a value of that
-;;                 type: `(true? b)` on :bool is b, `(false? b)` is (not b),
-;;                 every other type answers a constant; the operand is still
-;;                 evaluated (2026-09-25, true? / integer?).
-;;   on [:option T]    -> presence when T answers true, false when T answers
-;;                 false (nil is none of these types); refused by name when
-;;                 T's own answer depends on the value (:bool, :document).
-;;   on a :document    -> the node's run-time kind, `(document-kind d)`, which
-;;                 every backend that has documents already answers
-;;                 (2026-09-26, gap 3 of the selfhost foundation; this was
-;;                 refused by name until then). `nil?` / `some?` on a
-;;                 document are the :null kind (see the option-some? arm of
-;;                 `rewrite-record-projection`).
-;; A module's own function of the same name wins, in inference and rewrite.
-(def ^:private library-predicate-heads
-  '#{true? false? integer? boolean? string? keyword? symbol?
-     map? vector? set? list? seq? coll?})
+#?(:kotoba nil :default (def ^:private library-predicate-heads tables/library-predicate-heads))
 
-(def ^:private library-predicate-document-kinds
-  "The `document-kind` answers each predicate is true for (true? / false?
-  read the bool payload instead)."
-  '{true? #{:bool} false? #{:bool} integer? #{:i64} boolean? #{:bool}
-    string? #{:string} keyword? #{:keyword} symbol? #{:symbol}
-    map? #{:map} vector? #{:vector} set? #{:set} list? #{:list} seq? #{:list}
-    coll? #{:vector :list :set :map}})
+#?(:kotoba nil :default (def ^:private library-predicate-document-kinds tables/library-predicate-document-kinds))
 
 (defn- library-predicate-static-answer
   "What `(op x)` is for a value of the static, non-document TYPE: :operand
@@ -10232,11 +9193,7 @@
       (list? seq?) list-type?
       coll? (or map-type? vector-type? set-type? list-type?))))
 
-(def ^:private document-of-constructors
-  "`__kotoba_document_of` (written only by `ex-info-data-argument`): the
-  document constructor for a value of each scalar type."
-  '{:i64 document-i64 :string document-string :keyword document-keyword
-    :bool document-bool :f64 document-f64})
+#?(:kotoba nil :default (def ^:private document-of-constructors tables/document-of-constructors))
 
 (defn- as-document-form
   "FORM as a `:document` expression, for the Clojure heads (`assoc`, `get` with a
@@ -13866,10 +12823,7 @@
 ;; specialized at (floor :specialization-identity derives it from the
 ;; generic's).
 
-(def ^:private row-binding-heads
-  "Desugared heads that bind names in their arguments. Inside them the walk
-  forgets what it knew about the names they bind."
-  '#{option-match result-match-of variant-match})
+#?(:kotoba nil :default (def ^:private row-binding-heads tables/row-binding-heads))
 
 (defn- row-symbols-in [form]
   (into #{} (filter simple-symbol?) (tree-seq coll? seq form)))
@@ -15225,13 +14179,9 @@
 ;; sealed into its definition CID; the function that installs the handler
 ;; does not carry it.
 
-(def ^:private state-perform-heads
-  "The two reserved heads a performed operation passes through: unresolved
-  (straight from source) and resolved to the handler that answers it."
-  '#{__kotoba_state_perform __kotoba_state_op})
+#?(:kotoba nil :default (def ^:private state-perform-heads tables/state-perform-heads))
 
-(def ^:private state-handle-heads
-  '#{__kotoba_state_handle __kotoba_state_with})
+#?(:kotoba nil :default (def ^:private state-handle-heads tables/state-handle-heads))
 
 (def ^:private state-all-heads
   (into '#{__kotoba_state_resume} (concat state-perform-heads state-handle-heads)))
@@ -18240,20 +17190,9 @@
   compile."
   100000)
 
-(def ^:private stateful-def-heads
-  "Heads that allocate module-level STATE or defer EVALUATION. Refused at a
-  `def` as a property -- this is the ambient-authority half the language
-  authority forbids -- and refused by name so the sentence says what to do.
-  `ref` is deliberately NOT here: `(ref name)` is the pure core's definition
-  reference (surface-status :no-ambient-mutation
-  :admitted-via-pure-core-elaboration), and STM's `(ref x)` is refused by
-  the elaboration that admits the other shape, `:kotoba.error/ambient-
-  forbidden`, which the probe below raises unchanged."
-  '#{atom delay volatile! agent promise future})
+#?(:kotoba nil :default (def ^:private stateful-def-heads tables/stateful-def-heads))
 
-(def ^:private effectful-def-heads
-  "Heads that name an effect directly at a `def`."
-  '#{cap-call typed-cap-call})
+#?(:kotoba nil :default (def ^:private effectful-def-heads tables/effectful-def-heads))
 
 (def ^:private fold-probe-namespace 'kotoba.constant-fold.probe)
 (def ^:private fold-probe-function 'kotoba-fold-value)
@@ -18650,13 +17589,7 @@
 (def max-desugar-template-nodes 512)
 (def max-desugar-expansions 4096)
 
-;; Heads whose meaning the rest of the frontend depends on. A template may not
-;; take one of these names: the expansion pass runs before every other pass, so
-;; it would be rewriting the language out from under them.
-(def ^:private structural-heads
-  '#{ns def defn defn- defmulti defmethod defrecord defprotocol definterface
-     extend-type extend-protocol defdesugar
-     if let let* do fn loop recur quote var recur-to})
+#?(:kotoba nil :default (def ^:private structural-heads tables/structural-heads))
 
 (def ^:private unspellable-definition-heads
   "The declaration heads a TEMPLATE BODY may hold that can be nothing at all.
@@ -18946,27 +17879,7 @@
                        :else form))
                    forms))))))
 
-(def protocol-declaration-heads
-  "The two heads `expand-record-protocol-forms` reads with
-  `protocol-form->info`.
-
-  It exists so the refusal can spell the head the CALLER wrote. Measured
-  2026-09-03 at 5917518b, `(definterface)` answered
-
-      defprotocol requires unique bounded (method [this ...]) signatures
-
-  which names a form the caller did not write and sends them to the wrong
-  place to fix it. One arm serving two heads is the right shape -- an
-  interface and a protocol ARE the same declaration here -- but the sentence
-  has to say which one arrived.
-
-  Spelling a value read from source into a message is safe here for the reason
-  `definition-heads` gives about itself: a form reaches `protocol-form->info`
-  only because the filter in `expand-record-protocol-forms` MATCHED its head
-  against one of these two literals, so the head cannot be anything a program
-  chose. The error CODE stays a literal regardless -- the head travels in the
-  sentence, never in `:kotoba.error/code`."
-  '#{defprotocol definterface})
+#?(:kotoba nil :default (def protocol-declaration-heads tables/protocol-declaration-heads))
 
 (defn- protocol-documentation-stripped
   "A protocol declaration's method forms, with Clojure's two DOCUMENTATION
