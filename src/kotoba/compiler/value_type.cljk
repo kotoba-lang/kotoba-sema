@@ -21,7 +21,7 @@
   callers read (`some?`), plus whether the result is TRUTHY, because the host
   reads the parametric-result and variant arms through `if-let` / `when-let`,
   where a default of `false` (the `:bool` default) counts as none."
-  {:kotoba/export [validate-type closure-result-type? list-type? set-type? map-type? record-type?
+  {:kotoba/export [outcome-ok? outcome-code outcome-msg outcome-nodes callable-type? stream-type? task-type? slice-type? schema-ref-type? linear-resource-type? validate-type closure-result-type? list-type? set-type? map-type? record-type?
                    hetero-type? option-type? variant-type? result-type? qualified-keyword?
                    record-declares-field? hetero-item-count record-field-count]}
   (:require [kotoba.form :as form])
@@ -41,6 +41,12 @@
   (refuse "kotoba.error/subset-reject" msg nodes))
 
 (defn- r-ok? [r [:ref :vx/r]] :bool (record-get [:ref :vx/r] r :ok))
+
+;; the public reading of a result, for callers in other modules
+(defn outcome-ok? [r [:ref :vx/r]] :bool (record-get [:ref :vx/r] r :ok))
+(defn outcome-code [r [:ref :vx/r]] :string (record-get [:ref :vx/r] r :code))
+(defn outcome-msg [r [:ref :vx/r]] :string (record-get [:ref :vx/r] r :msg))
+(defn outcome-nodes [r [:ref :vx/r]] :i64 (record-get [:ref :vx/r] r :nodes))
 (defn- r-nodes [r [:ref :vx/r]] :i64 (record-get [:ref :vx/r] r :nodes))
 
 ;; ---- shapes over forms ------------------------------------------------------
@@ -57,7 +63,7 @@
 (defn qualified-keyword? [f [:ref :form/r]] :bool
   (form/keyword-has-namespace? f))
 
-(defn- callable-type? [t [:ref :form/r]] :bool
+(defn callable-type? [t [:ref :form/r]] :bool
   (and (form/is-vec? t) (>= (form/count-of t) 2) (<= (form/count-of t) 6)
        (kw-is? (form/nth-of t 0) "fn")))
 
@@ -65,17 +71,17 @@
 (defn variant-type? [t [:ref :form/r]] :bool (head-of? t "variant" 3))
 (defn option-type? [t [:ref :form/r]] :bool (head-of? t "option" 2))
 (defn list-type? [t [:ref :form/r]] :bool (head-of? t "list" 2))
-(defn- stream-type? [t [:ref :form/r]] :bool (head-of? t "stream" 2))
-(defn- task-type? [t [:ref :form/r]] :bool (head-of? t "task" 2))
+(defn stream-type? [t [:ref :form/r]] :bool (head-of? t "stream" 2))
+(defn task-type? [t [:ref :form/r]] :bool (head-of? t "task" 2))
 (defn hetero-type? [t [:ref :form/r]] :bool (head-of? t "vector" 2))
 (defn set-type? [t [:ref :form/r]] :bool (head-of? t "set" 2))
 (defn map-type? [t [:ref :form/r]] :bool (head-of? t "map" 3))
 (defn record-type? [t [:ref :form/r]] :bool (head-of? t "record" 3))
-(defn- slice-type? [t [:ref :form/r]] :bool (head-of? t "slice" 2))
-(defn- schema-ref-type? [t [:ref :form/r]] :bool
+(defn slice-type? [t [:ref :form/r]] :bool (head-of? t "slice" 2))
+(defn schema-ref-type? [t [:ref :form/r]] :bool
   (and (head-of? t "ref" 2) (qualified-keyword? (form/nth-of t 1))))
 
-(defn- linear-resource-type? [t [:ref :form/r]] :bool
+(defn linear-resource-type? [t [:ref :form/r]] :bool
   (or (stream-type? t) (task-type? t)))
 
 ;; `value-types`: the bare keywords a value type may be

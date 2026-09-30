@@ -24,13 +24,15 @@
             ;; reason `orgs/kotoba-lang/amu` carried one on its production
             ;; classpath.
             [kotoba.compiler.kotoba-reader :as kr]
-            #?@(:kotoba [[kotoba.form :as form]])
+            #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]]))
   ;; The Kotoba route holds dynamic Clojure forms and the heads tables as the
   ;; recursive Form record (kotoba.form); the host keeps its own data.
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
-                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]})))
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
+                                 ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]})))
 
 ;; clojure.core/some, spelled as the loop it is. In Kotoba `some` is the
 ;; option constructor and a two-argument `(some pred coll)` is refused as a
@@ -254,6 +256,101 @@
 ;; and is a decision with an ADR rather than a constant to nudge.
 (def interrupt-entry-vector-limit 64)
 
+;; ---- Kotoba-route refusals -------------------------------------------------
+;; The host's `reject!` throws an ex-info. On this route a refusal is an abort
+;; (ADR 0007): `(throw (fe-error msg code form))`, caught by the boundary that
+;; tries. Discipline: a throw or a call of an aborting function sits in TAIL
+;; position or as a `let` binding value, never inside a loop.
+#?(:kotoba
+   (defn- fe-error [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg code form "subset"))
+   :default nil)
+
+;; a reader-phase refusal (the host's `(ex-info msg {:phase :read})`)
+#?(:kotoba
+   (defn- fe-read-error [msg :string] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg "" (form/nil-form) "read"))
+   :default nil)
+
+;; ---- Kotoba-route Form readings ------------------------------------------
+;; Dynamic host data is a Form tree on this route.
+#?(:kotoba
+   (defn- sym-is? [f [:ref :form/r] name :string] :bool
+     (and (form/is-symbol? f) (string=? (form/symbol-value f) name)))
+   :default nil)
+
+;; a list form headed by the symbol NAME
+#?(:kotoba
+   (defn- head-is? [f [:ref :form/r] name :string] :bool
+     (and (form/is-seq? f) (> (form/count-of f) 0) (sym-is? (form/nth-of f 0) name)))
+   :default nil)
+
+;; ---- Kotoba-route string readings (host regexes, spelled as scans) --------
+;; The host keeps its regexes byte for byte; on the Kotoba route a name is a Form
+;; symbol and a pattern is a scan over its text (docs/selfhost-frontend-typemodel-design.md).
+#?(:kotoba
+   (defn- form-text [f [:ref :form/r]] :string
+     ;; `(str f)` for the atoms a name can be.
+     (if (or (form/is-symbol? f) (form/is-string? f))
+       (form/string-value f)
+       (if (form/is-keyword? f)
+         (document-edn-print (document-keyword (form/keyword-value f)))
+         "")))
+   :default nil)
+
+#?(:kotoba
+   (defn- ascii-digit-code? [c :i64] :bool
+     (and (>= c 48) (<= c 57)))
+   :default nil)
+
+;; every byte of S from I to the end is an ASCII digit
+#?(:kotoba
+   (defn- digits-from? [s :string i :i64] :bool
+     (if (>= i (string-length s))
+       true
+       (if (ascii-digit-code? (string-code-point-at s i))
+         (digits-from? s (+ i 1))
+         false)))
+   :default nil)
+
+#?(:kotoba
+   (defn- decimal-value-from [s :string i :i64 acc :i64] :i64
+     (if (>= i (string-length s))
+       acc
+       (decimal-value-from s (+ i 1) (+ (* acc 10) (- (string-code-point-at s i) 48)))))
+   :default nil)
+
+;; The vector a name declares, or -1. Deep nested `if`s cost the admission pass
+;; time (measured: one 7-deep body took 90 s), so each decision is its own function.
+#?(:kotoba
+   (defn- decimal-vector-text? [digits :string] :bool
+     ;; (0|[1-9][0-9]*), the whole remainder
+     (and (> (string-length digits) 0)
+          (digits-from? digits 0)
+          (or (= (string-length digits) 1)
+              (not (= 48 (string-code-point-at digits 0))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- decimal-vector-value [digits :string] :i64
+     (if (decimal-vector-text? digits)
+       (if (<= (string-length digits) 18) (decimal-value-from digits 0 0) -1)
+       -1))
+   :default nil)
+
+#?(:kotoba
+   (defn- interrupt-vector-value [text :string] :i64
+     (if (= 0 (string-index-of text "aiueos-isr-"))
+       (let [v (decimal-vector-value (string-substring text 11 (string-length text)))]
+         (if (< v 64) v -1))
+       -1))
+   :default nil)
+
+#?(:kotoba
+   (defn interrupt-entry-vector [entry-name [:ref :form/r]] [:ref :form/r]
+     (let [v (interrupt-vector-value (form-text entry-name))]
+       (if (< v 0) (form/nil-form) (form/int-form v))))
+   :default
 (defn interrupt-entry-vector
   "The vector `name` declares, or nil when it is not an interrupt entry name.
 
@@ -268,7 +365,9 @@
                            (subs text (count interrupt-entry-prefix))))
       (let [vector (#?(:clj Long/parseLong :cljs js/parseInt)
                     (subs text (count interrupt-entry-prefix)))]
-        (when (< vector interrupt-entry-vector-limit) vector)))))
+        (when (< vector interrupt-entry-vector-limit) vector))))))
+
+
 #?(:kotoba nil :default (def rodata-literal-operations tables/rodata-literal-operations))
 
 #?(:kotoba nil :default (def image-symbol-operations tables/image-symbol-operations))
@@ -289,6 +388,9 @@
 ;; below is for.
 (def image-scratch-bytes 16384)
 
+#?(:kotoba
+   (defn- integer-literal? [expr [:ref :form/r]] :bool (form/is-int? expr))
+   :default
 (defn- integer-literal?
   "True when EXPR is a compile-time integer literal, on BOTH runtimes.
 
@@ -305,7 +407,7 @@
   [expr]
   #?(:clj (integer? expr)
      :cljs (or (integer? expr)
-               (try (= expr (js/BigInt expr)) (catch :default _ false)))))
+               (try (= expr (js/BigInt expr)) (catch :default _ false))))))
 
 ;; fwstore: the ceiling on `kernel-uefi-alloc-region`'s page count.
 ;;
@@ -324,6 +426,15 @@
 
 (def ^:private alloc-region-page-bytes 4096)
 
+#?(:kotoba
+   (defn alloc-region-bytes [expr [:ref :form/r]] [:ref :form/r]
+     (if (and (head-is? expr "kernel-uefi-alloc-region") (= 7 (form/count-of expr)))
+       (let [pages (form/nth-of expr 5)]
+         (if (integer-literal? pages)
+           (form/int-form (* 4096 (form/int-value pages)))
+           (form/nil-form)))
+       (form/nil-form)))
+   :default
 (defn alloc-region-bytes
   "The byte length `(kernel-uefi-alloc-region ... page-count ...)` obtained,
   or nil when EXPR is not one. Public so a build can report what a UEFI image
@@ -341,19 +452,83 @@
         ;; against a declared window needs no conversion and this does. The
         ;; page ceiling keeps the product under 2^52, so the double is exact.
         #?(:clj (* alloc-region-page-bytes (long pages))
-           :cljs (* alloc-region-page-bytes (js/Number pages)))))))
-
+           :cljs (* alloc-region-page-bytes (js/Number pages))))))))
 
 #?(:kotoba nil :default (def rodata-literal-encodings tables/rodata-literal-encodings))
 
+#?(:kotoba
+   (defn- hex-code? [c :i64] :bool
+     (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+   :default nil)
+
+;; every code of S in [I, END) is a hex digit
+#?(:kotoba
+   (defn- hex-range? [s :string i :i64 end :i64] :bool
+     (if (>= i end)
+       true
+       (if (hex-code? (string-code-point-at s i))
+         (hex-range? s (+ i 1) end)
+         false)))
+   :default nil)
+
+#?(:kotoba
+   (defn- hex-text? [text :string] :bool
+     (and (= 0 (rem (string-length text) 2))
+          (hex-range? text 0 (string-length text))))
+   :default
 (defn- hex-text? [text]
   (and (even? (count text))
        (every? (fn [character]
                  (let [code #?(:clj (int character)
                                :cljs (.charCodeAt character 0))]
                    (or (<= 48 code 57) (<= 97 code 102) (<= 65 code 70))))
-               text)))
+               text))))
 
+;; UTF-8 strings: an index is a BYTE offset and `string-code-point-at` refuses an
+;; interior byte, so every full scan steps by the width of the code point it read.
+#?(:kotoba
+   (defn- code-point-width [c :i64] :i64
+     (if (< c 128) 1 (if (< c 2048) 2 (if (< c 65536) 3 4))))
+   :default nil)
+
+;; the string holds no UTF-16 surrogate code point (UTF-8 cannot spell one, so
+;; the scan only proves it reads cleanly to the end)
+#?(:kotoba
+   (defn- surrogate-free? [s :string i :i64] :bool
+     (if (>= i (string-length s))
+       true
+       (let [c (string-code-point-at s i)]
+         (if (and (>= c 55296) (<= c 57343))
+           false
+           (surrogate-free? s (+ i (code-point-width c)))))))
+   :default nil)
+
+;; 8-4-4-4-12: dashes at 8, 13, 18, 23, hex everywhere else
+#?(:kotoba
+   (defn- guid-text? [text :string] :bool
+     (and (= 36 (string-length text))
+          (= 45 (string-code-point-at text 8))
+          (= 45 (string-code-point-at text 13))
+          (= 45 (string-code-point-at text 18))
+          (= 45 (string-code-point-at text 23))
+          (hex-range? text 0 8)
+          (hex-range? text 9 13)
+          (hex-range? text 14 18)
+          (hex-range? text 19 23)
+          (hex-range? text 24 36)))
+   :default nil)
+
+#?(:kotoba
+   (defn rodata-literal-content? [op [:ref :form/r] text [:ref :form/r]] :bool
+     (and (form/is-string? text)
+          (if (sym-is? op "ucs2")
+            (surrogate-free? (form/string-value text) 0)
+            (if (sym-is? op "guid")
+              (guid-text? (form/string-value text))
+              (if (or (sym-is? op "bytes-literal") (sym-is? op "bytes-literal-length"))
+                (hex-text? (form/string-value text))
+                false)))))
+   :default
 (defn rodata-literal-content?
   "True when TEXT is a well-formed literal for OP.
 
@@ -386,7 +561,7 @@
                      (= [8 4 4 4 12] (mapv count fields))
                      (every? hex-text? fields)))
          (bytes-literal bytes-literal-length) (hex-text? text)
-         false)))
+         false))))
 ;; boot-lit: end
 
 #?(:kotoba nil :default (def list-operations tables/list-operations))
@@ -586,48 +761,93 @@
 
 (declare reject! closure-result-type? binding-symbols)
 
+#?(:kotoba
+   (defn- callable-type? [type [:ref :form/r]] :bool (vt/callable-type? type))
+   :default
 (defn- callable-type? [type]
-  (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6)))
+  (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6))))
 
+#?(:kotoba
+   (defn- callable-clauses [type [:ref :form/r]] [:ref :form/r]
+     (if (callable-type? type)
+       (form/form-vec (form/rest-list type))
+       (form/nil-form)))
+   :default
 (defn- callable-clauses [type]
-  (when (callable-type? type) (subvec type 1)))
+  (when (callable-type? type) (subvec type 1))))
 
+#?(:kotoba
+   (defn- parametric-result-type? [type [:ref :form/r]] :bool (vt/result-type? type))
+   :default
 (defn- parametric-result-type? [type]
-  (and (vector? type) (= 3 (count type)) (= :result (first type))))
+  (and (vector? type) (= 3 (count type)) (= :result (first type)))))
 
+#?(:kotoba
+   (defn- variant-type? [type [:ref :form/r]] :bool (vt/variant-type? type))
+   :default
 (defn- variant-type? [type]
-  (and (vector? type) (= 3 (count type)) (= :variant (first type))))
+  (and (vector? type) (= 3 (count type)) (= :variant (first type)))))
 
+#?(:kotoba
+   (defn- generic-option-type? [type [:ref :form/r]] :bool (vt/option-type? type))
+   :default
 (defn- generic-option-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :option (first type))))
+  (and (vector? type) (= 2 (count type)) (= :option (first type)))))
 
+#?(:kotoba
+   (defn- canonical-list-type? [type [:ref :form/r]] :bool (vt/list-type? type))
+   :default
 (defn- canonical-list-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :list (first type))))
+  (and (vector? type) (= 2 (count type)) (= :list (first type)))))
 
+#?(:kotoba
+   (defn- stream-type? [type [:ref :form/r]] :bool (vt/stream-type? type))
+   :default
 (defn- stream-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :stream (first type))))
+  (and (vector? type) (= 2 (count type)) (= :stream (first type)))))
 
+#?(:kotoba
+   (defn- task-type? [type [:ref :form/r]] :bool (vt/task-type? type))
+   :default
 (defn- task-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :task (first type))))
+  (and (vector? type) (= 2 (count type)) (= :task (first type)))))
 
+#?(:kotoba
+   (defn- linear-resource-type? [type [:ref :form/r]] :bool (vt/linear-resource-type? type))
+   :default
 (defn- linear-resource-type? [type]
-  (or (stream-type? type) (task-type? type)))
+  (or (stream-type? type) (task-type? type))))
 
+#?(:kotoba
+   (defn- heterogeneous-vector-type? [type [:ref :form/r]] :bool (vt/hetero-type? type))
+   :default
 (defn- heterogeneous-vector-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :vector (first type))))
+  (and (vector? type) (= 2 (count type)) (= :vector (first type)))))
 
+#?(:kotoba
+   (defn- typed-set-type? [type [:ref :form/r]] :bool (vt/set-type? type))
+   :default
 (defn- typed-set-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :set (first type))))
+  (and (vector? type) (= 2 (count type)) (= :set (first type)))))
 
+#?(:kotoba
+   (defn- canonical-typed-map-type? [type [:ref :form/r]] :bool (vt/map-type? type))
+   :default
 (defn- canonical-typed-map-type? [type]
-  (and (vector? type) (= 3 (count type)) (= :map (first type))))
+  (and (vector? type) (= 3 (count type)) (= :map (first type)))))
 
+#?(:kotoba
+   (defn- record-type? [type [:ref :form/r]] :bool (vt/record-type? type))
+   :default
 (defn- record-type? [type]
-  (and (vector? type) (= 3 (count type)) (= :record (first type))))
+  (and (vector? type) (= 3 (count type)) (= :record (first type)))))
 
+#?(:kotoba
+   (defn- schema-ref-type? [type [:ref :form/r]] :bool (vt/schema-ref-type? type))
+   :default
 (defn- schema-ref-type? [type]
   (and (vector? type) (= 2 (count type)) (= :ref (first type))
-       (keyword? (second type)) (namespace (second type))))
+       (keyword? (second type)) (namespace (second type)))))
 
 ;; slice-value: `[:slice T]`, the ADR 0285 bulk carrier.
 ;;
@@ -649,13 +869,20 @@
 (def ^:private slice-declared-unadmitted-elements
   #{:f32})
 
+#?(:kotoba
+   (defn- slice-type? [type [:ref :form/r]] :bool (vt/slice-type? type))
+   :default
 (defn- slice-type? [type]
-  (and (vector? type) (= 2 (count type)) (= :slice (first type))))
+  (and (vector? type) (= 2 (count type)) (= :slice (first type)))))
 
+#?(:kotoba
+   (defn- slice-element-type [type [:ref :form/r]] [:ref :form/r]
+     (if (slice-type? type) (form/nth-of type 1) (form/nil-form)))
+   :default
 (defn- slice-element-type [type]
-  (when (slice-type? type) (second type)))
+  (when (slice-type? type) (second type))))
 
-(defn- structured-type? [type]
+(defn- structured-type? [#?@(:kotoba [type [:ref :form/r]] :default [type])] #?@(:kotoba [:bool])
   (or (parametric-result-type? type) (variant-type? type) (generic-option-type? type)
       (canonical-list-type? type)
       (stream-type? type) (task-type? type)
@@ -664,6 +891,20 @@
       (slice-type? type)
       (callable-type? type)))
 
+#?(:kotoba
+   (defn- validate-value-type-counted! [type [:ref :form/r] depth :i64 nodes :i64] :i64
+     (let [r (vt/validate-type type depth nodes)]
+       (if (vt/outcome-ok? r)
+         (vt/outcome-nodes r)
+         (throw (fe-error (vt/outcome-msg r) (vt/outcome-code r) type)))))
+   :default nil)
+
+;; Kotoba: the one-argument form is a fresh node budget; the count is threaded
+;; (`validate-value-type-counted!`) where the host mutates a volatile.
+#?(:kotoba
+   (defn- validate-value-type! [type [:ref :form/r]] :i64
+     (validate-value-type-counted! type 0 0))
+   :default
 (defn- validate-value-type!
   ([type] (validate-value-type! type 0 (volatile! 0)))
   ([type depth nodes]
@@ -832,8 +1073,11 @@
        (doseq [[_ payload-type] cases]
          (validate-value-type! payload-type (inc depth) nodes))
        type)
-     :else (reject! "value type is outside the safe profile" type :kotoba.error/value-type-outside-profile))))
+     :else (reject! "value type is outside the safe profile" type :kotoba.error/value-type-outside-profile)))))
 
+#?(:kotoba
+   (defn- kotoba-integer? [form [:ref :form/r]] :bool (form/is-int? form))
+   :default
 (defn- kotoba-integer?
   "True for a value that is (or stands for) a `.kotoba` integer literal --
   plain `integer?` on `:clj`. On `:cljs` a literal may be EITHER a JS
@@ -847,8 +1091,20 @@
   stream. Plain cljs `integer?`/`int?` do not recognize `bigint`
   (confirmed live), so this checks both forms explicitly."
   [form]
-  #?(:clj (integer? form) :cljs (or (i64/bigint-value? form) (integer? form))))
+  #?(:clj (integer? form) :cljs (or (i64/bigint-value? form) (integer? form)))))
 
+#?(:kotoba
+   (defn- heterogeneous-vector-index! [index [:ref :form/r] item-types [:ref :form/r]
+                                       form [:ref :form/r]] :i64
+     (if (kotoba-integer? index)
+       (let [host-index (form/int-value index)]
+         (if (and (<= 0 host-index) (< host-index (form/count-of item-types)))
+           host-index
+           (throw (fe-error "heterogeneous vector index must be in range"
+                            "kotoba.error/hetero-vector-index-range" form))))
+       (throw (fe-error "heterogeneous vector index must be an integer literal"
+                        "kotoba.error/hetero-vector-index" form))))
+   :default
 (defn- heterogeneous-vector-index!
   [index item-types form]
   (when-not (kotoba-integer? index)
@@ -858,8 +1114,20 @@
     (when-not (and (integer? host-index) (<= 0 host-index)
                    (< host-index (count item-types)))
       (reject! "heterogeneous vector index must be in range" form :kotoba.error/hetero-vector-index-range))
-    #?(:clj (long host-index) :cljs host-index)))
+    #?(:clj (long host-index) :cljs host-index))))
 
+#?(:kotoba
+   (defn- heterogeneous-vector-slice-index! [index [:ref :form/r] item-types [:ref :form/r]
+                                             form [:ref :form/r]] :i64
+     (if (kotoba-integer? index)
+       (let [host-index (form/int-value index)]
+         (if (and (<= 0 host-index) (<= host-index (form/count-of item-types)))
+           host-index
+           (throw (fe-error "heterogeneous vector drop count must be in range"
+                            "kotoba.error/hetero-vector-slice-index-range" form))))
+       (throw (fe-error "heterogeneous vector drop count must be an integer literal"
+                        "kotoba.error/hetero-vector-slice-index" form))))
+   :default
 (defn- heterogeneous-vector-slice-index!
   "Return a host index for a compile-time heterogeneous-vector slice. Unlike
   an element index, the vector length itself is valid and denotes an empty
@@ -874,7 +1142,7 @@
                    (<= host-index (count item-types)))
       (reject! "heterogeneous vector drop count must be in range"
                form :kotoba.error/hetero-vector-slice-index-range))
-    #?(:clj (long host-index) :cljs host-index)))
+    #?(:clj (long host-index) :cljs host-index))))
 
 (def max-reader-depth
   "`:max-reader-depth` from lang/guest-grammar.edn's `:admission-limits`.
@@ -885,6 +1153,46 @@
    where that difference bites."
   512)
 
+#?(:kotoba
+   ;; The host's scan, as a self-call that answers instead of throwing. UTF-8:
+   ;; an index is a byte offset, so it steps by the width of what it read.
+   ;; MODE: 0 code, 1 inside a string, 2 after a backslash in a string, 3 comment.
+   (defn- reader-depth-scan [source :string n :i64 index :i64 depth :i64 mode :i64] :bool
+     (if (>= index n)
+       false
+       (let [ch (string-code-point-at source index)
+             next-index (+ index (code-point-width ch))]
+         (if (= mode 3)
+           (reader-depth-scan source n next-index depth (if (= ch 10) 0 3))
+           (if (= mode 2)
+             (reader-depth-scan source n next-index depth 1)
+             (if (= mode 1)
+               (reader-depth-scan source n next-index depth
+                                  (if (= ch 92) 2 (if (= ch 34) 0 1)))
+               (if (= ch 59)
+                 (reader-depth-scan source n next-index depth 3)
+                 (if (= ch 34)
+                   (reader-depth-scan source n next-index depth 1)
+                   (if (or (= ch 40) (= ch 91) (= ch 123))
+                     (if (> (+ depth 1) max-reader-depth)
+                       true
+                       (reader-depth-scan source n next-index (+ depth 1) 0))
+                     (if (or (= ch 41) (= ch 93) (= ch 125))
+                       (reader-depth-scan source n next-index (if (> depth 0) (- depth 1) 0) 0)
+                       (reader-depth-scan source n next-index depth 0)))))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- reader-depth-exceeded? [source :string] :bool
+     (reader-depth-scan source (string-length source) 0 0 0))
+   :default nil)
+
+#?(:kotoba
+   (defn- check-reader-depth! [source :string] :i64
+     (if (reader-depth-exceeded? source)
+       (throw (fe-read-error "reader nesting exceeds admission limit"))
+       0))
+   :default
 (defn- check-reader-depth! [source]
   (loop [index 0 depth 0 in-string? false escaped? false in-comment? false]
     (when (< index (count source))
@@ -903,7 +1211,7 @@
               (throw (ex-info "reader nesting exceeds admission limit" {:phase :read})))
             (recur (inc index) next-depth false false false))
           (#{\) \] \}} ch) (recur (inc index) (max 0 (dec depth)) false false false)
-          :else (recur (inc index) depth false false false))))))
+          :else (recur (inc index) depth false false false)))))))
 
 (def max-source-bytes
   "`:max-source-bytes` from lang/guest-grammar.edn's `:admission-limits`.
@@ -3713,6 +4021,35 @@
      (reduce (fn [value step] (list 'let [name value] step))
              initial steps))))
 
+;; the vector's first element is the keyword NAME
+#?(:kotoba
+   (defn- kw-head? [t [:ref :form/r] name :string] :bool
+     (and (form/is-vec? t) (> (form/count-of t) 0)
+          (form/is-keyword? (form/nth-of t 0))
+          (string=? (document-edn-print (document-keyword (form/keyword-value (form/nth-of t 0))))
+                    (string-concat ":" name))))
+   :default nil)
+
+;; the type of FIELD in a fields vector [[:f T] ...], from index I; nil when absent
+#?(:kotoba
+   (defn- record-field-lookup [fields [:ref :form/r] field [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (form/count-of fields))
+       (form/nil-form)
+       (let [pair (form/nth-of fields i)]
+         (if (form/eq (form/nth-of pair 0) field)
+           (form/nth-of pair 1)
+           (record-field-lookup fields field (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- resolve-ref-type [type [:ref :form/r] schemas [:ref :form/r]] [:ref :form/r]
+     ;; `*schemas*` is an explicit argument on this route (the :fe/env schemas field)
+     (if (and (form/is-vec? type) (= 2 (form/count-of type))
+              (kw-head? type "ref") (form/is-map? schemas))
+       (let [resolved (form/form-get schemas (form/nth-of type 1))]
+         (if (form/is-nil? resolved) type resolved))
+       type))
+   :default
 (defn- resolve-ref-type
   "Expand `[:ref :schema/name]` through `*schemas*` when available."
   [type]
@@ -3721,22 +4058,34 @@
            (= :ref (first type))
            (map? *schemas*))
     (or (get *schemas* (second type)) type)
-    type))
+    type)))
 
+#?(:kotoba
+   (defn- record-field-type [rec-type [:ref :form/r] field [:ref :form/r]
+                             schemas [:ref :form/r]] [:ref :form/r]
+     (let [rec (resolve-ref-type rec-type schemas)]
+       (if (and (record-type? rec) (form/is-keyword? field))
+         (record-field-lookup (form/nth-of rec 2) field 0)
+         (form/nil-form))))
+   :default
 (defn- record-field-type
   "Field type from a record descriptor or `[:ref …]` schema name, else nil."
   [rec-type field]
   (let [rec (resolve-ref-type rec-type)]
     (when (and (record-type? rec) (keyword? field))
       (first-truthy (fn [[k t]] (when (= k field) t))
-            (nth rec 2)))))
+            (nth rec 2))))))
 
+#?(:kotoba
+   (defn- option-vector-type? [type [:ref :form/r]] :bool
+     (vt/option-type? type))
+   :default
 (defn- option-vector-type?
   "Parametric option `[:option T]`, not the legacy monomorphic `:option-i64`."
   [type]
   (and (vector? type)
        (= 2 (count type))
-       (= :option (first type))))
+       (= :option (first type)))))
 
 ;; ── expression-level absence (gap 1 of the selfhost foundation) ─────────────
 ;;
