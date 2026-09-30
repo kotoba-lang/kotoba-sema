@@ -38,54 +38,66 @@
   (when-not (and (map? table) (seq table) (<= (count table) max-schemas)
                  (every? #(and (keyword? %) (namespace %)) (keys table)))
     (fail! "schema table must contain bounded qualified names" {:table table}))
-  (letfn [(walk [origin nominal-root node path productive? depth budget]
-            (vswap! budget inc)
-            (when (> @budget max-schema-nodes)
-              (fail! "schema graph exceeds node limit" {:root origin}))
-            (when (> depth max-schema-depth)
-              (fail! "schema graph exceeds depth limit" {:root origin}))
-            (cond
-              (primitives node) nil
-              (ref-type? node)
-              (let [target (second node)]
-                (when-not (contains? table target)
-                  (fail! "schema reference is not declared"
-                         {:root origin :ref target}))
-                (if (contains? path target)
-                  (when-not productive?
-                    (fail! "schema alias cycle is not productive"
+  ;; `budget` is the node count so far, threaded through `walk` (which returns
+  ;; the count after the subtree) instead of a shared volatile: the Kotoba
+  ;; route has no mutable cell to pass as an argument, and the count visited,
+  ;; the limit and the order of the two limit checks are exactly the host's.
+  (letfn [(walk-member [origin nominal-root entry path depth spent]
+            (when-not (keyword? (first entry))
+              (fail! "schema member name must be a keyword"
+                     {:root origin :member (first entry)}))
+            (walk origin nominal-root (second entry)
+                  path true (inc depth) spent))
+          (walk [origin nominal-root node path productive? depth budget]
+            (let [budget (inc budget)]
+              (when (> budget max-schema-nodes)
+                (fail! "schema graph exceeds node limit" {:root origin}))
+              (when (> depth max-schema-depth)
+                (fail! "schema graph exceeds depth limit" {:root origin}))
+              (cond
+                (primitives node) budget
+                (ref-type? node)
+                (let [target (second node)]
+                  (when-not (contains? table target)
+                    (fail! "schema reference is not declared"
                            {:root origin :ref target}))
-                  ;; A reference changes the nominal owner whose descriptor is
-                  ;; being checked. Keeping the original root separately
-                  ;; preserves whole-graph depth/node accounting and useful
-                  ;; diagnostics without requiring the referenced record or
-                  ;; variant to forge the caller's nominal identity.
-                  (walk origin target (get table target)
-                        (conj path target) false (inc depth) budget)))
-              (and (vector? node) (unary-tags (first node)) (= 2 (count node)))
-              (walk origin nominal-root (second node)
-                    path true (inc depth) budget)
-              (and (vector? node) (binary-tags (first node)) (= 3 (count node)))
-              (doseq [child (rest node)]
-                (walk origin nominal-root child
-                      path true (inc depth) budget))
-              (and (vector? node) (= :vector (first node)) (= 2 (count node))
-                   (vector? (second node)))
-              (doseq [child (second node)]
-                (walk origin nominal-root child
-                      path true (inc depth) budget))
-              (and (vector? node) (#{:record :variant} (first node)) (= 3 (count node))
-                   (= nominal-root (second node)) (vector? (nth node 2)))
-              (doseq [[member child] (nth node 2)]
-                (when-not (keyword? member)
-                  (fail! "schema member name must be a keyword"
-                         {:root origin :member member}))
-                (walk origin nominal-root child
-                      path true (inc depth) budget))
-              :else (fail! "schema descriptor is outside the closed profile"
-                           {:root origin :descriptor node})))]
-    (doseq [[root descriptor] table]
-      (walk root root descriptor #{root} false 0 (volatile! 0))))
+                  (if (contains? path target)
+                    (do (when-not productive?
+                          (fail! "schema alias cycle is not productive"
+                                 {:root origin :ref target}))
+                        budget)
+                    ;; A reference changes the nominal owner whose descriptor is
+                    ;; being checked. Keeping the original root separately
+                    ;; preserves whole-graph depth/node accounting and useful
+                    ;; diagnostics without requiring the referenced record or
+                    ;; variant to forge the caller's nominal identity.
+                    (walk origin target (get table target)
+                          (conj path target) false (inc depth) budget)))
+                (and (vector? node) (unary-tags (first node)) (= 2 (count node)))
+                (walk origin nominal-root (second node)
+                      path true (inc depth) budget)
+                (and (vector? node) (binary-tags (first node)) (= 3 (count node)))
+                (reduce (fn [spent child]
+                          (walk origin nominal-root child
+                                path true (inc depth) spent))
+                        budget (rest node))
+                (and (vector? node) (= :vector (first node)) (= 2 (count node))
+                     (vector? (second node)))
+                (reduce (fn [spent child]
+                          (walk origin nominal-root child
+                                path true (inc depth) spent))
+                        budget (second node))
+                (and (vector? node) (#{:record :variant} (first node)) (= 3 (count node))
+                     (= nominal-root (second node)) (vector? (nth node 2)))
+                (reduce (fn [spent entry]
+                          (walk-member origin nominal-root entry path depth spent))
+                        budget (nth node 2))
+                :else (fail! "schema descriptor is outside the closed profile"
+                             {:root origin :descriptor node}))))]
+    (reduce (fn [spent entry]
+              (walk (first entry) (first entry) (second entry)
+                    #{(first entry)} false 0 0))
+            0 table))
   table)
 
 (defn identities
