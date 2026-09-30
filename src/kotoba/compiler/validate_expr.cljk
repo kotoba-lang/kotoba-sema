@@ -30,17 +30,19 @@
   document sequences, module function calls, and the unbound-symbol /
   unknown-operation refusals with their nearest-name advice.
 
-  What is not. The heads whose first operand is a TYPE DESCRIPTOR
-  (`typed-list-*`, `typed-set-*`, `typed-map-*`, `record-*`,
-  `hetero-vector-*`, `option-*`, `variant-*`, `result-match-of`, the
-  parametric result family, `typed-cap-call`) call `validate-value-type!`,
-  a separate ~170-line pass over descriptors; and the rodata literals need
-  `rodata-literal-content?`. Reaching one returns the code
-  `vx/unsupported` instead of guessing; the differential harness counts
-  those cases apart."
+  Type-descriptor heads (`typed-list-*`, `typed-set-*`, `typed-map-*`,
+  `record-*`, `hetero-vector-*`, `option-*`, `variant-*`, `result-match-of`,
+  the parametric result family, `typed-cap-call`) validate their descriptor
+  with `kotoba.compiler.value-type` (the port of `validate-value-type!`), in
+  the host's order: shape, descriptor, descriptor kind, operands.
+
+  What is not. The rodata literals need `rodata-literal-content?`; reaching one
+  returns the code `vx/unsupported` instead of guessing, and the differential
+  harness counts those cases apart."
   {:kotoba/export [run-batch]}
   (:require [kotoba.form :as form]
-            [kotoba.compiler.frontend-tables :as tables])
+            [kotoba.compiler.frontend-tables :as tables]
+            [kotoba.compiler.value-type :as vt])
   (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                        [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
              :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -592,6 +594,284 @@
       (reject "kernel-function-address names no function in this module" n)
       :else (pass n))))
 
+;; ---- type-descriptor heads -------------------------------------------------------
+;;
+;; The host validates the descriptor with `validate-value-type!` (a fresh node
+;; counter each time), so a descriptor refusal keeps its own code and message and is
+;; reported at the expression's node count.
+
+(defn- check-type [type [:ref :form/r] n :i64] [:ref :vx/r]
+  (let [r (vt/validate-type type 0 0)]
+    (if (r-ok? r)
+      (pass n)
+      (refuse (record-get [:ref :vx/r] r :code) (record-get [:ref :vx/r] r :msg) n))))
+
+;; kinds of descriptor: 1 list 2 set 3 map 4 record 5 heterogeneous vector 6 option 7 variant
+(defn- kind-ok? [kind :i64 type [:ref :form/r]] :bool
+  (cond
+    (= kind 1) (vt/list-type? type)
+    (= kind 2) (vt/set-type? type)
+    (= kind 3) (vt/map-type? type)
+    (= kind 4) (vt/record-type? type)
+    (= kind 5) (vt/hetero-type? type)
+    (= kind 6) (vt/option-type? type)
+    (= kind 7) (vt/variant-type? type)
+    :else true))
+
+;; Walk the single operand at index I.
+(defn- vx-at [f [:ref :form/r] e [:ref :vx/env] n :i64 i :i64] [:ref :vx/r]
+  (vx (form/nth-of f i) (deeper e) n))
+
+;; Walk the operands at I then J, in that order.
+(defn- vx-at2 [f [:ref :form/r] e [:ref :vx/env] n :i64 i :i64 j :i64] [:ref :vx/r]
+  (let [r (vx-at f e n i)]
+    (if (r-ok? r) (vx-at f e (r-nodes r) j) r)))
+
+;; the common shape: exactly WANT operands, descriptor first (validated, then of kind KIND),
+;; then every operand from START on
+(defn- vx-typed [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64 want :i64 shape-msg :string
+                 kind :i64 kind-msg :string start :i64] [:ref :vx/r]
+  (if (not= argc want)
+    (reject shape-msg n)
+    (let [tr (check-type (form/nth-of f 1) n)]
+      (cond
+        (not (r-ok? tr)) tr
+        (not (kind-ok? kind (form/nth-of f 1))) (reject kind-msg n)
+        :else (vx-from f e n start)))))
+
+(defn- item-count [argc :i64] :i64 (if (> argc 0) (- argc 1) 0))
+
+;; a constructor: descriptor of KIND, at most LIMIT items, then walk the items
+(defn- vx-ctor [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64 kind :i64 kind-msg :string
+                limit :i64 limit-msg :string] [:ref :vx/r]
+  (let [tr (check-type (form/nth-of f 1) n)]
+    (cond
+      (not (r-ok? tr)) tr
+      (not (kind-ok? kind (form/nth-of f 1))) (reject kind-msg n)
+      (> (item-count argc) limit) (reject limit-msg n)
+      :else (vx-from f e n 2))))
+
+(defn- vx-typed-map-new [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (let [tr (check-type (form/nth-of f 1) n)
+        items (item-count argc)]
+    (cond
+      (not (r-ok? tr)) tr
+      (not (and (vt/map-type? (form/nth-of f 1)) (= 0 (rem items 2)) (<= (quot items 2) 31)))
+      (reject "typed map constructor shape or entry limit is invalid" n)
+      :else (vx-from f e n 2))))
+
+(defn- vx-record-new [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (let [type (form/nth-of f 1)
+        tr (check-type type n)]
+    (cond
+      (not (r-ok? tr)) tr
+      (not (and (vt/record-type? type) (= (vt/record-field-count type) (item-count argc))))
+      (reject "record constructor must exactly match its descriptor" n)
+      :else (vx-from f e n 2))))
+
+(defn- vx-hetero-new [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (let [type (form/nth-of f 1)
+        tr (check-type type n)]
+    (cond
+      (not (r-ok? tr)) tr
+      (not (and (vt/hetero-type? type) (= (vt/hetero-item-count type) (item-count argc))))
+      (reject "heterogeneous vector constructor must exactly match its descriptor" n)
+      :else (vx-from f e n 2))))
+
+;; record-get / record-assoc: shape, descriptor, a declared field, then the operands
+(defn- vx-record-field [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64 want :i64 shape-msg :string] [:ref :vx/r]
+  (if (not= argc want)
+    (reject shape-msg n)
+    (let [type (form/nth-of f 1)
+          tr (check-type type n)]
+      (cond
+        (not (r-ok? tr)) tr
+        (not (and (vt/record-type? type) (vt/record-declares-field? type (form/nth-of f 3))))
+        (reject "record field must be a declared keyword literal" n)
+        (= want 3) (vx-at f e n 2)
+        :else (vx-at2 f e n 2 4)))))
+
+(defn- vx-hetero-indexed [f [:ref :form/r] e [:ref :vx/env] n :i64 op :string argc :i64] [:ref :vx/r]
+  (let [want (if (string=? op "hetero-vector-at") 3 4)]
+    (if (not= argc want)
+      (reject "heterogeneous vector indexed operation shape is invalid" n)
+      (let [type (form/nth-of f 1)
+            index (form/nth-of f 3)
+            tr (check-type type n)]
+        (cond
+          (not (r-ok? tr)) tr
+          (not (vt/hetero-type? type)) (reject "heterogeneous vector operation requires a vector descriptor" n)
+          (not (form/is-int? index))
+          (refuse "kotoba.error/hetero-vector-index" "heterogeneous vector index must be an integer literal" n)
+          (not (and (<= 0 (form/int-value index)) (< (form/int-value index) (vt/hetero-item-count type))))
+          (refuse "kotoba.error/hetero-vector-index-range" "heterogeneous vector index must be in range" n)
+          (= want 3) (vx-at f e n 2)
+          :else (vx-at2 f e n 2 4))))))
+
+;; a binder: a symbol with no namespace
+(defn- binder? [b [:ref :form/r]] :bool (simple-sym? b))
+
+(defn- vx-with-binder [f [:ref :form/r] e [:ref :vx/env] n :i64 body-index :i64 binder [:ref :form/r]] [:ref :vx/r]
+  (vx (form/nth-of f body-index)
+      (with-locals (deeper e) (form/form-vec (form/append-form (form/kids-of (env-locals e)) binder)))
+      n))
+
+(defn- vx-option-match [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (if (not= argc 5)
+    (reject "option-match shape is invalid" n)
+    (let [type (form/nth-of f 1)
+          tr (check-type type n)]
+      (cond
+        (not (r-ok? tr)) tr
+        (not (and (vt/option-type? type) (binder? (form/nth-of f 4))))
+        (reject "option-match requires option type and unqualified some binder" n)
+        :else
+        (let [r1 (vx-at2 f e n 2 3)]
+          (if (r-ok? r1)
+            (vx-with-binder f e (r-nodes r1) 5 (form/nth-of f 4))
+            r1))))))
+
+(defn- vx-variant-new [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (if (not= argc 3)
+    (reject "variant-new shape is invalid" n)
+    (let [type (form/nth-of f 1)
+          tr (check-type type n)]
+      (cond
+        (not (r-ok? tr)) tr
+        (not (and (vt/variant-type? type) (form/is-keyword? (form/nth-of f 2))))
+        (reject "variant-new requires variant descriptor and keyword tag" n)
+        :else (vx-at f e n 3)))))
+
+;; the branches of a variant-match: [tag binder body] triples, tags equal to the declared cases in order
+(defn- branches-cover? [cases [:ref :form/r] branches [:ref :form/r]] :bool
+  (let [n (form/count-of cases)]
+    (and (form/is-vec? branches)
+         (= n (form/count-of branches))
+         (loop [i 0]
+           (if (>= i n)
+             true
+             (let [b (form/nth-of branches i)]
+               (if (and (form/eq (form/nth-of (form/nth-of cases i) 0) (form/nth-of b 0))
+                        (form/is-vec? b) (= (form/count-of b) 3) (binder? (form/nth-of b 1)))
+                 (recur (+ i 1))
+                 false)))))))
+
+(defn- vx-variant-branches [branches [:ref :form/r] i :i64 f [:ref :form/r] e [:ref :vx/env] n :i64] [:ref :vx/r]
+  (if (>= i (form/count-of branches))
+    (pass n)
+    (let [b (form/nth-of branches i)
+          r (vx (form/nth-of b 2)
+                (with-locals (deeper e) (form/form-vec (form/append-form (form/kids-of (env-locals e)) (form/nth-of b 1))))
+                n)]
+      (if (r-ok? r) (vx-variant-branches branches (+ i 1) f e (r-nodes r)) r))))
+
+(defn- vx-variant-match [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (if (not= argc 3)
+    (reject "variant-match shape is invalid" n)
+    (let [type (form/nth-of f 1)
+          branches (form/nth-of f 3)
+          tr (check-type type n)]
+      (cond
+        (not (r-ok? tr)) tr
+        (not (and (vt/variant-type? type) (branches-cover? (form/nth-of type 2) branches)))
+        (reject "variant match must exactly cover declared cases in order" n)
+        :else
+        (let [r (vx-at f e n 2)]
+          (if (r-ok? r) (vx-variant-branches branches 0 f e (r-nodes r)) r))))))
+
+(defn- vx-result-match [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (let [type (form/nth-of f 1)]
+    (cond
+      (not= argc 6) (reject "result-match-of shape is invalid" n)
+      (not (vt/result-type? type)) (reject "result match requires [:result ok-type err-type]" n)
+      :else
+      (let [tr (check-type type n)]
+        (cond
+          (not (r-ok? tr)) tr
+          (not (and (binder? (form/nth-of f 3)) (binder? (form/nth-of f 5))))
+          (reject "result match binders must be unqualified symbols" n)
+          :else
+          (let [r1 (vx-at f e n 2)]
+            (if (r-ok? r1)
+              (let [r2 (vx-with-binder f e (r-nodes r1) 4 (form/nth-of f 3))]
+                (if (r-ok? r2)
+                  (vx-with-binder f e (r-nodes r2) 6 (form/nth-of f 5))
+                  r2))
+              r1)))))))
+
+(defn- vx-parametric [f [:ref :form/r] e [:ref :vx/env] n :i64 op :string argc :i64] [:ref :vx/r]
+  (let [expected (op-arity e op)
+        type (form/nth-of f 1)]
+    (cond
+      (not= expected argc) (reject-operation-arity "parametric result operation" op expected argc n)
+      (not (vt/result-type? type)) (reject "parametric result operation requires [:result ok-type err-type]" n)
+      :else
+      (let [tr (check-type type n)]
+        (if (r-ok? tr) (vx-from f e n 2) tr)))))
+
+(defn- vx-typed-cap-call [f [:ref :form/r] e [:ref :vx/env] n :i64 argc :i64] [:ref :vx/r]
+  (if (not (and (= argc 4) (integer-in? (form/nth-of f 1) 0 255)))
+    (reject "typed-cap-call requires a literal capability id in [0,255], request type, result type, and one request" n)
+    (let [r1 (check-type (form/nth-of f 2) n)]
+      (if (not (r-ok? r1))
+        r1
+        (let [r2 (check-type (form/nth-of f 3) n)]
+          (if (r-ok? r2) (vx-at f e n 4) r2))))))
+
+(defn- vx-descriptor [f [:ref :form/r] e [:ref :vx/env] n :i64 op :string argc :i64] [:ref :vx/r]
+  (cond
+    (string=? op "typed-list-new")
+    (vx-ctor f e n argc 1 "typed list constructor requires [:list item-type]" 128 "typed list constructor exceeds item limit")
+    (string=? op "typed-list-conj")
+    (vx-typed f e n argc 3 "typed list conj shape is invalid" 1 "typed list conj requires [:list item-type]" 2)
+    (string=? op "typed-list-nth")
+    (vx-typed f e n argc 3 "typed list nth shape is invalid" 1 "typed list nth requires [:list item-type]" 2)
+    (string=? op "typed-set-new")
+    (vx-ctor f e n argc 2 "typed set constructor requires [:set item-type]" 32 "typed set constructor exceeds item limit")
+    (string=? op "typed-set-count")
+    (vx-typed f e n argc 2 "typed set count shape is invalid" 2 "typed set count requires [:set item-type]" 2)
+    (or (string=? op "typed-set-contains") (string=? op "typed-set-conj") (string=? op "typed-set-disj"))
+    (vx-typed f e n argc 3 "typed set operation shape is invalid" 2 "typed set operation requires [:set item-type]" 2)
+    (string=? op "typed-set-equal")
+    (vx-typed f e n argc 3 "typed set equality shape is invalid" 2 "typed set equality requires [:set item-type]" 2)
+    (string=? op "typed-set-nth")
+    (vx-typed f e n argc 3 "typed set nth shape is invalid" 2 "typed set nth requires [:set item-type]" 2)
+    (string=? op "typed-map-new") (vx-typed-map-new f e n argc)
+    (string=? op "typed-map-count")
+    (vx-typed f e n argc 2 "typed map count shape is invalid" 3 "typed map count requires [:map key-type value-type]" 2)
+    (or (string=? op "typed-map-contains") (string=? op "typed-map-get") (string=? op "typed-map-dissoc"))
+    (vx-typed f e n argc 3 "typed map operation shape is invalid" 3 "typed map operation requires [:map key-type value-type]" 2)
+    (string=? op "typed-map-entry-at")
+    (vx-typed f e n argc 3 "typed map entry projection shape is invalid" 3 "typed map entry projection requires [:map key-type value-type]" 2)
+    (or (string=? op "typed-map-keys") (string=? op "typed-map-vals"))
+    (vx-typed f e n argc 2 "typed map projection shape is invalid" 3 "typed map projection requires [:map key-type value-type]" 2)
+    (string=? op "typed-map-assoc")
+    (vx-typed f e n argc 4 "typed map assoc shape is invalid" 3 "typed map assoc requires [:map key-type value-type]" 2)
+    (string=? op "typed-map-equal")
+    (vx-typed f e n argc 3 "typed map equality shape is invalid" 3 "typed map equality requires [:map key-type value-type]" 2)
+    (string=? op "record-new") (vx-record-new f e n argc)
+    (string=? op "record-get") (vx-record-field f e n argc 3 "record projection shape is invalid")
+    (string=? op "record-assoc") (vx-record-field f e n argc 4 "record replacement shape is invalid")
+    (string=? op "record-equal")
+    (vx-typed f e n argc 3 "record equality shape is invalid" 4 "record equality requires a record descriptor" 2)
+    (string=? op "hetero-vector-new") (vx-hetero-new f e n argc)
+    (string=? op "hetero-vector-count")
+    (vx-typed f e n argc 2 "heterogeneous vector count shape is invalid" 5 "heterogeneous vector count requires a vector descriptor" 2)
+    (or (string=? op "hetero-vector-at") (string=? op "hetero-vector-assoc"))
+    (vx-hetero-indexed f e n op argc)
+    (string=? op "hetero-vector-equal")
+    (vx-typed f e n argc 3 "heterogeneous vector equality shape is invalid" 5 "heterogeneous vector equality requires a vector descriptor" 2)
+    (string=? op "option-none-of")
+    (vx-typed f e n argc 1 "option-none-of shape is invalid" 6 "option-none-of requires [:option payload-type]" 2)
+    (or (string=? op "option-some-of") (string=? op "option-some?-of"))
+    (vx-typed f e n argc 2 "generic option operation shape is invalid" 6 "generic option operation requires [:option payload-type]" 2)
+    (string=? op "option-value-of")
+    (vx-typed f e n argc 3 "option-value-of shape is invalid" 6 "option-value-of requires [:option payload-type]" 2)
+    (string=? op "option-match") (vx-option-match f e n argc)
+    (string=? op "variant-new") (vx-variant-new f e n argc)
+    (string=? op "variant-match") (vx-variant-match f e n argc)
+    :else (vx-result-match f e n argc)))
+
 ;; ---- unknown operation ----------------------------------------------------
 
 (defn- builtin-names [e [:ref :vx/env]] [:list :string]
@@ -628,7 +908,7 @@
     (string=? op "if") (vx-if f e n argc)
     (string=? op "do") (vx-do f e n argc)
     (string=? op "cap-call") (vx-cap-call f e n argc)
-    (string=? op "typed-cap-call") (unsupported op n)
+    (string=? op "typed-cap-call") (vx-typed-cap-call f e n argc)
     (= fam 0)
     (if (or (= argc 0)
             (and (or (string=? op "quot") (string=? op "bit-xor") (string=? op "bit-and") (string=? op "bit-or"))
@@ -649,9 +929,9 @@
     (= fam 12) (vx-family "f32 operation" f e n op argc)
     (= fam 13) (vx-map-op f e n op argc)
     (= fam 14) (vx-family "typed safe-value operation" f e n op argc)
-    (descriptor-head? op) (unsupported op n)
+    (descriptor-head? op) (vx-descriptor f e n op argc)
     (bytes-head? op) (vx-bytes f e n op argc)
-    (= fam 15) (unsupported op n)
+    (= fam 15) (vx-parametric f e n op argc)
     (string=? op "vector-new")
     (if (> argc 128) (reject "vector-new exceeds item limit" n) (vx-from f e n 1))
     (string=? op "vector-f64-new")
