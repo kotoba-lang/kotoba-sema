@@ -18974,6 +18974,28 @@
             m))
         tail))
 
+(defn- protocol-method-param-parts
+  "Split a protocol method parameter vector into its names and their value
+  types. `[this chunk :bytes n]` -> names [this chunk n], types [nil :bytes nil].
+
+  A parameter may be followed by ONE type (a keyword or a structured type
+  vector); an untyped non-receiver parameter is :i64, as it always was. The
+  receiver (first parameter) takes no type: it is the record the method is
+  dispatched on. Returns nil for a vector that is not names-with-optional-types
+  so the callers' existing `bounded (method [this ...])` refusal fires."
+  [params]
+  (when (vector? params)
+    (loop [remaining (seq params) names [] types []]
+      (if (empty? remaining)
+        {:names names :types types}
+        (let [param (first remaining)
+              more (next remaining)]
+          (if (symbol? param)
+            (if (and more (or (keyword? (first more)) (vector? (first more))))
+              (recur (next more) (conj names param) (conj types (first more)))
+              (recur more (conj names param) (conj types nil)))
+            nil))))))
+
 (defn- protocol-form->info [form]
   (let [[head protocol-name & tail0] form
         [protocol-doc tail] (if (string? (first tail0))
@@ -18997,14 +19019,30 @@
                                  (valid-name? (first %))
                                  (vector? (second %))
                                  (seq (second %))
-                                 (<= (count (second %)) max-parameters)
-                                 (every? valid-name? (second %)))
+                                 (let [{:keys [names types]}
+                                       (protocol-method-param-parts (second %))]
+                                   (and names
+                                        (<= (count names) max-parameters)
+                                        (every? valid-name? names)
+                                        (nil? (first types)))))
                            methods)
                    (= (count methods) (count (distinct (map first methods)))))
       (reject! (str head " requires unique bounded (method [this ...]) signatures")
                form :kotoba.error/protocol-declaration))
-    {:name protocol-name
-     :methods (into {} (map (fn [[method-name params]] [method-name params]) methods))}))
+    (let [parts (into {} (map (fn [[method-name params]]
+                                [method-name (protocol-method-param-parts params)]))
+                      methods)]
+      (doseq [{:keys [types]} (vals parts)
+              type types
+              :when type]
+        (validate-value-type! type))
+      {:name protocol-name
+       :methods (into {} (map (fn [[method-name _]]
+                                [method-name (:names (get parts method-name))]))
+                      methods)
+       :param-types (into {} (map (fn [[method-name _]]
+                                    [method-name (:types (get parts method-name))]))
+                          methods)})))
 
 (defn- record-descriptor [namespace-symbol record-name field-parts]
   [:record (keyword (str namespace-symbol) (name record-name))
@@ -19076,14 +19114,23 @@
          (when-not (vector? params)
            (reject! "protocol method parameters must be a vector"
                     method-form :kotoba.error/protocol-method))
-         (when-not (and declared-params
-                        (= (count params) (count declared-params)))
-           (reject! "protocol method does not match its declaration"
-                    method-form :kotoba.error/protocol-method))
-         (when-not (and (every? valid-name? params)
-                        (= (count params) (count (distinct params))))
-           (reject! "protocol method parameters must be unique unqualified symbols"
-                    method-form :kotoba.error/protocol-method))
+         ;; `[this chunk :bytes]`: a non-receiver parameter may carry its type
+         ;; (see `protocol-method-param-parts`); the declaration's type is the
+         ;; default, an untyped parameter is :i64.
+         (let [{:keys [names types] :as parts} (protocol-method-param-parts params)]
+           (when-not (and declared-params
+                          (= (count (or names params)) (count declared-params)))
+             (reject! "protocol method does not match its declaration"
+                      method-form :kotoba.error/protocol-method))
+           (when-not (and parts
+                          (every? valid-name? names)
+                          (= (count names) (count (distinct names)))
+                          (nil? (first types)))
+             (reject! "protocol method parameters must be unique unqualified symbols"
+                      method-form :kotoba.error/protocol-method))
+           (doseq [type (rest types)
+                   :when type]
+             (validate-value-type! type)))
          (when-not (= 1 (count body))
            (reject! "protocol method must contain one result expression"
                     method-form :kotoba.error/protocol-method))
@@ -19091,7 +19138,11 @@
           :method method-name
           :record record-name
           :record-type (:descriptor record)
-          :params params
+          :params (:names (protocol-method-param-parts params))
+          :param-types (mapv (fn [declared given]
+                               (or given declared :i64))
+                             (get-in protocol [:param-types method-name])
+                             (:types (protocol-method-param-parts params)))
           :body (first body)}))
      method-forms)))
 
@@ -19586,11 +19637,11 @@
                                 (list* 'record-new descriptor fields)))))
                     record-infos))
         impl-defs
-        (mapv (fn [{:keys [impl-name params record-type body]}]
+        (mapv (fn [{:keys [impl-name params param-types record-type body]}]
                 (let [typed-params
-                      (vec (mapcat (fn [index param]
-                                     [param (if (zero? index) record-type :i64)])
-                                   (range) params))]
+                      (vec (mapcat (fn [index param param-type]
+                                     [param (if (zero? index) record-type param-type)])
+                                   (range) params param-types))]
                   (list 'defn- impl-name typed-params
                         (rewrite-record-member-access body (first params) record-type))))
               named-impls)

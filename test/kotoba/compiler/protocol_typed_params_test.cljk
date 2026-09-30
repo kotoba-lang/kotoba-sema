@@ -1,0 +1,44 @@
+(ns kotoba.compiler.protocol-typed-params-test
+  "A protocol method's non-receiver parameters may carry a type
+  (`(write! [w chunk :bytes])`), so a record-dispatched method can take a
+  `:bytes` (or `:string`) argument. Untyped parameters stay :i64. The receiver
+  takes no type. This is what `kotoba.io.writer/write!` needs."
+  (:require #?(:clj  [kotoba.test :refer [deftest is]]
+               :cljs [cljs.test :refer [deftest is] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(defn- run [defs]
+  (kir/execute (kir/lower (sema/analyze (str "(ns m.probe)\n" defs))) 'main [] {}))
+(defn- refusal [defs]
+  (try (do (sema/analyze (str "(ns m.probe)\n" defs)) nil)
+       (catch #?(:clj Throwable :cljs :default) e (ex-message e))))
+(defn- w [x] #?(:clj x :cljs (js/Number x)))
+
+(def ^:private decl
+  "(defprotocol Writer (write! [w chunk :bytes n]))
+(defrecord Sink [base :i64]
+  Writer
+  (write! [this chunk n] (+ (:base this) (+ n (bytes-count chunk)))))
+(defrecord Sink2 [base :i64]
+  Writer
+  (write! [this c :bytes n] (bytes-count c)))
+")
+
+(deftest a-typed-protocol-parameter-carries-bytes
+  (is (= 9 (w (run (str decl "(defn main [] :i64 (write! (->Sink 4) (bytes-from-vector-i64 (vector-i64 1 2 3)) 2))")))))
+  (is (= 2 (w (run (str decl "(defn main [] :i64 (write! (->Sink2 4) (bytes-from-vector-i64 (vector-i64 1 2)) 7))"))))
+      "an implementation may restate the type, and each record dispatches on its own"))
+
+(deftest the-argument-is-checked-against-the-declared-type
+  (is (some? (refusal (str decl "(defn main [] :i64 (write! (->Sink 4) 5 2))")))
+      "an i64 is not a :bytes"))
+
+(deftest the-receiver-takes-no-type
+  (is (= "defprotocol requires unique bounded (method [this ...]) signatures"
+         (refusal "(defprotocol P (m [x :bytes]))"))))
+
+(deftest an-untyped-parameter-is-still-i64
+  (is (= 5 (w (run "(defprotocol P (m [x y]))
+(defrecord R [a :i64] P (m [this y] (+ (:a this) y)))
+(defn main [] :i64 (m (->R 2) 3))")))))
