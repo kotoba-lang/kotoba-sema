@@ -28,3 +28,12 @@
 (defn inner [x :i64] :i64 (if (< x 0) (throw (ex-info \"inner\" {:x x})) x))
 (defn f [x :i64] :i64
   (try (inner x) (catch e (throw (ex-info \"outer\" {:phase :outer} e)))))"))))
+
+(deftest catch-default-is-an-untyped-catch
+  ;; `(catch :default e ...)` is the dual-runtime spelling of a catch-all (the
+  ;; ClojureScript form the .cljk sources already write); it must read as
+  ;; `(catch e ...)`, not as the error TYPE `:default`.
+  (is (some? (sema/analyze
+              "(ns m.probe {:kotoba/export [f]})
+(defn inner [x :i64] :i64 (if (< x 0) (throw (ex-info \"inner\" {:x x})) x))
+(defn f [x :i64] :i64 (try (inner x) (catch :default e 0)))"))))

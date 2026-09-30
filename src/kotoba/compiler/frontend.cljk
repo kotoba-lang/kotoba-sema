@@ -2824,7 +2824,10 @@
                    form :kotoba.error/abort-shape))]
     (when-not (and (symbol? binder) (nil? (namespace binder)))
       (reject! "catch binder must be an unqualified symbol" form :kotoba.error/abort-shape))
-    [error-type binder handler]))
+    ;; `(catch :default e ...)` is the dual-runtime spelling of "any error"
+    ;; (ClojureScript's catch-all); Kotoba's spelling is no error type, which
+    ;; leaves the binder's type to inference.
+    [(when-not (= :default error-type) error-type) binder handler]))
 
 (defn- abort-callee-sites
   "`[[callee error-type] ...]`, in source order, for the aborting functions
