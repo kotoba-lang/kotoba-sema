@@ -19779,10 +19779,13 @@
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
+        ;; The reserved-prefix check reads what the AUTHOR wrote: the doseq
+        ;; annotation below inserts `__kotoba_pair_sequence` markers, which
+        ;; would otherwise be refused as if the author had written them.
+        _ (when-not admit-linked-synthetics?
+            (reject-reserved-source-symbols! source-forms))
         forms (rewrite-pure-application-forms
                (mapv annotate-doseq-collection-kinds source-forms))
-        _ (when-not admit-linked-synthetics?
-            (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
         ;; Library heads (adr-2609242330): after the reserved-prefix check,
