@@ -39,7 +39,7 @@
   What is not. The rodata literals need `rodata-literal-content?`; reaching one
   returns the code `vx/unsupported` instead of guessing, and the differential
   harness counts those cases apart."
-  {:kotoba/export [run-batch]}
+  {:kotoba/export [run-batch check-form]}
   (:require [kotoba.form :as form]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.compiler.value-type :as vt])
@@ -990,6 +990,24 @@
         (unbound-symbol f e n))
       (form/is-seq? f) (vx-call f e n)
       :else (reject "value type is outside the safe profile" n))))
+
+;; ---- single-form entry ----------------------------------------------------
+;; One expression against LOCALS (a Form list of symbols), FUNCTIONS (a Form map name -> arity) and
+;; the FORBIDDEN / DECLARED head sets, with NODES already charged to the program. Answers the Form
+;; vector [ok? code message nodes], so the frontend's `validate-expr` (a module of its own) can
+;; raise the refusal in its own error type. The tables are folded for every call; a caller that
+;; checks many bodies should batch them (`run-batch`).
+(defn check-form [f [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r]
+                  forbidden [:ref :form/r] declared [:ref :form/r] nodes :i64] [:ref :form/r]
+  (let [tabs (build-tabs)
+        index (build-index tabs)
+        e (record-new [:ref :vx/env] locals functions tabs index
+                      (build-set-index forbidden) (build-set-index declared) 0)
+        r (vx f e nodes)]
+    (form/vec4 (form/bool-form (r-ok? r))
+               (form/string-form (record-get [:ref :vx/r] r :code))
+               (form/string-form (record-get [:ref :vx/r] r :msg))
+               (form/int-form (r-nodes r)))))
 
 ;; ---- batch entry ---------------------------------------------------------
 

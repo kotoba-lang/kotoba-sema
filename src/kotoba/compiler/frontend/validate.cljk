@@ -2,13 +2,13 @@
   "Module `validate` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (26 forms, 982 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs."
   (:require [kotoba.lang.text :as str]
             [kotoba.kir.value :as value]
-            #?@(:kotoba [[kotoba.form :as form]])
+            #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.validate-expr :as vx]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])
-            [kotoba.compiler.frontend.base :refer [first-truthy if-parts let-body refuse-reader-tagged-host-literal! reject! reject-call-arity! reject-operation-arity! #?@(:kotoba [code-point-width])]]
+            [kotoba.compiler.frontend.base :refer [if-parts let-body refuse-reader-tagged-host-literal! reject! reject-call-arity! reject-operation-arity! #?@(:kotoba [code-point-width fdrop fget fhead-is? fkw fl-add fl-drop fl-nth fl-slice fput pr-form] :default [first-truthy])]]
             [kotoba.compiler.frontend.kernel-region :refer [integer-literal? #?@(:kotoba [] :default [kernel-memory-operations]) #?@(:kotoba [sym-is?])]]
             [kotoba.compiler.frontend.closure-types :refer [canonical-list-type? canonical-typed-map-type? generic-option-type? heterogeneous-vector-type? parametric-result-type? record-type? type-alias-form? typed-set-type? validate-value-type! variant-type?]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? max-function-docstring-chars valid-name?]]
-            [kotoba.compiler.frontend.namespace-defs :refer [forbidden-heads heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic compact-graph-operations comparisons decimal-operations document-fixed-operations f32-operations f64-operations float-division-heads heap-operations i32-operations i64-operations image-symbol-operations kernel-privileged-operations kgraph-operations parametric-result-operations region-operations rodata-literal-operations string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-vector-operations xml-operations])]])
+            [kotoba.compiler.frontend.namespace-defs :refer [forbidden-heads heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [grammar-declared-heads] :default [arithmetic compact-graph-operations comparisons decimal-operations document-fixed-operations f32-operations f64-operations float-division-heads heap-operations i32-operations i64-operations image-symbol-operations kernel-privileged-operations kgraph-operations parametric-result-operations region-operations rodata-literal-operations string-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-vector-operations xml-operations])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -20,7 +20,7 @@
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
 ;; forward references inside this module (the cut keeps the original form order)
-(declare holds-symbol? validate-expr validate-expr-impl)
+#?(:kotoba nil :default (declare holds-symbol? validate-expr validate-expr-impl))
 
 
 ;; ---- quoted data: a symbol, a vector of symbols, or an atom that holds none (maps and sets print in pr-str order: unported) ----
@@ -44,7 +44,10 @@
 ;; 65536 bytes, so `page-count * 4096` is the tighter of the two exactly when
 ;; `page-count` is below 16. What this refuses, concretely, is a 64 KiB window
 ;; declared over a one-page allocation.
-(def alloc-region-maximum-pages 1099511627776)
+#?(:kotoba
+   (defn alloc-region-maximum-pages [] :i64 1099511627776)
+   :default
+(def alloc-region-maximum-pages 1099511627776))
 
 #?(:kotoba
    (defn hex-code? [c :i64] :bool
@@ -145,12 +148,316 @@
                      (every? hex-text? fields)))
          (bytes-literal bytes-literal-length) (hex-text? text)
          false))))
-(def max-expression-nodes 50000)
-(def max-bindings 4096)
-(def max-list-items 128)
-(def max-typed-set-items 32)
-(def max-typed-map-entries 31)
+#?(:kotoba
+   (defn max-expression-nodes [] :i64 50000)
+   :default
+(def max-expression-nodes 50000))
+#?(:kotoba
+   (defn max-bindings [] :i64 4096)
+   :default
+(def max-bindings 4096))
+#?(:kotoba
+   (defn max-list-items [] :i64 128)
+   :default
+(def max-list-items 128))
+#?(:kotoba
+   (defn max-typed-set-items [] :i64 32)
+   :default
+(def max-typed-set-items 32))
+#?(:kotoba
+   (defn max-typed-map-entries [] :i64 31)
+   :default
+(def max-typed-map-entries 31))
 
+;; A refusal is an abort (ADR 0007); `require-k` is module-local on purpose (an imported aborting
+;; function is typed [:result T E] here and does not propagate through a plain call).
+#?(:kotoba
+   (defn fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg code form "subset"))
+   :default nil)
+
+#?(:kotoba
+   (defn require-k [ok :bool msg :string code :string form [:ref :form/r]] :i64
+     (if ok 0 (throw (fe-reject msg code form))))
+   :default nil)
+
+;; The host's `reader-tagged f64` shape `(f64-from-bits <i64>)`; a Form reads an f64 literal as an
+;; f64 Form, so both spellings are the closed literal here (the reader's metadata flag has no
+;; Form equivalent, so any `(f64-from-bits n)` with an integer is accepted).
+#?(:kotoba
+   (defn document-reader-f64-form? [form [:ref :form/r]] :bool
+     (or (form/is-f64? form)
+         (and (fhead-is? form "f64-from-bits") (= 2 (form/count-of form)) (kotoba-integer? (form/nth-of form 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn quote-form? [form [:ref :form/r]] :bool
+     (and (fhead-is? form "quote") (= 2 (form/count-of form))))
+   :default nil)
+
+;; The value type of a scalar inside a quoted symbol-key map, nil otherwise
+#?(:kotoba
+   (defn quoted-scalar-type [v [:ref :form/r]] [:ref :form/r]
+     (cond
+       (kotoba-integer? v) (form/keyword-form :i64)
+       (form/is-string? v) (form/keyword-form :string)
+       (form/is-keyword? v) (form/keyword-form :keyword)
+       (form/is-bool? v) (form/keyword-form :bool)
+       :else (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-all-symbols? [xs [:ref :form/r] i :i64 step :i64] :bool
+     (if (>= i (form/count-of xs))
+       true
+       (and (form/is-symbol? (form/nth-of xs i)) (qd-all-symbols? xs (+ i step) step))))
+   :default nil)
+
+;; the distinct scalar types of the values of the map M (odd positions)
+#?(:kotoba
+   (defn- qd-value-types [m [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (form/count-of m))
+       acc
+       (qd-value-types m (+ j 2) (fl-add acc (quoted-scalar-type (form/nth-of m j))))))
+   :default nil)
+
+
+
+;; The literal kind of DATUM, the payload of `(quote datum)`, when it is admitted symbol data:
+;; a Form map {:kind :symbol|:symbol-set|:symbol-key-map|:symbol-vector [:value-type T]}; nil otherwise
+#?(:kotoba
+   (defn quoted-symbol-datum-kind [datum [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-symbol? datum) (fput (form/form-map (form/no-forms)) :kind (form/keyword-form :symbol))
+       (and (form/is-set? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) (max-typed-set-items))
+            (qd-all-symbols? datum 0 1))
+       (fput (form/form-map (form/no-forms)) :kind (form/keyword-form :symbol-set))
+       (and (form/is-map? datum) (> (form/count-of datum) 0) (<= (quot (form/count-of datum) 2) (max-typed-map-entries))
+            (qd-all-symbols? datum 0 2))
+       (let [types (qd-value-types datum 1 (form/no-forms))]
+         (if (and (= 1 (vector-count types)) (not (form/is-nil? (fl-nth types 0))))
+           (fput (fput (form/form-map (form/no-forms)) :kind (form/keyword-form :symbol-key-map)) :value-type (fl-nth types 0))
+           (form/nil-form)))
+       (and (form/is-vec? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) (value/vector-literal-item-limit))
+            (qd-all-symbols? datum 0 1))
+       (fput (form/form-map (form/no-forms)) :kind (form/keyword-form :symbol-vector))
+       :else (form/nil-form)))
+   :default nil)
+
+;; FORM as the author wrote it, for a refusal: set members and map entries in `pr-str` order
+#?(:kotoba
+   (defn- qd-sorted-by-text [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count xs))
+       acc
+       (qd-sorted-by-text xs (+ i 1) (qd-insert-text acc (fl-nth xs i) 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-insert-text [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
+     (if (or (>= i (vector-count xs)) (< (string-compare (pr-form x) (pr-form (fl-nth xs i))) 0))
+       (fl-slice xs i (vector-count xs) (form/append-form (fl-slice xs 0 i (form/no-forms)) x))
+       (qd-insert-text xs x (+ i 1))))
+   :default nil)
+
+;; map entries as [k v] vectors, sorted by the key's printed text
+#?(:kotoba
+   (defn- qd-entries [m [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= (+ j 1) (form/count-of m))
+       acc
+       (qd-entries m (+ j 2) (form/append-form acc (form/vec2 (form/nth-of m j) (form/nth-of m (+ j 1)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-insert-entry [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
+     (if (or (>= i (vector-count xs)) (< (string-compare (pr-form (form/nth-of x 0)) (pr-form (form/nth-of (fl-nth xs i) 0))) 0))
+       (fl-slice xs i (vector-count xs) (form/append-form (fl-slice xs 0 i (form/no-forms)) x))
+       (qd-insert-entry xs x (+ i 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-sorted-entries [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count xs))
+       acc
+       (qd-sorted-entries xs (+ i 1) (qd-insert-entry acc (fl-nth xs i) 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-join-text [xs [:list [:ref :form/r]] i :i64 sep :string acc :string] :string
+     (if (>= i (vector-count xs))
+       acc
+       (qd-join-text xs (+ i 1) sep (string-concat (if (> i 0) (string-concat acc sep) acc) (qd-text (fl-nth xs i))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-entries-text [entries [:list [:ref :form/r]] i :i64 acc :string] :string
+     (if (>= i (vector-count entries))
+       acc
+       (let [e (fl-nth entries i)]
+         (qd-entries-text entries (+ i 1)
+                          (string-concat (if (> i 0) (string-concat acc ", ") acc)
+                                         (string-concat (qd-text (form/nth-of e 0)) (string-concat " " (qd-text (form/nth-of e 1)))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn- qd-text [f [:ref :form/r]] :string
+     (cond
+       (form/is-seq? f) (string-concat "(" (string-concat (qd-join-text (form/kids-of f) 0 " " "") ")"))
+       (form/is-vec? f) (string-concat "[" (string-concat (qd-join-text (form/kids-of f) 0 " " "") "]"))
+       (form/is-set? f) (string-concat "#{" (string-concat (qd-join-text (qd-sorted-by-text (form/kids-of f) 0 (form/no-forms)) 0 " " "") "}"))
+       (form/is-map? f) (string-concat "{" (string-concat (qd-entries-text (qd-sorted-entries (qd-entries f 0 (form/no-forms)) 0 (form/no-forms)) 0 "") "}"))
+       :else (pr-form f)))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-datum-text [form [:ref :form/r]] :string
+     (let [t (qd-text form)]
+       (if (> (string-length t) 80) (string-concat (string-substring t 0 77) "...") t)))
+   :default nil)
+
+;; The by-name refusal for a `(quote datum)` that holds symbols but is not one of the four admitted kinds
+#?(:kotoba
+   (defn reject-quoted-symbol-datum! [form [:ref :form/r]] :i64
+     (let [datum (form/nth-of form 1)
+           spelled (quoted-datum-text form)]
+       (cond
+         (form/is-set? datum)
+         (throw (fe-reject (str "quoted set mixes symbols with other kinds: " spelled
+                                " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword")
+                           "kotoba.error/subset-reject" form))
+         (form/is-vec? datum)
+         (throw (fe-reject (str "quoted vector mixes symbols with other kinds: " spelled
+                                " -- a symbol vector ([:vector [:symbol ...]]) holds symbols only; spell every item as a symbol")
+                           "kotoba.error/subset-reject" form))
+         (and (form/is-map? datum) (not (qd-all-symbols? datum 0 2)))
+         (throw (fe-reject (str "quoted map mixes symbol keys with other key kinds: " spelled
+                                " -- a symbol-key map ([:map :symbol V]) holds symbol keys only; spell every key as a symbol, or every key as a keyword")
+                           "kotoba.error/subset-reject" form))
+         (form/is-map? datum)
+         (throw (fe-reject (str "quoted symbol-key map values are not one scalar kind: " spelled
+                                " -- a symbol-key map is [:map :symbol V] for one V of integer / string / keyword / boolean; a symbol or a collection is not a value it holds")
+                           "kotoba.error/subset-reject" form))
+         (form/is-seq? datum)
+         (throw (fe-reject (str "quoted list has no literal spelling: " spelled
+                                " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector; a list is a heap value built with list")
+                           "kotoba.error/subset-reject" form))
+         :else
+         (throw (fe-reject (str "quoted data is outside the admitted symbol kinds: " spelled
+                                " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector")
+                           "kotoba.error/subset-reject" form)))))
+   :default nil)
+
+;; Admission of one desugared expression (the Kotoba reading is `kotoba.compiler.validate-expr`,
+;; the port of `validate-expr-impl`): answers the node count after FORM, or refuses. NODES is the
+;; count already charged to the program; the rodata literals are the one family that port does not
+;; cover ("vx/unsupported").
+#?(:kotoba
+   (defn validate-expr [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
+     (let [r (vx/check-form form locals functions (forbidden-heads) (grammar-declared-heads) nodes)
+           ok (form/bool-value (form/nth-of r 0))
+           ck (require-k ok (form/string-value (form/nth-of r 2)) (form/string-value (form/nth-of r 1)) form)]
+       (form/int-value (form/nth-of r 3))))
+   :default nil)
+
+;; ---- constants ----
+#?(:kotoba
+   (defn- cl-all? [xs [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of xs))
+       true
+       (and (constant-literal? (form/nth-of xs i)) (cl-all? xs (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn- cl-all-keywords? [xs [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of xs))
+       true
+       (and (form/is-keyword? (form/nth-of xs i)) (cl-all-keywords? xs (+ i 1)))))
+   :default nil)
+
+;; Closed compile-time data admitted for top-level `def`
+#?(:kotoba
+   (defn constant-literal? [value [:ref :form/r]] :bool
+     (cond
+       (kotoba-integer? value) true
+       (form/is-f64? value) true
+       (document-reader-f64-form? value) true
+       (form/is-string? value) (<= (string-byte-length (form/string-value value)) (value/string-literal-byte-limit))
+       (form/is-keyword? value) true
+       (form/is-bool? value) true
+       (form/is-nil? value) true
+       (form/is-symbol? value) true
+       (form/is-vec? value) (or (type-alias-form? value)
+                                (and (<= (form/count-of value) (max-list-items)) (cl-all? value 0)))
+       (form/is-set? value) (and (> (form/count-of value) 0) (<= (form/count-of value) (max-typed-set-items))
+                                 (cl-all-keywords? value 0))
+       (form/is-map? value) (and (<= (quot (form/count-of value) 2) (max-list-items)) (cl-all? value 0))
+       (quote-form? value) (and (holds-symbol? (form/nth-of value 1))
+                                (not (form/is-nil? (quoted-symbol-datum-kind (form/nth-of value 1)))))
+       (form/is-seq? value) (and (or (fhead-is? value "typed-set-new") (fhead-is? value "typed-map-new"))
+                                 (form/is-vec? (form/nth-of value 1))
+                                 (<= (form/count-of value) (+ 2 (max-list-items)))
+                                 (cl-all-from? value 2))
+       :else false))
+   :default nil)
+
+#?(:kotoba
+   (defn- cl-all-from? [xs [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of xs))
+       true
+       (and (constant-literal? (form/nth-of xs i)) (cl-all-from? xs (+ i 1)))))
+   :default nil)
+
+;; `{:name :value}` for a literal `def`, `{:name :fold-form}` for a computed one
+#?(:kotoba
+   (defn- dp-closed-refusal [value [:ref :form/r]] :i64
+     (throw (fe-reject "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data"
+                       "kotoba.error/subset-reject" value)))
+   :default nil)
+
+#?(:kotoba
+   (defn def-parts [form [:ref :form/r]] [:ref :form/r]
+     (let [name (form/nth-of form 1)
+           declaration0 (fdrop form 2)
+           has-doc (and (= 2 (vector-count declaration0)) (form/is-string? (fl-nth declaration0 0)))
+           docstring (if has-doc (fl-nth declaration0 0) (form/nil-form))
+           declaration (if has-doc (fl-drop declaration0 1) declaration0)
+           ok1 (require-k (or (not has-doc) (<= (string-length (form/string-value docstring)) (max-function-docstring-chars)))
+                          "constant docstring exceeds admission limit" "kotoba.error/subset-reject" docstring)
+           ok2 (require-k (= 1 (vector-count declaration)) "constant must contain exactly one literal value"
+                          "kotoba.error/subset-reject" form)
+           value-form (fl-nth declaration 0)
+           keyword-literal (and (fhead-is? value-form "keyword") (= 2 (form/count-of value-form))
+                                (form/is-string? (form/nth-of value-form 1)))
+           quoted (and (fhead-is? value-form "quote") (= 2 (form/count-of value-form)))
+           value (cond
+                   keyword-literal (fkw (form/string-value (form/nth-of value-form 1)))
+                   quoted (form/nth-of value-form 1)
+                   :else value-form)
+           changed (or keyword-literal quoted)]
+       (cond
+         ;; quoted data holding a symbol: the compiler's own operation tables, and a quoted symbol
+         ;; (NOT an alias)
+         (and changed (holds-symbol? value))
+         (cond
+           (not (form/is-nil? (quoted-symbol-datum-kind value)))
+           (fput (fput (form/form-map (form/no-forms)) :name name) :value value-form)
+           (form/is-seq? value) (let [c (dp-closed-refusal value)] (form/nil-form))
+           :else (let [c (reject-quoted-symbol-datum! value-form)] (form/nil-form)))
+         (constant-literal? value) (fput (fput (form/form-map (form/no-forms)) :name name) :value value)
+         (form/is-string? value)
+         (let [c (require-k false (str "constant string exceeds the portable string byte limit: "
+                                       (string-from-i64 (string-byte-length (form/string-value value))) " bytes, at most "
+                                       (string-from-i64 (value/string-literal-byte-limit))
+                                       " -- a longer string is a value a function builds, or a file a capability reads")
+                            "kotoba.error/subset-reject" value)]
+           (form/nil-form))
+         changed (let [c (dp-closed-refusal value)] (form/nil-form))
+         (or (and (form/is-seq? value) (form/is-symbol? (form/nth-of value 0)))
+             (form/is-vec? value) (form/is-map? value) (form/is-set? value))
+         (fput (fput (form/form-map (form/no-forms)) :name name) :fold-form value)
+         :else (let [c (dp-closed-refusal value)] (form/nil-form)))))
+   :default nil)
+
+#?(:kotoba nil :default
 (defn document-reader-f64-form?
   "The JVM reader represents an f64 literal as a Double. The JVM-free reader
   preserves its exact bits as `(f64-from-bits <i64>)`; recognize that closed
@@ -160,7 +467,7 @@
        (true? (:kotoba.reader/f64-literal (meta form)))
        (= 'f64-from-bits (first form))
        (= 2 (count form))
-       (kotoba-integer? (second form))))
+       (kotoba-integer? (second form)))))
 
 ;; ── quoted symbol data: `'sym` `'#{a b}` `'{a 1}` `'[a b]` ──────────────────
 ;;
@@ -209,8 +516,9 @@
 ;; with other key kinds, a symbol-key map whose values are not one scalar
 ;; kind (integer / string / keyword / boolean), and a quoted list.
 
+#?(:kotoba nil :default
 (defn quote-form? [form]
-  (and (seq? form) (= 'quote (first form)) (= 2 (count form))))
+  (and (seq? form) (= 'quote (first form)) (= 2 (count form)))))
 
 #?(:kotoba
    (defn holds-symbol? [datum [:ref :form/r]] :bool
@@ -223,6 +531,7 @@
 (defn holds-symbol? [datum]
   (first-truthy symbol? (tree-seq coll? seq datum))))
 
+#?(:kotoba nil :default
 (defn quoted-scalar-type
   "The value type of a scalar inside a quoted symbol-key map, or nil."
   [v]
@@ -231,8 +540,9 @@
     (string? v) :string
     (keyword? v) :keyword
     (boolean? v) :bool
-    :else nil))
+    :else nil)))
 
+#?(:kotoba nil :default
 (defn quoted-symbol-datum-kind
   "The literal kind of DATUM, the payload of `(quote datum)`, when it is
   admitted symbol data: `:symbol`, `:symbol-set`, `:symbol-key-map` (with
@@ -251,8 +561,9 @@
     (and (vector? datum) (seq datum) (<= (count datum) value/vector-literal-item-limit)
          (every? symbol? datum))
     {:kind :symbol-vector}
-    :else nil))
+    :else nil)))
 
+#?(:kotoba nil :default
 (defn quoted-datum-text
   "FORM as the author wrote it, for a refusal: integers as digits on both
   runtimes (a ClojureScript BigInt would otherwise print as
@@ -270,8 +581,9 @@
               (symbol? f) (str f)
               :else (pr-str f)))]
     (let [t (text form)]
-      (if (> (count t) 80) (str (subs t 0 77) "...") t))))
+      (if (> (count t) 80) (str (subs t 0 77) "...") t)))))
 
+#?(:kotoba nil :default
 (defn reject-quoted-symbol-datum!
   "The by-name refusal for a `(quote datum)` that holds symbols but is not
   one of the four admitted kinds. Text pinned by
@@ -303,12 +615,14 @@
       :else
       (reject! (str "quoted data is outside the admitted symbol kinds: " spelled
                     " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector")
-               form :kotoba.error/subset-reject))))
+               form :kotoba.error/subset-reject)))))
 
+#?(:kotoba nil :default
 (defn charge-node! [budget form]
   (when (> (vswap! budget inc) max-expression-nodes)
-    (reject! "program expression budget exhausted" form)))
+    (reject! "program expression budget exhausted" form))))
 
+#?(:kotoba nil :default
 (defn validate-bindings [bindings locals functions depth budget]
   (when-not (and (vector? bindings) (even? (count bindings)))
     (reject! "let requires an even binding vector" bindings))
@@ -323,17 +637,19 @@
           (reject! "invalid local binding" name))
         (validate-expr value env functions (inc depth) budget)
         (recur (next pairs) (conj env name)))
-      env)))
+      env))))
 
 ;; The three per-expression passes -- lowering, admission and inference --
 ;; each get the same wrapper, for the same reason (`internal-failure!`).
 ;; Admission and inference destructure a declared type after checking its
 ;; shape in most branches and not in all of them, so a host error can escape
 ;; here too; the innermost frame names the operation it escaped from.
+#?(:kotoba nil :default
 (defn validate-expr [form locals functions depth budget]
   (try (validate-expr-impl form locals functions depth budget)
-       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
+       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form)))))
 
+#?(:kotoba nil :default
 (defn validate-expr-impl [form locals functions depth budget]
   (charge-node! budget form)
   (when (> depth 256)
@@ -949,8 +1265,9 @@
 
         :else (unknown-operation! op form functions))
       form)
-    :else (reject! "value type is outside the safe profile" form)))
+    :else (reject! "value type is outside the safe profile" form))))
 
+#?(:kotoba nil :default
 (defn constant-literal?
   "Closed compile-time data admitted for top-level `def`. Constants are
   substituted before desugaring, so they cannot allocate ambient mutable
@@ -1022,8 +1339,9 @@
                       (vector? (second value))
                       (<= (count value) (+ 2 max-list-items))
                       (every? constant-literal? (nnext value)))
-    :else false))
+    :else false)))
 
+#?(:kotoba nil :default
 (defn def-parts
   "`{:name :value}` for a literal `def`, `{:name :fold-form}` for a computed
   one -- the second is folded by `fold-def-value!` once the constants above
@@ -1094,4 +1412,4 @@
             (vector? value) (map? value) (set? value))
         {:name name :fold-form value}
         :else
-        (reject! "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data" value)))))
+        (reject! "constant value must be closed bounded integer/string/keyword/boolean/nil/vector/map or non-empty keyword-set data" value))))))
