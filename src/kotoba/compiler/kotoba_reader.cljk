@@ -118,6 +118,22 @@
 
 (declare read-form read-delimited)
 
+(defn- percent-digits?
+  "True for `%` followed by one or more ASCII digits (the `%N` token)."
+  [n]
+  #?(:kotoba
+     (let [len (string-byte-length n)]
+       (if (< len 2)
+         false
+         (if (= (string-byte-at n 0) 37)
+           (loop [i 1]
+             (if (= i len)
+               true
+               (let [b (string-byte-at n i)]
+                 (if (and (>= b 48) (<= b 57)) (recur (+ i 1)) false))))
+           false)))
+     :default (boolean (re-matches #"%[0-9]+" n))))
+
 (defn- fn-shorthand-arg-num
   "Returns the positional arg number of `%`/`%N`, or nil if X is not one."
   [x]
@@ -125,8 +141,10 @@
     (let [n (name x)]
       (cond
         (= n "%") 1
-        (re-matches #"%[0-9]+" n)
-        (let [v #?(:clj (Long/parseLong (subs n 1) 10) :cljs (js/parseInt (subs n 1) 10))]
+        (percent-digits? n)
+        (let [v #?(:kotoba (option-or (parse-long (subs n 1)) 0)
+                   :clj (Long/parseLong (subs n 1) 10)
+                   :cljs (js/parseInt (subs n 1) 10))]
           (when-not (pos? v)
             (reject! "fn shorthand arg must be %1 or higher" {:token n}))
           v)))))
