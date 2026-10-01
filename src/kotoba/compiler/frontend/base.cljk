@@ -2,7 +2,7 @@
   "Module `base` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (93 forms, 1312 lines). Depends on: nothing in this split."
   (:require [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
-            #?@(:kotoba [] :default [[kotoba.compiler.kotoba-reader :as kr]])
+            [kotoba.compiler.kotoba-reader :as kr]
             #?@(:kotoba [[kotoba.form :as form]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
