@@ -5744,7 +5744,8 @@
     (let [head (form/nth-of form 0)
           src (fsource-head form)
           shown (if (string=? src "") (use-site-text head) src)]
-      (str "(" shown (if (> (form/count-of form) 1) " " "") (use-site-kids form 1 "") ")"))
+      ;; `use-site-kids` puts the separator BEFORE each kid it prints, so none is added here
+      (str "(" shown (use-site-kids form 1 "") ")"))
     (form/is-vec? form) (str "[" (use-site-kids form 0 "") "]")
     (or (form/is-int? form) (form/is-symbol? form)) (form-text-any form)
     :else (pr-form form)))
