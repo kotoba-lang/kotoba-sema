@@ -514,10 +514,10 @@
                (dr (dr-env a) (form/call2 "record-get" (dr-form a) op)))
              (= 3 (form/count-of form))
              (desugar-expr env (form/call3 "get" (form/nth-of form 1) op (form/nth-of form 2)))
-             :else (throw (fe-unported "keyword head" form)))
+             :else (desugar-ordinary-call env op form))
            (form/is-seq? op) (desugar-beta env form ctx)
            (form/is-symbol? op) (desugar-head env op form ctx)
-           :else (throw (fe-unported "operator" form))))))
+           :else (desugar-ordinary-call env op form)))))
    :default nil)
 
 #?(:kotoba
@@ -2228,32 +2228,134 @@
        (lambda-raw-clauses form 1 (form/no-forms))))
    :default nil)
 
-;; the clauses with no variadic one, as an error when there is
+;; variadic clauses `[fixed ... & rest]`: the shape, then the count; each is specialized at the arities not written out, up to four
 #?(:kotoba
-   (defn lambda-require-fixed [cs [:list [:ref :form/r]] i :i64] :i64
+   (defn prefix-valid-names? [ps [:ref :form/r] i :i64 end :i64] :bool
+     (if (>= i end)
+       true
+       (and (valid-name-form? (form/nth-of ps i)) (prefix-valid-names? ps (+ i 1) end))))
+   :default nil)
+
+;; is the clause well formed as [fixed ... & rest] (the `&` second to last, at most four fixed, valid names)
+#?(:kotoba
+   (defn variadic-shape-ok? [ps [:ref :form/r]] :bool
+     (let [a (amp-index ps 0)]
+       (and (= a (- (form/count-of ps) 2))
+            (<= a 4)
+            (prefix-valid-names? ps 0 a)
+            (valid-name-form? (form/nth-of ps (- (form/count-of ps) 1))))))
+   :default nil)
+
+;; how many clauses are variadic; a malformed variadic clause is refused
+#?(:kotoba
+   (defn lambda-variadic-count [cs [:list [:ref :form/r]] i :i64 n :i64] :i64
      (if (>= i (vector-count cs))
-       0
+       n
+       (let [c (typed-list-nth [:list [:ref :form/r]] cs i)
+             ps (form/nth-of c 0)
+             v? (has-amp? ps 0)
+             _ (require-k (or (not v?) (variadic-shape-ok? ps)) "variadic fn clause requires [fixed ... & rest]" "kotoba.error/subset-reject" c)]
+         (lambda-variadic-count cs (+ i 1) (if v? (+ n 1) n)))))
+   :default nil)
+
+;; the first variadic clause, nil-form when none
+#?(:kotoba
+   (defn lambda-first-variadic [cs [:list [:ref :form/r]] i :i64] [:ref :form/r]
+     (if (>= i (vector-count cs))
+       (form/nil-form)
        (let [c (typed-list-nth [:list [:ref :form/r]] cs i)]
-         (if (has-amp? (form/nth-of c 0) 0)
-           (throw (fe-unported "variadic fn clause" c))
-           (lambda-require-fixed cs (+ i 1))))))
+         (if (has-amp? (form/nth-of c 0) 0) c (lambda-first-variadic cs (+ i 1))))))
+   :default nil)
+
+;; the arity of the fixed clause with that many parameters, or nil-form
+#?(:kotoba
+   (defn lambda-fixed-clause-of [cs [:list [:ref :form/r]] n :i64 i :i64] [:ref :form/r]
+     (if (>= i (vector-count cs))
+       (form/nil-form)
+       (let [c (typed-list-nth [:list [:ref :form/r]] cs i)
+             ps (form/nth-of c 0)]
+         (if (and (not (has-amp? ps 0)) (= n (form/count-of ps)))
+           c
+           (lambda-fixed-clause-of cs n (+ i 1))))))
+   :default nil)
+
+;; the set of arities of the fixed clauses
+#?(:kotoba
+   (defn lambda-fixed-arities [cs [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (>= i (vector-count cs))
+       acc
+       (let [ps (form/nth-of (typed-list-nth [:list [:ref :form/r]] cs i) 0)]
+         (lambda-fixed-arities cs (+ i 1) (if (has-amp? ps 0) acc (set-add acc (form/int-form (form/count-of ps))))))))
+   :default nil)
+
+;; add the integers from..4 to the arity set
+#?(:kotoba
+   (defn add-arity-range [acc [:ref :form/r] from :i64] [:ref :form/r]
+     (if (> from 4)
+       acc
+       (add-arity-range (set-add acc (form/int-form from)) (+ from 1))))
+   :default nil)
+
+;; `specialize-variadic-clause`: [fixed ++ extras, (let [rest (list extras...)] body)] at ARITY
+#?(:kotoba
+   (defn rest-extras [i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i n)
+       acc
+       (rest-extras (+ i 1) n (form/append-form acc (form/symbol-form (string-concat "__kotoba_lambda_rest_arg_" (string-from-i64 i)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn specialize-variadic [v [:ref :form/r] arity :i64] [:ref :form/r]
+     (let [ps (form/nth-of v 0)
+           a (amp-index ps 0)
+           extras (rest-extras 0 (- arity a) (form/no-forms))
+           fixed (doc-members-of ps 0 (form/no-forms))]
+       (form/vec2 (form/form-vec (form/append-many (slice-forms fixed 0 a (form/no-forms)) extras))
+                  (form/call2 "let" (form/vec2 (form/nth-of ps (- (form/count-of ps) 1)) (head-call (form/symbol-form "list") extras))
+                              (form/nth-of v 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn lambda-clauses-for-arities [cs [:list [:ref :form/r]] v [:ref :form/r] arities [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count arities))
+       acc
+       (let [n (form/int-value (typed-list-nth [:list [:ref :form/r]] arities i))
+             fixed (lambda-fixed-clause-of cs n 0)]
+         (lambda-clauses-for-arities cs v arities (+ i 1)
+                                     (form/append-form acc (if (form/is-nil? fixed) (specialize-variadic v n) fixed))))))
+   :default nil)
+
+;; the fixed clauses ordered by arity: every written clause, plus the variadic one specialized at the arities no clause writes
+#?(:kotoba
+   (defn lambda-expand-clauses [cs [:list [:ref :form/r]] form [:ref :form/r]] [:list [:ref :form/r]]
+     (let [vcount (lambda-variadic-count cs 0 0)
+           _ (require-k (and (<= vcount 1) (fixed-arities-unique? cs 0))
+                        "fn requires unique fixed arities and at most one variadic clause" "kotoba.error/subset-reject" form)]
+       (if (= 0 vcount)
+         (sort-clauses cs 0 (form/no-forms))
+         (let [v (lambda-first-variadic cs 0)
+               arities (sorted-ints (add-arity-range (lambda-fixed-arities cs 0 (form/form-set (form/no-forms))) (amp-index (form/nth-of v 0) 0)) 0 (form/no-forms))]
+           (lambda-clauses-for-arities cs v arities 0 (form/no-forms))))))
    :default nil)
 
 ;; no two clauses share an arity
 #?(:kotoba
-   (defn arities-differ-from? [cs [:list [:ref :form/r]] n :i64 j :i64] :bool
+   (defn fixed-differ-from? [cs [:list [:ref :form/r]] n :i64 j :i64] :bool
      (if (>= j (vector-count cs))
        true
-       (and (not (= n (form/count-of (form/nth-of (typed-list-nth [:list [:ref :form/r]] cs j) 0))))
-            (arities-differ-from? cs n (+ j 1)))))
+       (let [ps (form/nth-of (typed-list-nth [:list [:ref :form/r]] cs j) 0)]
+         (and (or (has-amp? ps 0) (not (= n (form/count-of ps))))
+              (fixed-differ-from? cs n (+ j 1))))))
    :default nil)
 
+;; no two fixed clauses share an arity
 #?(:kotoba
-   (defn clause-arities-unique? [cs [:list [:ref :form/r]] i :i64] :bool
+   (defn fixed-arities-unique? [cs [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count cs))
        true
-       (and (arities-differ-from? cs (form/count-of (form/nth-of (typed-list-nth [:list [:ref :form/r]] cs i) 0)) (+ i 1))
-            (clause-arities-unique? cs (+ i 1)))))
+       (let [ps (form/nth-of (typed-list-nth [:list [:ref :form/r]] cs i) 0)]
+         (and (or (has-amp? ps 0) (fixed-differ-from? cs (form/count-of ps) (+ i 1)))
+              (fixed-arities-unique? cs (+ i 1))))))
    :default nil)
 
 ;; the clauses ordered by arity (the host sorts the arity set and maps over it)
@@ -2375,9 +2477,7 @@
 #?(:kotoba
    (defn lift-lambda-k [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
      (let [raw (lambda-clauses-of form)
-           _ (lambda-require-fixed raw 0)
-           _ (require-k (clause-arities-unique? raw 0) "fn requires unique fixed arities and at most one variadic clause" "kotoba.error/subset-reject" form)
-           clauses (sort-clauses raw 0 (form/no-forms))
+           clauses (lambda-expand-clauses raw form)
            _ (require-k (and (> (vector-count clauses) 0) (clauses-valid? clauses 0))
                         "fn value requires unique arities with zero to four unique parameters" "kotoba.error/subset-reject" form)
            _ (require-k (not (and (form/is-vec? (if (> (form/count-of form) 1) (form/nth-of form 1) (form/nil-form))) (= 2 (form/count-of form))))
@@ -3066,19 +3166,18 @@
 ;; ---- lazy-map / lazy-filter on the Kotoba route: a synthesized recursive helper whose body is a lifted thunk ----
 ;; The arities a callback provides: a module function's, or the union over the clauses of a literal fn (a variadic clause is not ported).
 #?(:kotoba
-   (defn arity-of-params [ps [:ref :form/r]] :i64
+   (defn params-arity-set [ps [:ref :form/r] acc [:ref :form/r]] [:ref :form/r]
      (if (has-amp? ps 0)
-       (throw (fe-unported "variadic fn clause" ps))
-       (form/count-of ps)))
+       (add-arity-range acc (amp-index ps 0))
+       (set-add acc (form/int-form (form/count-of ps)))))
    :default nil)
 
 #?(:kotoba
    (defn clause-arity-set [fn-form [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
-     ;; the clauses are the forms of FN-FORM from I; each is ([params] ...) and answers #{(count params)}
+     ;; the clauses are the forms of FN-FORM from I; each is ([params] ...) and provides its arity (a variadic one: from its fixed count to four)
      (if (>= i (form/count-of fn-form))
        acc
-       (let [n (arity-of-params (form/nth-of (form/nth-of fn-form i) 0))]
-         (clause-arity-set fn-form (+ i 1) (set-add acc (form/int-form n))))))
+       (clause-arity-set fn-form (+ i 1) (params-arity-set (form/nth-of (form/nth-of fn-form i) 0) acc))))
    :default nil)
 
 #?(:kotoba
@@ -3105,8 +3204,7 @@
 
 #?(:kotoba
    (defn callback-single-arity [params [:ref :form/r]] [:ref :form/r]
-     (let [n (arity-of-params params)]
-       (form/form-set (form/one-form (form/int-form n)))))
+     (params-arity-set params (form/form-set (form/no-forms))))
    :default nil)
 
 ;; the callback as a closure value: the arity is checked against what it provides, a module function goes through fn-ref
