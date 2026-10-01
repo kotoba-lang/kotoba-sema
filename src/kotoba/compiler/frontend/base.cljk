@@ -11,7 +11,7 @@
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
                                  :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
-                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool]]]
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]
                                  ;; the local-state elaboration state and step result (see "Local state" below)
@@ -1221,7 +1221,12 @@
 ;; A refusal is a `throw` of :fe/err bound in a `let`, never a statement before a loop.
 ;; ---------------------------------------------------------------------------
 #?(:kotoba
-   (defn lnth [xs [:list [:ref :form/r]] i :i64] [:ref :form/r] (typed-list-nth [:list [:ref :form/r]] xs i))
+   (defn fl-nth [xs [:list [:ref :form/r]] i :i64] [:ref :form/r] (typed-list-nth [:list [:ref :form/r]] xs i))
+   :default nil)
+
+#?(:kotoba
+   (defn fl-add [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
+     (if (fl-has? xs x 0) xs (form/append-form xs x)))
    :default nil)
 
 #?(:kotoba
@@ -1339,7 +1344,7 @@
    (defn ls-scan-kids? [kind :i64 kids [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count kids))
        false
-       (if (ls-scan? kind (lnth kids i)) true (ls-scan-kids? kind kids (+ i 1)))))
+       (if (ls-scan? kind (fl-nth kids i)) true (ls-scan-kids? kind kids (+ i 1)))))
    :default nil)
 
 ;; the first node that is a symbol naming a cell, in the order `tree-seq` visits (nil when none)
@@ -1354,7 +1359,7 @@
    (defn ls-mention-kids [kids [:list [:ref :form/r]] i :i64 cells [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count kids))
        (form/nil-form)
-       (let [m (ls-mention (lnth kids i) cells)]
+       (let [m (ls-mention (fl-nth kids i) cells)]
          (if (form/is-nil? m) (ls-mention-kids kids (+ i 1) cells) m))))
    :default nil)
 
@@ -1438,32 +1443,32 @@
    :default nil)
 
 #?(:kotoba
-   (defn ls-has? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] :bool
+   (defn fl-has? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] :bool
      (if (>= i (vector-count xs))
        false
-       (if (form/eq (lnth xs i) x) true (ls-has? xs x (+ i 1)))))
+       (if (form/eq (fl-nth xs i) x) true (fl-has? xs x (+ i 1)))))
    :default nil)
 
 #?(:kotoba
    (defn ls-first-after [xs [:list [:ref :form/r]] cells [:ref :form/r] id :i64 i :i64] :i64
      (if (>= i (vector-count xs))
        i
-       (if (> (ls-id-of cells (lnth xs i)) id) i (ls-first-after xs cells id (+ i 1)))))
+       (if (> (ls-id-of cells (fl-nth xs i)) id) i (ls-first-after xs cells id (+ i 1)))))
    :default nil)
 
 #?(:kotoba
-   (defn ls-slice [xs [:list [:ref :form/r]] from :i64 to :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn fl-slice [xs [:list [:ref :form/r]] from :i64 to :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= from to)
        acc
-       (ls-slice xs (+ from 1) to (form/append-form acc (lnth xs from)))))
+       (fl-slice xs (+ from 1) to (form/append-form acc (fl-nth xs from)))))
    :default nil)
 
 #?(:kotoba
    (defn ls-insert-by-id [xs [:list [:ref :form/r]] cells [:ref :form/r] x [:ref :form/r]] [:list [:ref :form/r]]
-     (if (ls-has? xs x 0)
+     (if (fl-has? xs x 0)
        xs
        (let [p (ls-first-after xs cells (ls-id-of cells x) 0)]
-         (ls-slice xs p (vector-count xs) (form/append-form (ls-slice xs 0 p (form/no-forms)) x)))))
+         (fl-slice xs p (vector-count xs) (form/append-form (fl-slice xs 0 p (form/no-forms)) x)))))
    :default nil)
 
 ;; the cells of BEFORE whose binding AFTER moved, added to ACC (ordered by cell id)
@@ -1522,7 +1527,7 @@
    (defn ls-subst-kids [kids [:list [:ref :form/r]] i :i64 cells [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
-       (ls-subst-kids kids (+ i 1) cells (form/append-form acc (ls-subst (lnth kids i) cells)))))
+       (ls-subst-kids kids (+ i 1) cells (form/append-form acc (ls-subst (fl-nth kids i) cells)))))
    :default nil)
 
 ;; ---- the transformation ----
@@ -1531,7 +1536,7 @@
    (defn ls-tx-items [items [:list [:ref :form/r]] i :i64 bindings [:list [:ref :form/r]] values [:list [:ref :form/r]] cells [:ref :form/r] st [:ref :ls/s]] [:ref :ls/r]
      (if (>= i (vector-count items))
        (ls-r bindings (form/form-vec values) cells st (form/nil-form))
-       (let [res (ls-tx (lnth items i) cells st)]
+       (let [res (ls-tx (fl-nth items i) cells st)]
          (ls-tx-items items (+ i 1) (form/append-many bindings (ls-bindings res))
                       (form/append-form values (ls-value res)) (ls-cells res) (ls-st res)))))
    :default nil)
@@ -1543,7 +1548,7 @@
                         "kotoba.error/local-state-arity" form)
            target (form/nth-of form 1)
            current (ls-cell-ref "swap!" target cells form)
-           fargs (ls-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
+           fargs (fl-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
            _ (require-k (not (ls-scan-kids? 1 fargs 0))
                         (str "a swap! argument must not write another atom (" local-state-note ")")
                         "kotoba.error/local-state-position" form)
@@ -1551,7 +1556,7 @@
            items (form/kids-of (ls-value applied))
            fresh (ls-fresh (ls-cells applied) target (ls-st applied))
            sym (ls-value fresh)
-           call (form/form-seq (form/cons-onto (lnth items 0) (form/cons-onto current (form/rest-list (ls-value applied)))))]
+           call (form/form-seq (form/cons-onto (fl-nth items 0) (form/cons-onto current (form/rest-list (ls-value applied)))))]
        (ls-r (form/append-form (form/append-form (ls-bindings applied) sym) call)
              sym (ls-cells fresh) (ls-st fresh) (form/nil-form))))
    :default nil)
@@ -1581,15 +1586,15 @@
      (if (>= i (vector-count tests))
        acc
        (ls-case-clauses tests tails (+ i 1)
-                        (form/append-form (form/append-form acc (lnth tests i)) (lnth tails i)))))
+                        (form/append-form (form/append-form acc (fl-nth tests i)) (fl-nth tails i)))))
    :default nil)
 
 #?(:kotoba
    (defn ls-assemble [kind :i64 scrutinee [:ref :form/r] tails [:list [:ref :form/r]] tests [:list [:ref :form/r]] default? :bool] [:ref :form/r]
      (if (= kind 0)
-       (form/call3 "if" scrutinee (lnth tails 0) (lnth tails 1))
+       (form/call3 "if" scrutinee (fl-nth tails 0) (fl-nth tails 1))
        (let [clauses (ls-case-clauses tests tails 0 (form/no-forms))
-             all (if default? (form/append-form clauses (lnth tails (- (vector-count tails) 1))) clauses)]
+             all (if default? (form/append-form clauses (fl-nth tails (- (vector-count tails) 1))) clauses)]
          (form/form-seq (form/cons-onto (form/symbol-form "case") (form/cons-onto scrutinee all))))))
    :default nil)
 
@@ -1616,7 +1621,7 @@
    (defn ls-union-by-id [acc [:list [:ref :form/r]] cells [:ref :form/r] more [:list [:ref :form/r]] i :i64] [:list [:ref :form/r]]
      (if (>= i (vector-count more))
        acc
-       (ls-union-by-id (ls-insert-by-id acc cells (lnth more i)) cells more (+ i 1))))
+       (ls-union-by-id (ls-insert-by-id acc cells (fl-nth more i)) cells more (+ i 1))))
    :default nil)
 
 #?(:kotoba
@@ -1632,7 +1637,7 @@
    (defn ls-projections [changed [:list [:ref :form/r]] i :i64 branches [:list [:ref :ls/r]] kind :i64 scrutinee [:ref :form/r] tests [:list [:ref :form/r]] default? :bool cs [:ref :form/r] st [:ref :ls/s] acc [:list [:ref :form/r]]] [:ref :ls/r]
      (if (>= i (vector-count changed))
        (ls-r acc (form/nil-form) cs st (form/nil-form))
-       (let [cell (lnth changed i)
+       (let [cell (fl-nth changed i)
              fresh (ls-fresh cs cell st)
              sym (ls-value fresh)
              tails (ls-cell-tails branches cell 0 (form/no-forms))]
@@ -1670,7 +1675,7 @@
    (defn ls-tx-arms [arms [:list [:ref :form/r]] i :i64 cells [:ref :form/r] form [:ref :form/r] st [:ref :ls/s] acc [:list [:ref :ls/r]]] [:list [:ref :ls/r]]
      (if (>= i (vector-count arms))
        acc
-       (let [arm (lnth arms i)
+       (let [arm (fl-nth arms i)
              res (ls-tx arm cells st)
              branch (ls-r (ls-bindings res) (ls-value res) (ls-cells res) (ls-st res) arm)
              _ (ls-guard-branch branch cells form)]
@@ -1725,9 +1730,9 @@
    (defn ls-tx-when [form [:ref :form/r] cells [:ref :form/r] st [:ref :ls/s]] [:ref :ls/r]
      (let [_ (require-k (> (form/count-of form) 2) "when requires at least one body expression (atom slice 1)"
                         "kotoba.error/local-state-arity" form)
-           bodies (ls-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
+           bodies (fl-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
            body (if (= 1 (vector-count bodies))
-                  (lnth bodies 0)
+                  (fl-nth bodies 0)
                   (form/form-seq (form/cons-onto (form/symbol-form "do") bodies)))]
        (ls-tx (form/call3 "if" (form/nth-of form 1) body (form/int-form 0)) cells st)))
    :default nil)
@@ -1737,7 +1742,7 @@
    (defn ls-cond-fold [clauses [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (< i 0)
        acc
-       (ls-cond-fold clauses (- i 2) (form/call3 "if" (lnth clauses i) (lnth clauses (+ i 1)) acc))))
+       (ls-cond-fold clauses (- i 2) (form/call3 "if" (fl-nth clauses i) (fl-nth clauses (+ i 1)) acc))))
    :default nil)
 
 #?(:kotoba
@@ -1746,37 +1751,37 @@
            n (vector-count clauses)
            _ (require-k (and (> n 0) (= 0 (rem n 2))) "cond requires an even number of clauses (atom slice 1)"
                         "kotoba.error/local-state-arity" form)
-           _ (require-k (form/eq (lnth clauses (- n 2)) (form/keyword-form :else))
+           _ (require-k (form/eq (fl-nth clauses (- n 2)) (form/keyword-form :else))
                         (str "a cond that writes an atom must end with :else (" local-state-note ")")
                         "kotoba.error/local-state-position" form)]
-       (ls-tx (ls-cond-fold clauses (- n 4) (lnth clauses (- n 1))) cells st)))
+       (ls-tx (ls-cond-fold clauses (- n 4) (fl-nth clauses (- n 1))) cells st)))
    :default nil)
 
 #?(:kotoba
    (defn ls-case-tests [clauses [:list [:ref :form/r]] i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ i 1) n)
        acc
-       (ls-case-tests clauses (+ i 2) n (form/append-form acc (lnth clauses i)))))
+       (ls-case-tests clauses (+ i 2) n (form/append-form acc (fl-nth clauses i)))))
    :default nil)
 
 #?(:kotoba
    (defn ls-case-arms [clauses [:list [:ref :form/r]] i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ i 1) n)
        acc
-       (ls-case-arms clauses (+ i 2) n (form/append-form acc (lnth clauses (+ i 1))))))
+       (ls-case-arms clauses (+ i 2) n (form/append-form acc (fl-nth clauses (+ i 1))))))
    :default nil)
 
 #?(:kotoba
    (defn ls-tx-case [form [:ref :form/r] cells [:ref :form/r] st [:ref :ls/s]] [:ref :ls/r]
      (let [_ (require-k (> (form/count-of form) 2) "case requires at least one clause (atom slice 1)"
                         "kotoba.error/local-state-arity" form)
-           clauses (ls-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
+           clauses (fl-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))
            n (vector-count clauses)
            default? (= 1 (rem n 2))
            paired (if default? (- n 1) n)
            tests (ls-case-tests clauses 0 paired (form/no-forms))
            arms0 (ls-case-arms clauses 0 paired (form/no-forms))
-           arms (if default? (form/append-form arms0 (lnth clauses (- n 1))) arms0)]
+           arms (if default? (form/append-form arms0 (fl-nth clauses (- n 1))) arms0)]
        (ls-tx-branching (form/nth-of form 1) arms 1 tests default? cells form st)))
    :default nil)
 
@@ -1784,7 +1789,7 @@
 ;; store or a cap-call in non-final position survives
 #?(:kotoba
    (defn ls-do-from [forms [:list [:ref :form/r]] i :i64 bindings [:list [:ref :form/r]] cells [:ref :form/r] st [:ref :ls/s]] [:ref :ls/r]
-     (let [res (ls-tx (lnth forms i) cells st)
+     (let [res (ls-tx (fl-nth forms i) cells st)
            bindings1 (form/append-many bindings (ls-bindings res))]
        (if (< (+ i 1) (vector-count forms))
          (let [value (ls-value res)]
@@ -1811,7 +1816,7 @@
                         "kotoba.error/local-state-arity" form)
            _ (require-k (= 0 (rem (form/count-of bindings) 2)) "let requires an even binding vector (atom slice 1)"
                         "kotoba.error/local-state-arity" form)
-           bodies (ls-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))]
+           bodies (fl-slice (form/kids-of form) 2 (form/count-of form) (form/no-forms))]
        (ls-tx-let-tail bindings 0 bodies cells form st)))
    :default nil)
 
@@ -1825,7 +1830,7 @@
    (defn ls-let-projections [changed [:list [:ref :form/r]] i :i64 name [:ref :form/r] bound-value [:ref :form/r] tail [:ref :ls/r] cs [:ref :form/r] st [:ref :ls/s] acc [:list [:ref :form/r]]] [:ref :ls/r]
      (if (>= i (vector-count changed))
        (ls-r acc (form/nil-form) cs st (form/nil-form))
-       (let [cell (lnth changed i)
+       (let [cell (fl-nth changed i)
              fresh (ls-fresh cs cell st)
              sym (ls-value fresh)
              inner (form/nth-of (form/form-get (ls-cells tail) cell) 1)]
@@ -2759,7 +2764,7 @@
    (defn validate-interrupt-entries-from [functions [:list [:ref :form/r]] i :i64] :i64
      (if (>= i (vector-count functions))
        0
-       (let [_ (validate-interrupt-entry (lnth functions i))]
+       (let [_ (validate-interrupt-entry (fl-nth functions i))]
          (validate-interrupt-entries-from functions (+ i 1)))))
    :default nil)
 
@@ -2786,7 +2791,7 @@
    (defn abort-mentions-kids? [kids [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count kids))
        false
-       (if (abort-form-mentions? (lnth kids i)) true (abort-mentions-kids? kids (+ i 1)))))
+       (if (abort-form-mentions? (fl-nth kids i)) true (abort-mentions-kids? kids (+ i 1)))))
    :default nil)
 
 ;; Does FORM abort past its own boundary -- a `throw`, or a call to a function in
@@ -2813,7 +2818,7 @@
    (defn abort-escapes-kids? [kids [:list [:ref :form/r]] i :i64 abort-error-types [:ref :form/r]] :bool
      (if (>= i (vector-count kids))
        false
-       (if (abort-escapes? (lnth kids i) abort-error-types)
+       (if (abort-escapes? (fl-nth kids i) abort-error-types)
          true
          (abort-escapes-kids? kids (+ i 1) abort-error-types))))
    :default nil)
@@ -2829,7 +2834,7 @@
    (defn abort-trivial-kids? [kids [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count kids))
        true
-       (if (abort-anf-trivial? (lnth kids i)) (abort-trivial-kids? kids (+ i 1)) false)))
+       (if (abort-anf-trivial? (fl-nth kids i)) (abort-trivial-kids? kids (+ i 1)) false)))
    :default nil)
 
 ;; ---- a-normalize-aborts ----
@@ -2892,7 +2897,7 @@
    (defn an-last-hoisted [aet [:ref :form/r] items [:list [:ref :form/r]] i :i64 best :i64] :i64
      (if (>= i (vector-count items))
        best
-       (an-last-hoisted aet items (+ i 1) (if (abort-escapes? (lnth items i) aet) i best))))
+       (an-last-hoisted aet items (+ i 1) (if (abort-escapes? (fl-nth items i) aet) i best))))
    :default nil)
 
 ;; rebuild a sibling form: KIND 0 a vector, 1 `(do ...)`, 2 `(OP ...)`
@@ -2915,7 +2920,7 @@
            (let [h (an-hoist prefix n rebuilt)]
              (an-res (form/append-many binds (an-binds h)) (an-form h) false (an-n h)))))
        (let [last? (= i (- (vector-count items) 1))
-             r (an-anf aet prefix n (lnth items i) (and last? tail-last?))
+             r (an-anf aet prefix n (fl-nth items i) (and last? tail-last?))
              dead? (an-dead r)
              f (an-form r)
              n1 (an-n r)
@@ -2942,7 +2947,7 @@
 ;; the argument at I of ARGS, nil when absent
 #?(:kotoba
    (defn an-arg [args [:list [:ref :form/r]] i :i64] [:ref :form/r]
-     (if (< i (vector-count args)) (lnth args i) (form/nil-form)))
+     (if (< i (vector-count args)) (fl-nth args i) (form/nil-form)))
    :default nil)
 
 #?(:kotoba
@@ -2972,11 +2977,11 @@
 #?(:kotoba
    (defn an-if [aet [:ref :form/r] prefix :string n :i64 args [:list [:ref :form/r]] form [:ref :form/r] tail? :bool] [:ref :anf/r]
      (let [parts (if-parts args form)
-           r (an-anf aet prefix n (lnth parts 0) false)]
+           r (an-anf aet prefix n (fl-nth parts 0) false)]
        (if (an-dead r)
          (an-res (an-binds r) (an-form r) true (an-n r))
-         (let [st (an-scope aet prefix (an-n r) (lnth parts 1))
-               se (an-scope aet prefix (an-n st) (lnth parts 2))
+         (let [st (an-scope aet prefix (an-n r) (fl-nth parts 1))
+               se (an-scope aet prefix (an-n st) (fl-nth parts 2))
                bt (an-bind-unless-tail aet prefix (an-n se) (form/call3 "if" (an-form r) (an-form st) (an-form se)) tail?)]
            (an-res (form/append-many (an-binds r) (an-binds bt)) (an-form bt) false (an-n bt))))))
    :default nil)
@@ -3087,7 +3092,7 @@
    (defn an-functions [aet [:ref :form/r] prefix :string functions [:list [:ref :form/r]] i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count functions))
        acc
-       (let [function (lnth functions i)
+       (let [function (fl-nth functions i)
              key (form/keyword-form :body)
              body (form/form-get function key)]
          (if (or (abort-form-mentions? body) (abort-escapes? body aet))
@@ -3125,8 +3130,8 @@
    (defn af-names [facets [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count facets))
        acc
-       (let [nm (form/form-get (capability-id->name) (form/nth-of (lnth facets i) 1))]
-         (af-names facets (+ i 1) (if (ls-has? acc nm 0) acc (form/append-form acc nm))))))
+       (let [nm (form/form-get (capability-id->name) (form/nth-of (fl-nth facets i) 1))]
+         (af-names facets (+ i 1) (if (fl-has? acc nm 0) acc (form/append-form acc nm))))))
    :default nil)
 
 #?(:kotoba
@@ -3156,7 +3161,7 @@
    (defn check-abort-facet-unwind-from [functions [:list [:ref :form/r]] function-effects [:ref :form/r] i :i64] :i64
      (if (>= i (vector-count functions))
        0
-       (let [_ (check-abort-facet-unwind-one! (lnth functions i) function-effects)]
+       (let [_ (check-abort-facet-unwind-one! (fl-nth functions i) function-effects)]
          (check-abort-facet-unwind-from functions function-effects (+ i 1)))))
    :default nil)
 

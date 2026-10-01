@@ -4,26 +4,33 @@
             [kotoba.compiler.frontend-tables :as tables]
             #?@(:kotoba [[kotoba.form :as form]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])
-            [kotoba.compiler.frontend.base :refer [first-truthy reject!]])
+            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-has? fl-nth fl-slice require-k] :default [first-truthy])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
                                  :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
-                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool]]]
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
-                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]
+                                 ;; kernel-base-uses accumulators
+                                 :kr/u [:record :kr/u [[:problems [:list [:ref :form/r]]] [:params [:list [:ref :form/r]]] [:literals [:list [:ref :form/r]]] [:derived [:list [:ref :form/r]]] [:overwide [:list [:ref :form/r]]] [:overwide-alloc [:list [:ref :form/r]]] [:calls [:list [:ref :form/r]]] [:env [:ref :form/r]]]]})))
 
 #?(:kotoba nil :default (def kernel-memory-operations tables/kernel-memory-operations))
 
 #?(:kotoba nil :default (def kernel-base-positions tables/kernel-base-positions))
 
+#?(:kotoba
+   (defn kernel-base-argument-positions [op [:ref :form/r]] [:ref :form/r]
+     (let [p (tables/table-get (tables/kernel-base-positions) op)]
+       (if (form/is-nil? p) (form/form-vec (form/one-form (form/int-form 0))) p)))
+   :default
 (defn kernel-base-argument-positions
   "The argument positions of OP that name a region. Every operation in
   `kernel-memory-operations` has at least argument 0."
   [op]
-  (get kernel-base-positions op [0]))
+  (get kernel-base-positions op [0])))
 
 ;; ---- Kotoba-route Form readings ------------------------------------------
 ;; Dynamic host data is a Form tree on this route.
@@ -117,6 +124,10 @@
   [form]
   (and (seq? form) (= '__kotoba_absent (first form)))))
 
+#?(:kotoba
+   (defn integer-literal-compare [left :i64 right :i64] :i64
+     (if (< left right) -1 (if (> left right) 1 0)))
+   :default
 (defn integer-literal-compare
   "Numeric order over `.kotoba` integer literals on BOTH runtimes.
 
@@ -128,14 +139,21 @@
   [left right]
   #?(:clj (compare left right)
      :cljs (let [left (i64/->bigint left) right (i64/->bigint right)]
-             (cond (< left right) -1 (> left right) 1 :else 0))))
+             (cond (< left right) -1 (> left right) 1 :else 0)))))
 
+#?(:kotoba
+   ;; the host answers a comparator; here the ordering is named by a code (0 keyword
+   ;; text, 1 string, 2 integer) and `map-literal-key-compare` applies it
+   (defn map-literal-key-order [kind [:ref :form/r]] :i64
+     (if (form/eq kind (form/keyword-form :keyword)) 0 (if (form/eq kind (form/keyword-form :string)) 1 2)))
+   :default
 (defn map-literal-key-order [kind]
   (case kind
     :keyword (fn [left right] (compare (str left) (str right)))
     :string compare
-    :i64 integer-literal-compare))
+    :i64 integer-literal-compare)))
 
+#?(:kotoba nil :default
 (def map-literal-record-namespace
   "The namespace of every anonymous record type a keyword-keyed literal
   lowers to. FIXED, not the module's: the type is structural (the whole
@@ -143,7 +161,7 @@
   `bounded-typed-value!` compare it whole), so the same literal shape names
   the same type from every module, and a function in one module can hand the
   literal to a reader in another without either declaring a `defrecord`."
-  "kotoba.map-literal")
+  "kotoba.map-literal"))
 
 #?(:kotoba
    (defn keyword-text-body [k [:ref :form/r]] :string
@@ -240,19 +258,657 @@
 ;; silently trusted -- the same localize-and-name discipline the raw-memory
 ;; gate uses, since the alternative is to keep pretending the boundary is not
 ;; there.
+#?(:kotoba
+   (defn kernel-memory-op? [op [:ref :form/r]] :bool
+     (tables/table-has? (tables/kernel-memory-operations) op))
+   :default
 (defn kernel-memory-op? [op]
-  (contains? kernel-memory-operations op))
+  (contains? kernel-memory-operations op)))
 
+#?(:kotoba nil :default
 (defn let-binding-pairs
   "Seq of [sym init] for a desugared `(let [s0 v0 s1 v1 ...] body)`."
   [bindings]
   (when (vector? bindings)
-    (partition 2 bindings)))
+    (partition 2 bindings))))
 
 ;; fwstore: `integer-literal?` used to be defined here. It moved up beside
 ;; `image-scratch-bytes`, because `validate-expr` -- three thousand lines
 ;; earlier -- has to ask the same question about a page count.
 
+#?(:kotoba
+   (defn kr-head [expr [:ref :form/r]] [:ref :form/r]
+     (if (and (form/is-seq? expr) (> (form/count-of expr) 0)) (form/nth-of expr 0) (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-rooted-head? [head [:ref :form/r]] :bool
+     (and (form/is-symbol? head)
+          (or (string=? (form/symbol-value head) "kernel-boot-info")
+              (string=? (form/symbol-value head) "kernel-scratch-region")
+              (string=? (form/symbol-value head) "kernel-uefi-alloc-region")
+              (string=? (form/symbol-value head) "kernel-subregion")
+              (tables/table-has? (tables/rodata-literal-encodings) head))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-if-form? [expr [:ref :form/r]] :bool
+     (and (head-is? expr "if") (= 4 (form/count-of expr))))
+   :default nil)
+
+;; a form the walk may follow: every one of these is a symbol, an integer or a call
+#?(:kotoba
+   (defn kr-clean? [expr [:ref :form/r] env [:ref :form/r] params [:ref :form/r] seen [:list [:ref :form/r]]] :bool
+     (cond
+       (integer-literal? expr) true
+       (kr-rooted-head? (kr-head expr)) true
+       (kr-if-form? expr) (and (kr-clean? (form/nth-of expr 2) env params seen)
+                               (kr-clean? (form/nth-of expr 3) env params seen))
+       (form/is-symbol? expr)
+       (cond
+         (fl-has? seen expr 0) false
+         (form/form-has? env expr) (kr-clean? (form/form-get env expr) env params (form/append-form seen expr))
+         (tables/table-has? params expr) true
+         :else false)
+       :else false))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-scratch-rooted? [expr [:ref :form/r] env [:ref :form/r] seen [:list [:ref :form/r]]] :bool
+     (cond
+       (head-is? expr "kernel-scratch-region") true
+       (kr-if-form? expr) (or (kr-scratch-rooted? (form/nth-of expr 2) env seen)
+                              (kr-scratch-rooted? (form/nth-of expr 3) env seen))
+       (form/is-symbol? expr)
+       (cond
+         (fl-has? seen expr 0) false
+         (form/form-has? env expr) (kr-scratch-rooted? (form/form-get env expr) env (form/append-form seen expr))
+         :else false)
+       :else false))
+   :default nil)
+
+;; the smaller of two optional integers
+#?(:kotoba
+   (defn kr-min [a [:ref :form/r] b [:ref :form/r]] [:ref :form/r]
+     (cond
+       (and (not (form/is-nil? a)) (not (form/is-nil? b)))
+       (if (< (form/int-value a) (form/int-value b)) a b)
+       (form/is-nil? a) b
+       :else a))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-ceiling [expr [:ref :form/r] env [:ref :form/r] seen [:list [:ref :form/r]]] [:ref :form/r]
+     (cond
+       (not (form/is-nil? (alloc-region-bytes expr))) (alloc-region-bytes expr)
+       (kr-if-form? expr) (kr-min (kr-ceiling (form/nth-of expr 2) env seen)
+                                  (kr-ceiling (form/nth-of expr 3) env seen))
+       (form/is-symbol? expr)
+       (cond
+         (fl-has? seen expr 0) (form/nil-form)
+         (form/form-has? env expr) (kr-ceiling (form/form-get env expr) env (form/append-form seen expr))
+         :else (form/nil-form))
+       :else (form/nil-form)))
+   :default nil)
+
+;; ---- kernel-base-uses on Form records ----
+;; The host walks with five volatile accumulators and a `letfn`; here they are the
+;; fields of :kr/u threaded through the walk (ENV is a scratch field the let-binding fold answers in).
+#?(:kotoba
+   (defn kr-u-new [] [:ref :kr/u]
+     (record-new [:ref :kr/u] (form/no-forms) (form/no-forms) (form/no-forms) (form/no-forms) (form/no-forms) (form/no-forms) (form/no-forms) (form/form-map (form/no-forms))))
+   :default nil)
+#?(:kotoba
+   (defn kr-problems [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :problems))
+   :default nil)
+#?(:kotoba
+   (defn kr-params [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :params))
+   :default nil)
+#?(:kotoba
+   (defn kr-literals [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :literals))
+   :default nil)
+#?(:kotoba
+   (defn kr-derived [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :derived))
+   :default nil)
+#?(:kotoba
+   (defn kr-overwide [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :overwide))
+   :default nil)
+#?(:kotoba
+   (defn kr-overwide-alloc [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :overwide-alloc))
+   :default nil)
+#?(:kotoba
+   (defn kr-calls [u [:ref :kr/u]] [:list [:ref :form/r]] (record-get [:ref :kr/u] u :calls))
+   :default nil)
+#?(:kotoba
+   (defn kr-env [u [:ref :kr/u]] [:ref :form/r] (record-get [:ref :kr/u] u :env))
+   :default nil)
+
+;; every argument after the third is an integer: `(every? integer? (drop 3 expr))`
+#?(:kotoba
+   (defn kr-static-from? [expr [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of expr))
+       true
+       (and (form/is-int? (form/nth-of expr i)) (kr-static-from? expr (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-map2 [k1 [:ref :form/r] v1 [:ref :form/r] k2 [:ref :form/r] v2 [:ref :form/r]] [:ref :form/r]
+     (form/form-map (form/append-form (form/append-form (form/two-forms k1 v1) k2) v2)))
+   :default nil)
+
+;; a base position: record what reaches it
+#?(:kotoba
+   (defn kr-base [expr [:ref :form/r] env [:ref :form/r] params [:ref :form/r] u [:ref :kr/u]] [:ref :kr/u]
+     (let [u1 (cond
+                (form/is-int? expr)
+                (record-assoc [:ref :kr/u] u :literals (fl-add (kr-literals u) expr))
+                (and (form/is-symbol? expr) (tables/table-has? params expr))
+                (record-assoc [:ref :kr/u] u :params (fl-add (kr-params u) expr))
+                :else u)
+           u2 (if (head-is? expr "kernel-subregion")
+                (record-assoc [:ref :kr/u] u1 :derived
+                              (form/append-form (kr-derived u1)
+                                                (kr-map2 (form/keyword-form :base) expr
+                                                         (form/keyword-form :offset-static?)
+                                                         (form/bool-form (kr-static-from? expr 3)))))
+                u1)
+           u3 (if (kr-clean? expr env params (form/no-forms))
+                u2
+                (record-assoc [:ref :kr/u] u2 :problems (form/append-form (kr-problems u2) expr)))
+           root (if (and (form/is-symbol? expr) (form/form-has? env expr)) (form/form-get env expr) (form/nil-form))]
+       ;; a let-bound alias of a param still counts as reaching it
+       (if (and (form/is-symbol? root) (tables/table-has? params root))
+         (record-assoc [:ref :kr/u] u3 :params (fl-add (kr-params u3) root))
+         u3)))
+   :default nil)
+
+;; a window over the scratch region or an allocation must be a literal within its ceiling
+#?(:kotoba
+   (defn kr-window [op [:ref :form/r] args [:list [:ref :form/r]] i :i64 env [:ref :form/r] u [:ref :kr/u]] [:ref :kr/u]
+     (let [base (fl-nth args i)
+           length (if (< (+ i 1) (vector-count args)) (fl-nth args (+ i 1)) (form/nil-form))
+           u1 (if (and (kr-scratch-rooted? base env (form/no-forms))
+                       (or (not (integer-literal? length)) (> (form/int-value length) 16384)))
+                (record-assoc [:ref :kr/u] u :overwide
+                              (form/append-form (kr-overwide u)
+                                                (kr-map3 (form/keyword-form :operation) op
+                                                         (form/keyword-form :window) length
+                                                         (form/keyword-form :reserved) (form/int-form 16384))))
+                u)
+           region (kr-ceiling base env (form/no-forms))]
+       (if (and (not (form/is-nil? region))
+                (or (not (integer-literal? length)) (> (form/int-value length) (form/int-value region))))
+         (record-assoc [:ref :kr/u] u1 :overwide-alloc
+                       (form/append-form (kr-overwide-alloc u1)
+                                         (kr-map3 (form/keyword-form :operation) op
+                                                  (form/keyword-form :window) length
+                                                  (form/keyword-form :allocated) region)))
+         u1)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-map3 [k1 [:ref :form/r] v1 [:ref :form/r] k2 [:ref :form/r] v2 [:ref :form/r] k3 [:ref :form/r] v3 [:ref :form/r]] [:ref :form/r]
+     (form/form-map (form/append-form (form/append-form (form/append-form (form/append-form (form/two-forms k1 v1) k2) v2) k3) v3)))
+   :default nil)
+
+;; the walk
+#?(:kotoba
+   (defn kr-call-sites [op [:ref :form/r] args [:list [:ref :form/r]] i :i64 env [:ref :form/r] u [:ref :kr/u]] [:ref :kr/u]
+     (if (>= i (vector-count args))
+       u
+       (kr-call-sites op args (+ i 1) env
+                      (record-assoc [:ref :kr/u] u :calls
+                                    (form/append-form (kr-calls u)
+                                                      (form/vec4 op (form/int-form i) (fl-nth args i) env))))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-walk-args [args [:list [:ref :form/r]] i :i64 env [:ref :form/r] u [:ref :kr/u] names [:ref :form/r] params [:ref :form/r]] [:ref :kr/u]
+     (if (>= i (vector-count args))
+       u
+       (kr-walk-args args (+ i 1) env (kr-walk (fl-nth args i) env u names params) names params)))
+   :default nil)
+
+;; the base positions of a kernel memory operation, then the arguments
+#?(:kotoba
+   (defn kr-memory-bases [op [:ref :form/r] positions [:ref :form/r] j :i64 args [:list [:ref :form/r]] env [:ref :form/r] u [:ref :kr/u] params [:ref :form/r]] [:ref :kr/u]
+     (if (>= j (form/count-of positions))
+       u
+       (let [i (form/int-value (form/nth-of positions j))]
+         (if (< i (vector-count args))
+           (kr-memory-bases op positions (+ j 1) args env
+                            (kr-window op args i env (kr-base (fl-nth args i) env params u))
+                            params)
+           (kr-memory-bases op positions (+ j 1) args env u params)))))
+   :default nil)
+
+;; the pairs of a desugared `(let [s0 v0 s1 v1 ...] body)`: each init is walked under the
+;; bindings before it; answers the uses with the extended env in :env
+#?(:kotoba
+   (defn kr-let-pairs [bindings [:ref :form/r] j :i64 env [:ref :form/r] u [:ref :kr/u] names [:ref :form/r] params [:ref :form/r]] [:ref :kr/u]
+     (if (>= (+ j 1) (form/count-of bindings))
+       (record-assoc [:ref :kr/u] u :env env)
+       (let [sym (form/nth-of bindings j)
+             init (form/nth-of bindings (+ j 1))
+             u1 (kr-walk init env u names params)]
+         (kr-let-pairs bindings (+ j 2) (form/assoc-form env sym init) u1 names params))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-walk [expr [:ref :form/r] env [:ref :form/r] u [:ref :kr/u] names [:ref :form/r] params [:ref :form/r]] [:ref :kr/u]
+     (if (form/is-seq? expr)
+       (let [op (kr-head expr)
+             args (form/rest-list expr)]
+         (cond
+           (sym-is? op "let")
+           (let [bindings (if (> (vector-count args) 0) (fl-nth args 0) (form/nil-form))
+                 u1 (if (form/is-vec? bindings) (kr-let-pairs bindings 0 env u names params) (record-assoc [:ref :kr/u] u :env env))
+                 env1 (kr-env u1)]
+             (kr-walk-args (kr-rest args) 0 env1 u1 names params))
+           (kernel-memory-op? op)
+           (kr-walk-args args 0 env
+                         (kr-memory-bases op (kernel-base-argument-positions op) 0 args env u params)
+                         names params)
+           :else
+           (kr-walk-args args 0 env
+                         (if (tables/table-has? names op) (kr-call-sites op args 0 env u) u)
+                         names params)))
+       u))
+   :default nil)
+
+;; ARGS after the first
+#?(:kotoba
+   (defn kr-rest [xs [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (fl-slice xs 1 (vector-count xs) (form/no-forms)))
+   :default nil)
+
+;; Walk BODY collecting, for one function: the base expressions that are not traceable,
+;; the parameters that reach a base position, the literal bases, the narrowings, the
+;; windows past a ceiling, and every internal call [callee arg-index arg-expr env]
+#?(:kotoba
+   (defn kernel-base-uses [body [:ref :form/r] params [:ref :form/r] function-names [:ref :form/r]] [:ref :kr/u]
+     (kr-walk body (form/form-map (form/no-forms)) (kr-u-new) function-names params))
+   :default nil)
+
+;; ---- kernel-region-report ----
+#?(:kotoba
+   (defn kr-fname [f [:ref :form/r]] [:ref :form/r] (form/form-get f (form/keyword-form :name)))
+   :default nil)
+#?(:kotoba
+   (defn kr-fparams [f [:ref :form/r]] [:ref :form/r] (form/form-get f (form/keyword-form :params)))
+   :default nil)
+#?(:kotoba
+   (defn kr-fbody [f [:ref :form/r]] [:ref :form/r] (form/form-get f (form/keyword-form :body)))
+   :default nil)
+
+;; the names of FUNCTIONS, as a list
+#?(:kotoba
+   (defn kr-names [functions [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count functions))
+       acc
+       (kr-names functions (+ i 1) (form/append-form acc (kr-fname (fl-nth functions i))))))
+   :default nil)
+
+;; the uses of each function, in order
+#?(:kotoba
+   (defn kr-facts [functions [:list [:ref :form/r]] i :i64 names [:ref :form/r] acc [:list [:ref :kr/u]]] [:list [:ref :kr/u]]
+     (if (>= i (vector-count functions))
+       acc
+       (let [f (fl-nth functions i)
+             u (kernel-base-uses (kr-fbody f) (kr-fparams f) names)]
+         (kr-facts functions (+ i 1) names (typed-list-conj [:list [:ref :kr/u]] acc u)))))
+   :default nil)
+
+;; the index of PARAM among PARAMS, -1 when absent
+#?(:kotoba
+   (defn kr-index-of [params [:ref :form/r] param [:ref :form/r] j :i64] :i64
+     (if (>= j (form/count-of params))
+       -1
+       (if (form/eq (form/nth-of params j) param) j (kr-index-of params param (+ j 1)))))
+   :default nil)
+
+;; the position of function NAME in FUNCTIONS, -1 when absent
+#?(:kotoba
+   (defn kr-find [functions [:list [:ref :form/r]] name [:ref :form/r] i :i64] :i64
+     (if (>= i (vector-count functions))
+       -1
+       (if (form/eq (kr-fname (fl-nth functions i)) name) i (kr-find functions name (+ i 1)))))
+   :default nil)
+
+;; the indexes of the parameters of F that reach a base position directly
+#?(:kotoba
+   (defn kr-initial-taint [params [:ref :form/r] used [:list [:ref :form/r]] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (form/count-of params))
+       acc
+       (kr-initial-taint params used (+ j 1)
+                         (if (fl-has? used (form/nth-of params j) 0) (form/append-form acc (form/int-form j)) acc))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-initial-tainted [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (>= i (vector-count functions))
+       acc
+       (let [f (fl-nth functions i)
+             u (typed-list-nth [:list [:ref :kr/u]] facts i)]
+         (kr-initial-tainted functions facts (+ i 1)
+                             (form/assoc-form acc (kr-fname f)
+                                              (form/form-vec (kr-initial-taint (kr-fparams f) (kr-params u) 0 (form/no-forms))))))))
+   :default nil)
+
+;; the integer I is among the ints of the vector V
+#?(:kotoba
+   (defn kr-has-index? [v [:ref :form/r] i :i64] :bool
+     (fl-has? (form/kids-of v) (form/int-form i) 0))
+   :default nil)
+
+;; one call of CALLER: the caller's own parameter passed into a tainted position is tainted too
+#?(:kotoba
+   (defn kr-taint-call [functions [:list [:ref :form/r]] caller [:ref :form/r] call [:ref :form/r] tainted [:ref :form/r]] [:ref :form/r]
+     (let [callee (form/nth-of call 0)
+           i (form/int-value (form/nth-of call 1))
+           arg (form/nth-of call 2)
+           callee-taint (form/form-get tainted callee)]
+       (if (and (not (form/is-nil? callee-taint)) (kr-has-index? callee-taint i) (form/is-symbol? arg))
+         (let [ci (kr-find functions caller 0)
+               idx (kr-index-of (kr-fparams (fl-nth functions ci)) arg 0)
+               mine (form/form-get tainted caller)]
+           (if (and (>= idx 0) (not (kr-has-index? mine idx)))
+             (form/assoc-form tainted caller (form/form-vec (form/append-form (form/kids-of mine) (form/int-form idx))))
+             tainted))
+         tainted)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-taint-calls [functions [:list [:ref :form/r]] caller [:ref :form/r] calls [:list [:ref :form/r]] j :i64 tainted [:ref :form/r]] [:ref :form/r]
+     (if (>= j (vector-count calls))
+       tainted
+       (kr-taint-calls functions caller calls (+ j 1) (kr-taint-call functions caller (fl-nth calls j) tainted))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-taint-pass [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] i :i64 tainted [:ref :form/r]] [:ref :form/r]
+     (if (>= i (vector-count functions))
+       tainted
+       (kr-taint-pass functions facts (+ i 1)
+                      (kr-taint-calls functions (kr-fname (fl-nth functions i))
+                                      (kr-calls (typed-list-nth [:list [:ref :kr/u]] facts i)) 0 tainted))))
+   :default nil)
+
+;; fixpoint: a param position is base-tainted when it is used as a base directly, or
+;; passed into an already-tainted position of a callee
+#?(:kotoba
+   (defn kr-taint-fixpoint [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] tainted [:ref :form/r]] [:ref :form/r]
+     (let [next (kr-taint-pass functions facts 0 tainted)]
+       (if (form/eq next tainted) tainted (kr-taint-fixpoint functions facts next))))
+   :default nil)
+
+;; (sort ints) into the vector V
+#?(:kotoba
+   (defn kr-insert-int [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
+     (if (or (>= i (vector-count xs)) (> (form/int-value (fl-nth xs i)) (form/int-value x)))
+       (fl-slice xs i (vector-count xs) (form/append-form (fl-slice xs 0 i (form/no-forms)) x))
+       (kr-insert-int xs x (+ i 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-sort-ints [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count xs))
+       acc
+       (kr-sort-ints xs (+ i 1) (kr-insert-int acc (fl-nth xs i) 0))))
+   :default nil)
+
+;; the literal bases of every function, distinct, in ascending order
+#?(:kotoba
+   (defn kr-literal-bases [facts [:list [:ref :kr/u]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count facts))
+       acc
+       (kr-literal-bases facts (+ i 1) (kr-union acc (kr-literals (typed-list-nth [:list [:ref :kr/u]] facts i)) 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-union [acc [:list [:ref :form/r]] more [:list [:ref :form/r]] i :i64] [:list [:ref :form/r]]
+     (if (>= i (vector-count more))
+       acc
+       (kr-union (fl-add acc (fl-nth more i)) more (+ i 1))))
+   :default nil)
+
+;; the narrowings written directly in a base position
+#?(:kotoba
+   (defn kr-direct-derived [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count facts))
+       acc
+       (let [name (kr-fname (fl-nth functions i))
+             ds (kr-derived (typed-list-nth [:list [:ref :kr/u]] facts i))]
+         (kr-direct-derived functions facts (+ i 1) (kr-tag-derived ds name 0 acc)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-tag-derived [ds [:list [:ref :form/r]] name [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (vector-count ds))
+       acc
+       (kr-tag-derived ds name (+ j 1)
+                       (form/append-form acc (form/assoc-form (fl-nth ds j) (form/keyword-form :function) name)))))
+   :default nil)
+
+
+;; M with KEY bound to V
+#?(:kotoba
+   (defn kr-put [m [:ref :form/r] key :keyword v [:ref :form/r]] [:ref :form/r]
+     (form/assoc-form m (form/keyword-form key) v))
+   :default nil)
+
+;; and those passed as an argument into a base parameter
+#?(:kotoba
+   (defn kr-passed-derived [caller [:ref :form/r] calls [:list [:ref :form/r]] j :i64 tainted [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (vector-count calls))
+       acc
+       (let [call (fl-nth calls j)
+             callee (form/nth-of call 0)
+             i (form/int-value (form/nth-of call 1))
+             arg (form/nth-of call 2)
+             callee-taint (form/form-get tainted callee)]
+         (kr-passed-derived caller calls (+ j 1) tainted
+                            (if (and (not (form/is-nil? callee-taint)) (kr-has-index? callee-taint i) (head-is? arg "kernel-subregion"))
+                              (form/append-form acc
+                                                (kr-put (kr-put (kr-put (kr-put (form/form-map (form/no-forms)) :base arg)
+                                                                        :offset-static? (form/bool-form (kr-static-from? arg 3)))
+                                                                :function caller)
+                                                        :into (form/vec2 callee (form/int-form i))))
+                              acc)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-all-passed-derived [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] i :i64 tainted [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count functions))
+       acc
+       (kr-all-passed-derived functions facts (+ i 1) tainted
+                              (kr-passed-derived (kr-fname (fl-nth functions i))
+                                                 (kr-calls (typed-list-nth [:list [:ref :kr/u]] facts i)) 0 tainted acc))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-uses-boot-info? [form [:ref :form/r]] :bool
+     (if (head-is? form "kernel-boot-info") true (kr-boot-kids? (form/kids-of form) 0)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-boot-kids? [kids [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count kids))
+       false
+       (if (kr-uses-boot-info? (fl-nth kids i)) true (kr-boot-kids? kids (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-any-boot-info? [functions [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count functions))
+       false
+       (if (kr-uses-boot-info? (kr-fbody (fl-nth functions i))) true (kr-any-boot-info? functions (+ i 1)))))
+   :default nil)
+
+;; whether any internal call supplies position I of NAME
+#?(:kotoba
+   (defn kr-supplied-in? [calls [:list [:ref :form/r]] name [:ref :form/r] i :i64 j :i64] :bool
+     (if (>= j (vector-count calls))
+       false
+       (let [call (fl-nth calls j)]
+         (if (and (form/eq (form/nth-of call 0) name) (= i (form/int-value (form/nth-of call 1))))
+           true
+           (kr-supplied-in? calls name i (+ j 1))))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-supplied? [facts [:list [:ref :kr/u]] name [:ref :form/r] i :i64 k :i64] :bool
+     (if (>= k (vector-count facts))
+       false
+       (if (kr-supplied-in? (kr-calls (typed-list-nth [:list [:ref :kr/u]] facts k)) name i 0)
+         true
+         (kr-supplied? facts name i (+ k 1)))))
+   :default nil)
+
+;; the parameters of NAME, by index, at the positions no internal call supplies
+#?(:kotoba
+   (defn kr-unsupplied [params [:ref :form/r] idxs [:ref :form/r] facts [:list [:ref :kr/u]] name [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (form/count-of idxs))
+       acc
+       (let [i (form/int-value (form/nth-of idxs j))]
+         (kr-unsupplied params idxs facts name (+ j 1)
+                        (if (kr-supplied? facts name i 0)
+                          acc
+                          (form/append-form acc (form/int-form i)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-param-names [params [:ref :form/r] sorted [:list [:ref :form/r]] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= j (vector-count sorted))
+       acc
+       (kr-param-names params sorted (+ j 1) (form/append-form acc (form/nth-of params (form/int-value (fl-nth sorted j)))))))
+   :default nil)
+
+;; {function [param ...]} for the base parameters no internal call supplies
+#?(:kotoba
+   (defn kr-abi-boundary [functions [:list [:ref :form/r]] facts [:list [:ref :kr/u]] tainted [:ref :form/r] j :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (>= (+ j 1) (form/count-of tainted))
+       acc
+       (let [name (form/nth-of tainted j)
+             idxs (form/nth-of tainted (+ j 1))
+             f (fl-nth functions (kr-find functions name 0))
+             open (kr-unsupplied (kr-fparams f) idxs facts name 0 (form/no-forms))]
+         (kr-abi-boundary functions facts tainted (+ j 2)
+                          (if (> (vector-count open) 0)
+                            (form/assoc-form acc name
+                                             (form/form-vec (kr-param-names (kr-fparams f) (kr-sort-ints open 0 (form/no-forms)) 0 (form/no-forms))))
+                            acc)))))
+   :default nil)
+
+;; Static region provenance for FUNCTIONS (a Form list of function maps): a Form map
+;; {:literal-bases :derived-bases :uses-boot-info? :tainted :abi-boundary}
+#?(:kotoba
+   (defn kernel-region-report [functions [:list [:ref :form/r]]] [:ref :form/r]
+     (let [names (form/form-set (kr-names functions 0 (form/no-forms)))
+           facts (kr-facts functions 0 names (typed-list-new [:list [:ref :kr/u]]))
+           tainted (kr-taint-fixpoint functions facts (kr-initial-tainted functions facts 0 (form/form-map (form/no-forms))))]
+       (kr-put (kr-put (kr-put (kr-put (kr-put (form/form-map (form/no-forms))
+                                               :literal-bases (form/form-vec (kr-sort-ints (kr-literal-bases facts 0 (form/no-forms)) 0 (form/no-forms))))
+                                       :derived-bases (form/form-vec (kr-all-passed-derived functions facts 0 tainted (kr-direct-derived functions facts 0 (form/no-forms)))))
+                               :uses-boot-info? (form/bool-form (kr-any-boot-info? functions 0)))
+                       :tainted tainted)
+               :abi-boundary (kr-abi-boundary functions facts tainted 0 (form/form-map (form/no-forms))))))
+   :default nil)
+
+;; ---- check-kernel-region-provenance! ----
+#?(:kotoba
+   (defn kr-any-memory-op? [form [:ref :form/r]] :bool
+     (if (and (form/is-seq? form) (kernel-memory-op? (kr-head form))) true (kr-memory-kids? (form/kids-of form) 0)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-memory-kids? [kids [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count kids))
+       false
+       (if (kr-any-memory-op? (fl-nth kids i)) true (kr-memory-kids? kids (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-any-function-memory-op? [functions [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count functions))
+       false
+       (if (kr-any-memory-op? (kr-fbody (fl-nth functions i))) true (kr-any-function-memory-op? functions (+ i 1)))))
+   :default nil)
+
+;; an argument flowing into a base position must be traceable too, or the caller
+;; becomes the hole the callee's own check closed
+#?(:kotoba
+   (defn kr-check-calls [calls [:list [:ref :form/r]] j :i64 tainted [:ref :form/r] params [:ref :form/r]] :i64
+     (if (>= j (vector-count calls))
+       0
+       (let [call (fl-nth calls j)
+             callee-taint (form/form-get tainted (form/nth-of call 0))
+             flows (and (not (form/is-nil? callee-taint)) (kr-has-index? callee-taint (form/int-value (form/nth-of call 1))))
+             _ (require-k (or (not flows) (kr-clean? (form/nth-of call 2) (form/nth-of call 3) params (form/no-forms)))
+                          "kernel memory base must name a region, not compute one"
+                          "kotoba.error/kernel-region-provenance" (form/nth-of call 2))]
+         (kr-check-calls calls (+ j 1) tainted params))))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-check-function [f [:ref :form/r] names [:ref :form/r] tainted [:ref :form/r]] :i64
+     (let [params (form/form-set (form/kids-of (kr-fparams f)))
+           u (kernel-base-uses (kr-fbody f) params names)
+           problems (kr-problems u)
+           ok1 (require-k (= 0 (vector-count problems))
+                        "kernel memory base must name a region, not compute one"
+                        "kotoba.error/kernel-region-provenance" (fl-nth problems 0))
+           overwide (kr-overwide u)
+           ok2 (require-k (= 0 (vector-count overwide))
+                        "scratch region window exceeds the 16384-byte reservation"
+                        "kotoba.error/kernel-scratch-window" (fl-nth overwide 0))
+           alloc (kr-overwide-alloc u)
+           ok3 (require-k (= 0 (vector-count alloc))
+                        (str "window exceeds the "
+                             (string-from-i64 (form/int-value (form/form-get (fl-nth alloc 0) (form/keyword-form :allocated))))
+                             " bytes this allocation obtained")
+                        "kotoba.error/kernel-alloc-region-window" (fl-nth alloc 0))]
+       (kr-check-calls (kr-calls u) 0 tainted params)))
+   :default nil)
+
+#?(:kotoba
+   (defn kr-check-functions [functions [:list [:ref :form/r]] i :i64 names [:ref :form/r] tainted [:ref :form/r]] :i64
+     (if (>= i (vector-count functions))
+       0
+       (let [_ (kr-check-function (fl-nth functions i) names tainted)]
+         (kr-check-functions functions (+ i 1) names tainted))))
+   :default nil)
+
+#?(:kotoba
+   (defn check-kernel-region-provenance! [functions [:list [:ref :form/r]]] :i64
+     (if (kr-any-function-memory-op? functions 0)
+       (let [names (form/form-set (kr-names functions 0 (form/no-forms)))
+             report (kernel-region-report functions)]
+         (kr-check-functions functions 0 names (form/form-get report (form/keyword-form :tainted))))
+       0))
+   :default nil)
+
+#?(:kotoba
+   (defn traceable-base? [expr [:ref :form/r] env [:ref :form/r] params [:ref :form/r]] :bool
+     (kr-clean? expr env params (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn scratch-rooted? [expr [:ref :form/r] env [:ref :form/r]] :bool
+     (kr-scratch-rooted? expr env (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn alloc-region-ceiling [expr [:ref :form/r] env [:ref :form/r]] [:ref :form/r]
+     (kr-ceiling expr env (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn derived-base? [expr [:ref :form/r]] :bool
+     (head-is? expr "kernel-subregion"))
+   :default nil)
+
+#?(:kotoba nil :default
 (defn traceable-base?
   "True when EXPR is ROOTED: it resolves to a compile-time literal, to
   `kernel-boot-info`, or to a parameter, possibly plus an offset. Under ENV
@@ -347,8 +1003,9 @@
                 (contains? params expr) true         ; ABI boundary, tracked below
                 :else false)
               :else false))]
-    (clean? expr #{})))
+    (clean? expr #{}))))
 
+#?(:kotoba nil :default
 (defn scratch-rooted?
   "True when EXPR resolves to `(kernel-scratch-region)`, following ENV.
 
@@ -376,8 +1033,9 @@
                 (contains? env expr) (rooted? (get env expr) (conj seen expr))
                 :else false)
               :else false))]
-    (rooted? expr #{})))
+    (rooted? expr #{}))))
 
+#?(:kotoba nil :default
 (defn alloc-region-ceiling
   "fwstore: the byte length of the smallest `kernel-uefi-alloc-region` EXPR
   can resolve to under ENV, or nil when it can resolve to none.
@@ -405,16 +1063,18 @@
                 (contains? env expr) (ceiling (get env expr) (conj seen expr))
                 :else nil)
               :else nil))]
-    (ceiling expr #{})))
+    (ceiling expr #{}))))
 
+#?(:kotoba nil :default
 (defn derived-base?
   "True when EXPR narrows a region to a sub-window. Now always a checked
   narrowing (`kernel-subregion`); `kernel-region-report` still lists these so
   a build can see which windows are derived and from what, but they are no
   longer the unchecked residual they were before the primitive existed."
   [expr]
-  (and (seq? expr) (= 'kernel-subregion (first expr))))
+  (and (seq? expr) (= 'kernel-subregion (first expr)))))
 
+#?(:kotoba nil :default
 (defn kernel-base-uses
   "Walk BODY collecting, for one function:
     :problems  base expressions that are not traceable
@@ -534,8 +1194,9 @@
       {:problems @problems :params @used-params
        :literals @literals :derived @derived :overwide @overwide
        :overwide-alloc @overwide-alloc
-       :calls @calls})))
+       :calls @calls}))))
 
+#?(:kotoba nil :default
 (defn kernel-region-report
   "Static region provenance for FUNCTIONS: the literal physical bases the
   module can reach, whether it consults `kernel-boot-info`, the ABI
@@ -618,8 +1279,9 @@
                    (let [unsupplied (remove #(contains? supplied [name %]) idxs)]
                      (when (seq unsupplied)
                        [name (mapv #(nth (get params-by-name name) %) (sort unsupplied))]))))
-           tainted)}))
+           tainted)})))
 
+#?(:kotoba nil :default
 (defn check-kernel-region-provenance! [functions]
   (let [function-names (into #{} (map :name) functions)]
     (when (first-truthy (fn [{:keys [body]}]
@@ -654,4 +1316,4 @@
                     :when (contains? (get tainted callee #{}) i)]
               (when-not (traceable-base? arg env (set params))
                 (reject! "kernel memory base must name a region, not compute one"
-                         arg :kotoba.error/kernel-region-provenance)))))))))
+                         arg :kotoba.error/kernel-region-provenance))))))))))
