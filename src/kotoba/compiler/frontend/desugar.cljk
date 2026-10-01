@@ -23,6 +23,30 @@
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
+;; amu-refactor: positional access.  Host: what [a b] destructuring does; Kotoba: Form child, nil-form past the end.
+#?(:kotoba
+   (defn- fe-nth [f [:ref :form/r] i :i64] [:ref :form/r] (form/nth-of f i))
+   :default
+   (defn- fe-nth [c i] (nth c i nil)))
+
+;; amu-refactor: the rest after the first i children (nil / nil-form when none).
+#?(:kotoba
+   (defn- fe-nthnext [f [:ref :form/r] i :i64] [:ref :form/r]
+     (let [n (form/count-of f)]
+       (if (>= i n)
+         (form/nil-form)
+         (form/form-seq (loop [j i acc (form/no-forms)]
+                          (if (>= j n) acc (recur (+ j 1) (form/append-form acc (form/nth-of f j)))))))))
+   :default
+   (defn- fe-nthnext [c i] (nthnext c i)))
+
+;; amu-refactor: keyword lookup.  Host: `get`; Kotoba: form-get with a keyword Form.
+#?(:kotoba
+   (defn- fe-get [m [:ref :form/r] k :keyword] [:ref :form/r] (form/form-get m (form/keyword-form k)))
+   :default
+   (defn- fe-get [m k] (get m k)))
+
+
 ;; forward references inside this module (the cut keeps the original form order)
 (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*)
 
@@ -3870,12 +3894,13 @@
     :else nil))
 
 (defn desugar-lexical-call [result-type form]
-  (let [[closure & args] form]
-    (when (> (count args) 4)
-      (reject! "direct closure call exceeds ABI arity four" form))
+  (let [closure (fe-nth form 0) args (fe-nthnext form 1)]
+    (let [_ #?(:kotoba (require-k (not (> (count args) 4)) "direct closure call exceeds ABI arity four" "kotoba.error/subset-reject" form) :default (when (> (count args) 4)
+      (reject! "direct closure call exceeds ABI arity four" form)))]
     (let [contract (get *lexical-callable-contracts* closure)
-          [parameter-types contract-result]
-          (when contract (callable-clause-for-arity contract (count args) form))
+          dd__208183_1 (when contract (callable-clause-for-arity contract (count args) form))
+          parameter-types (fe-nth dd__208183_1 0)
+          contract-result (fe-nth dd__208183_1 1)
           result-type (or contract-result result-type)]
       ;; A contract's parameter types select the dispatcher family (one per
       ;; distinct clause signature) and give each argument its expected type
@@ -3893,7 +3918,7 @@
                         (desugar-expr argument)
                         (desugar-expected-value wanted argument)))
                     args parameter-types)
-               (map desugar-expr args))))))
+               (map desugar-expr args)))))))
 
 #?(:kotoba
    (defn desugar-result-expr [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
@@ -4105,19 +4130,21 @@
 (defn lift-lambda [form]
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
-        [_ params-or-clause & tail] form
+        params-or-clause (fe-nth form 1) tail (fe-nthnext form 2)
         ;; A body of several forms is one `do` (`implicit-do-body`); an
         ;; empty one stays `nil` here so the refusal below still names it.
         raw-clauses (if (vector? params-or-clause)
                       [[params-or-clause (when (seq tail) (implicit-do-body tail))]]
-                      (mapv (fn [clause]
+                      #?(:kotoba (let [fe-lc__219927 (form/kids-of (cons params-or-clause tail)) fe-ln__219927 (vector-count fe-lc__219927)] (form/form-vec (loop [fe-li__219927 0 fe-la__219927 (form/no-forms)] (if (>= fe-li__219927 fe-ln__219927) fe-la__219927 (recur (+ fe-li__219927 1) (form/append-form fe-la__219927 (let [clause (typed-list-nth [:list [:ref :form/r]] fe-lc__219927 fe-li__219927)] (when-not (and (seq? clause) (vector? (first clause))
+                                             (<= 2 (count clause)))
+                                (reject! "multi-arity fn requires ([params] body) clauses" clause)) [(first clause) (implicit-do-body (rest clause))]))))))) :default (mapv (fn [clause]
                               (when-not (and (seq? clause) (vector? (first clause))
                                              (<= 2 (count clause)))
                                 (reject! "multi-arity fn requires ([params] body) clauses" clause))
                               [(first clause) (implicit-do-body (rest clause))])
-                            (cons params-or-clause tail)))
-        parsed (mapv (fn [[params body :as clause]]
-                       (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
+                            (cons params-or-clause tail))))
+        parsed #?(:kotoba (let [fe-lc__221290 (form/kids-of raw-clauses) fe-ln__221290 (vector-count fe-lc__221290)] (form/form-vec (loop [fe-li__221290 0 fe-la__221290 (form/no-forms)] (if (>= fe-li__221290 fe-ln__221290) fe-la__221290 (recur (+ fe-li__221290 1) (form/append-form fe-la__221290 (let [dd__220353_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__221290 fe-li__221290)] (let [params (fe-nth dd__220353_1 0) body (fe-nth dd__220353_1 1) clause dd__220353_1]
+                         (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
                          (if amp-index
                            (do
                              (when-not (and (= amp-index (- (count params) 2))
@@ -4127,21 +4154,35 @@
                                (reject! "variadic fn clause requires [fixed ... & rest]" clause))
                              {:kind :variadic :fixed (subvec params 0 amp-index)
                               :rest-name (peek params) :body body :min-arity amp-index})
-                           {:kind :fixed :params params :body body :arity (count params)})))
-                     raw-clauses)
+                           {:kind :fixed :params params :body body :arity (count params)})))))))))) :default (mapv (fn [dd__220353_1]
+                       (let [params (fe-nth dd__220353_1 0) body (fe-nth dd__220353_1 1) clause dd__220353_1]
+                         (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
+                         (if amp-index
+                           (do
+                             (when-not (and (= amp-index (- (count params) 2))
+                                            (<= amp-index 4)
+                                            (every? valid-name? (subvec params 0 amp-index))
+                                            (valid-name? (peek params)))
+                               (reject! "variadic fn clause requires [fixed ... & rest]" clause))
+                             {:kind :variadic :fixed (subvec params 0 amp-index)
+                              :rest-name (peek params) :body body :min-arity amp-index})
+                           {:kind :fixed :params params :body body :arity (count params)}))))
+                     raw-clauses))
         fixed (filter #(= :fixed (:kind %)) parsed)
         variadics (filter #(= :variadic (:kind %)) parsed)
-        _ (when (or (> (count variadics) 1)
-                    (not= (count fixed) (count (distinct (map :arity fixed)))))
-            (reject! "fn requires unique fixed arities and at most one variadic clause" form))
+        _ #?(:kotoba (require-k (not (or (> (count variadics) 1)
+                    (not= (count fixed) (count (distinct #?(:kotoba (let [fe-lc__222501 (form/kids-of fixed) fe-ln__222501 (vector-count fe-lc__222501)] (form/form-seq (loop [fe-li__222501 0 fe-la__222501 (form/no-forms)] (if (>= fe-li__222501 fe-ln__222501) fe-la__222501 (recur (+ fe-li__222501 1) (form/append-form fe-la__222501 (let [e (typed-list-nth [:list [:ref :form/r]] fe-lc__222501 fe-li__222501)] (:arity e)))))))) :default (map (fn [e] (:arity e)) fixed))))))) "fn requires unique fixed arities and at most one variadic clause" "kotoba.error/subset-reject" form) :default (when (or (> (count variadics) 1)
+                    (not= (count fixed) (count (distinct #?(:kotoba (let [fe-lc__222501 (form/kids-of fixed) fe-ln__222501 (vector-count fe-lc__222501)] (form/form-seq (loop [fe-li__222501 0 fe-la__222501 (form/no-forms)] (if (>= fe-li__222501 fe-ln__222501) fe-la__222501 (recur (+ fe-li__222501 1) (form/append-form fe-la__222501 (let [e (typed-list-nth [:list [:ref :form/r]] fe-lc__222501 fe-li__222501)] (:arity e)))))))) :default (map (fn [e] (:arity e)) fixed))))))
+            (reject! "fn requires unique fixed arities and at most one variadic clause" form)))
         fixed-by-arity (into {} (map (juxt :arity identity) fixed))
         variadic (first variadics)
         arities (sort (set/union (set (keys fixed-by-arity))
                                  (if variadic (set (range (:min-arity variadic) 5)) #{})))
         contract-results
         (when expected-contract
-          (into {} (map (fn [[parameter-types result-type]]
-                          [(count parameter-types) result-type]))
+          (into {} (map (fn [dd__221912_1]
+                          (let [parameter-types (fe-nth dd__221912_1 0) result-type (fe-nth dd__221912_1 1)]
+                            [(count parameter-types) result-type])))
                 (callable-clauses expected-contract)))
         ;; The clause's PARAMETER types, by arity, when the contract names
         ;; any that is not `:i64` (2026-09-12). They type the lambda's own
@@ -4151,32 +4192,45 @@
         ;; nil and the lambda lowers as it did before typed parameters.
         contract-params
         (when expected-contract
-          (into {} (keep (fn [[parameter-types _]]
-                           (when-not (i64-parameter-types? parameter-types)
-                             [(count parameter-types) (vec parameter-types)])))
+          (into {} (keep (fn [dd__222596_1]
+                           (let [parameter-types (fe-nth dd__222596_1 0)]
+                             (when-not (i64-parameter-types? parameter-types)
+                             [(count parameter-types) (vec parameter-types)]))))
                 (callable-clauses expected-contract)))
-        _ (when (and expected-contract
+        _ #?(:kotoba (require-k (not (and expected-contract
+                     (not= (set arities) (set (keys contract-results))))) "fn arities do not match the declared callable result contract" "kotoba.error/callable-result-arity" form) :default (when (and expected-contract
                      (not= (set arities) (set (keys contract-results))))
             (reject! "fn arities do not match the declared callable result contract"
-                     form :kotoba.error/callable-result-arity))
-        clauses (mapv (fn [arity]
+                     form :kotoba.error/callable-result-arity)))
+        clauses #?(:kotoba (let [fe-lc__223116 (form/kids-of arities) fe-ln__223116 (vector-count fe-lc__223116)] (form/form-vec (loop [fe-li__223116 0 fe-la__223116 (form/no-forms)] (if (>= fe-li__223116 fe-ln__223116) fe-la__223116 (recur (+ fe-li__223116 1) (form/append-form fe-la__223116 (let [arity (typed-list-nth [:list [:ref :form/r]] fe-lc__223116 fe-li__223116)] (if-let [{:keys [params body]} (get fixed-by-arity arity)]
+                          [params body]
+                          (specialize-variadic-clause variadic arity
+                                                      "__kotoba_lambda_rest_arg_"))))))))) :default (mapv (fn [arity]
                         (if-let [{:keys [params body]} (get fixed-by-arity arity)]
                           [params body]
                           (specialize-variadic-clause variadic arity
                                                       "__kotoba_lambda_rest_arg_")))
-                      arities)]
-    (when-not (and (seq clauses)
-                   (every? (fn [[params body]]
-                             (and (some? body) (<= (count params) 4)
+                      arities))]
+    (let [_ #?(:kotoba (require-k (and (seq clauses)
+                   (every? (fn [dd__223497_1]
+                             (let [params (fe-nth dd__223497_1 0) body (fe-nth dd__223497_1 1)]
+                               (and (some? body) (<= (count params) 4)
                                   (every? valid-name? params)
-                                  (= (count params) (count (distinct params)))))
+                                  (= (count params) (count (distinct params))))))
+                           clauses)
+                   (= (count clauses) (count (distinct (map (comp count first) clauses))))) "fn value requires unique arities with zero to four unique parameters" "kotoba.error/subset-reject" form) :default (when-not (and (seq clauses)
+                   (every? (fn [dd__223497_1]
+                             (let [params (fe-nth dd__223497_1 0) body (fe-nth dd__223497_1 1)]
+                               (and (some? body) (<= (count params) 4)
+                                  (every? valid-name? params)
+                                  (= (count params) (count (distinct params))))))
                            clauses)
                    (= (count clauses) (count (distinct (map (comp count first) clauses)))))
-      (reject! "fn value requires unique arities with zero to four unique parameters" form))
-    (when (and (vector? params-or-clause) (empty? tail))
-      (reject! "single-arity fn value requires exactly one body" form))
-    (let [lowered (mapv (fn [[params body]]
-                          (let [clause-result (get contract-results (count params))
+      (reject! "fn value requires unique arities with zero to four unique parameters" form)))]
+    (let [_ #?(:kotoba (require-k (not (and (vector? params-or-clause) (empty? tail))) "single-arity fn value requires exactly one body" "kotoba.error/subset-reject" form) :default (when (and (vector? params-or-clause) (empty? tail))
+      (reject! "single-arity fn value requires exactly one body" form)))]
+    (let [lowered #?(:kotoba (let [fe-lc__226464 (form/kids-of clauses) fe-ln__226464 (vector-count fe-lc__226464)] (form/form-vec (loop [fe-li__226464 0 fe-la__226464 (form/no-forms)] (if (>= fe-li__226464 fe-ln__226464) fe-la__226464 (recur (+ fe-li__226464 1) (form/append-form fe-la__226464 (let [dd__224103_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__226464 fe-li__226464)] (let [params (fe-nth dd__224103_1 0) body (fe-nth dd__224103_1 1)]
+                            (let [clause-result (get contract-results (count params))
                                 clause-params (get contract-params (count params))]
                           {:params params :contract-result clause-result
                            :contract-params clause-params
@@ -4196,9 +4250,11 @@
                                            *local-option-types*
                                            (if clause-params
                                              (into (or *local-option-types* {})
-                                                   (keep (fn [[p t]]
-                                                           (when (generic-option-type? t)
-                                                             [p t])))
+                                                   (keep (fn [dd__225581_1]
+                                                           (let [p (fe-nth dd__225581_1 0)
+                                                                 t (fe-nth dd__225581_1 1)]
+                                                             (when (generic-option-type? t)
+                                                             [p t]))))
                                                    (map vector params clause-params))
                                              *local-option-types*)]
                                    (if-let [result (or clause-result expected-result)]
@@ -4207,21 +4263,63 @@
                                      ;; gap 1: a fn literal with no declared
                                      ;; result answers absence as an option
                                      (binding [*absence-mode* :none]
-                                       (realized-lowering (desugar-expr body)))))}))
-                        clauses)
+                                       (realized-lowering (desugar-expr body)))))}))))))))) :default (mapv (fn [dd__224103_1]
+                          (let [params (fe-nth dd__224103_1 0) body (fe-nth dd__224103_1 1)]
+                            (let [clause-result (get contract-results (count params))
+                                clause-params (get contract-params (count params))]
+                          {:params params :contract-result clause-result
+                           :contract-params clause-params
+                           :body (binding [*lexical-bindings*
+                                           (into *lexical-bindings* params)
+                                           *abort-lexical-context* :fn
+                                           ;; typed parameters are locals of
+                                           ;; their type inside the body (a
+                                           ;; record-field projection reads
+                                           ;; them); the i64 clause binds
+                                           ;; nothing new
+                                           *local-types*
+                                           (if clause-params
+                                             (merge *local-types*
+                                                    (zipmap params clause-params))
+                                             *local-types*)
+                                           *local-option-types*
+                                           (if clause-params
+                                             (into (or *local-option-types* {})
+                                                   (keep (fn [dd__225581_1]
+                                                           (let [p (fe-nth dd__225581_1 0)
+                                                                 t (fe-nth dd__225581_1 1)]
+                                                             (when (generic-option-type? t)
+                                                             [p t]))))
+                                                   (map vector params clause-params))
+                                             *local-option-types*)]
+                                   (if-let [result (or clause-result expected-result)]
+                                     (binding [*absence-mode* :legacy]
+                                       (realized-lowering (desugar-result-expr result body)))
+                                     ;; gap 1: a fn literal with no declared
+                                     ;; result answers absence as an option
+                                     (binding [*absence-mode* :none]
+                                       (realized-lowering (desugar-expr body)))))})))
+                        clauses))
           captures (vec (sort-by str
                                  (apply set/union #{}
-                                        (map (fn [{:keys [params body]}]
-                                               (form-free-symbols body (set params)))
-                                             lowered))))
+                                        #?(:kotoba (let [fe-lc__229284 (form/kids-of lowered) fe-ln__229284 (vector-count fe-lc__229284)] (form/form-seq (loop [fe-li__229284 0 fe-la__229284 (form/no-forms)] (if (>= fe-li__229284 fe-ln__229284) fe-la__229284 (recur (+ fe-li__229284 1) (form/append-form fe-la__229284 (let [dd__226635_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__229284 fe-li__229284)] (let [params (fe-get dd__226635_1 :params)
+                                                     body (fe-get dd__226635_1 :body)]
+                                                 (form-free-symbols body (set params)))))))))) :default (map (fn [dd__226635_1]
+                                               (let [params (fe-get dd__226635_1 :params)
+                                                     body (fe-get dd__226635_1 :body)]
+                                                 (form-free-symbols body (set params))))
+                                             lowered)))))
           id (vswap! *lambda-counter* inc)]
       (doseq [{:keys [params]} lowered]
         (when (> (+ (count captures) (count params)) max-parameters)
           (reject! "fn captures plus parameters exceed ABI-supported arity" form)))
       (when *pending-lambdas*
         (swap! *pending-lambdas* into
-               (mapv (fn [{:keys [params body contract-result contract-params]}]
-                       (let [arity (count params)
+               #?(:kotoba (let [fe-lc__229952 (form/kids-of lowered) fe-ln__229952 (vector-count fe-lc__229952)] (form/form-vec (loop [fe-li__229952 0 fe-la__229952 (form/no-forms)] (if (>= fe-li__229952 fe-ln__229952) fe-la__229952 (recur (+ fe-li__229952 1) (form/append-form fe-la__229952 (let [dd__227132_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__229952 fe-li__229952)] (let [params (fe-get dd__227132_1 :params)
+                             body (fe-get dd__227132_1 :body)
+                             contract-result (fe-get dd__227132_1 :contract-result)
+                             contract-params (fe-get dd__227132_1 :contract-params)]
+                         (let [arity (count params)
                              helper-name (symbol (str "__kotoba_lambda_" id "_arity" arity))]
                          (cond-> {:id id :arity arity :captures captures
                           :helper (cond-> {:name helper-name :params (into captures params)
@@ -4236,13 +4334,33 @@
                                            (into (vec (repeat (count captures) :i64))
                                                  contract-params)))}
                            contract-result (assoc :contract-result contract-result)
-                           contract-params (assoc :parameter-types contract-params))))
-                     lowered)))
+                           contract-params (assoc :parameter-types contract-params))))))))))) :default (mapv (fn [dd__227132_1]
+                       (let [params (fe-get dd__227132_1 :params)
+                             body (fe-get dd__227132_1 :body)
+                             contract-result (fe-get dd__227132_1 :contract-result)
+                             contract-params (fe-get dd__227132_1 :contract-params)]
+                         (let [arity (count params)
+                             helper-name (symbol (str "__kotoba_lambda_" id "_arity" arity))]
+                         (cond-> {:id id :arity arity :captures captures
+                          :helper (cond-> {:name helper-name :params (into captures params)
+                                           :result :i64 :result-inferred? true
+                                           :effects #{} :body body
+                                           :lazy-thunk? *lifting-lazy-thunk?*}
+                                    ;; captures stay the i64 pair-chain words
+                                    ;; they are read out of; only the clause's
+                                    ;; own parameters carry the contract's types
+                                    contract-params
+                                    (assoc :param-types
+                                           (into (vec (repeat (count captures) :i64))
+                                                 contract-params)))}
+                           contract-result (assoc :contract-result contract-result)
+                           contract-params (assoc :parameter-types contract-params)))))
+                     lowered))))
       ;; Closure captures are always the internal i64 pair-chain ABI, even
       ;; when the lambda's result is a canonical `[:list T]` value.
       (list 'pair id
             (binding [*contextual-closure-result-type* nil]
-              (desugar-list captures form))))))
+              (desugar-list captures form))))))))
 
 #?(:kotoba
    (defn lazy-take-helper-name [] [:ref :form/r]
@@ -4359,24 +4477,25 @@
   elaboration pass lowers it to `typed-cap-call`; authors never write numeric
   capability IDs, type envelopes, or portable-effect envelopes."
   [form op kw args]
-  (when-not (= 1 (count args))
+  (let [_ #?(:kotoba (require-k (= 1 (count args)) (str "named operation " (pr-str op)
+                  " requires exactly one request value") "kotoba.error/subset-reject" form) :default (when-not (= 1 (count args))
     (reject! (str "named operation " (pr-str op)
                   " requires exactly one request value")
-             form))
+             form)))]
   (let [_ (resolve-capability-keyword! kw form)
         elaborated (list op (desugar-expr (first args)))]
-    (attach-source-operation form elaborated kw)))
+    (attach-source-operation form elaborated kw))))
 
 (defn desugar-list [args form]
-  (when (> (count args) max-list-items)
-    (reject! "list item count exceeds admission limit" form))
+  (let [_ #?(:kotoba (require-k (not (> (count args) max-list-items)) "list item count exceeds admission limit" "kotoba.error/subset-reject" form) :default (when (> (count args) max-list-items)
+    (reject! "list item count exceeds admission limit" form)))]
   (if (canonical-list-type? *contextual-closure-result-type*)
     (let [type *contextual-closure-result-type*
           item-type (second type)]
       (apply list 'typed-list-new type
              (map #(desugar-expected-value item-type %) args)))
-    (reduce (fn [tail item] (list 'pair (desugar-expr item) tail))
-            0 (reverse args))))
+    #?(:kotoba (let [fe-lc__234992 (form/kids-of (reverse args)) fe-ln__234992 (vector-count fe-lc__234992)] (loop [fe-li__234992 0 tail 0] (if (>= fe-li__234992 fe-ln__234992) tail (recur (+ fe-li__234992 1) (let [item (typed-list-nth [:list [:ref :form/r]] fe-lc__234992 fe-li__234992)] (list 'pair (desugar-expr item) tail)))))) :default (reduce (fn [tail item] (list 'pair (desugar-expr item) tail))
+            0 (reverse args))))))
 
 ;; Synthesized `let` temporaries for `and` / `or` / comparison chains.
 ;;
@@ -5431,12 +5550,13 @@
   refusals below stay the typed map's alone -- a record field HAS an `:f64`
   encoding."
   [kind entries]
-  (let [typed (vec (keep (fn [[k v]]
-                           (when-let [t (map-literal-value-type v)] [k t]))
+  (let [typed (vec (keep (fn [dd__289620_1]
+                           (let [k (fe-nth dd__289620_1 0) v (fe-nth dd__289620_1 1)]
+                             (when-let [t (map-literal-value-type v)] [k t])))
                          entries))
-        floating (first (filter (fn [[_ t]] (contains? #{:f32 :f64} t)) typed))]
+        floating (first #?(:kotoba (let [fe-lc__293635 (form/kids-of typed) fe-ln__293635 (vector-count fe-lc__293635)] (form/form-seq (loop [fe-li__293635 0 fe-la__293635 (form/no-forms)] (if (>= fe-li__293635 fe-ln__293635) fe-la__293635 (let [dd__289775_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__293635 fe-li__293635)] (recur (+ fe-li__293635 1) (if (do (let [t (fe-nth dd__289775_1 1)] (contains? #{:f32 :f64} t))) (form/append-form fe-la__293635 dd__289775_1) fe-la__293635))))))) :default (filter (fn [dd__289775_1] (let [t (fe-nth dd__289775_1 1)] (contains? #{:f32 :f64} t))) typed)))]
     (when floating
-      (let [[k t] floating]
+      (let [k (fe-nth floating 0) t (fe-nth floating 1)]
         (reject! (str "map literal value at key "
                       (map-literal-key-description-for-message k)
                       " is a floating point literal: map value type " t
@@ -5452,15 +5572,21 @@
       ;; every literal shape (`run-tests.cljk` records the `desugar-case`
       ;; bigint hashing defect that taught this).
       (if-let [[other-key other-type]
-               (first (remove (fn [[_ t]] (= t first-type)) (rest typed)))]
-        (reject! (str "map literal values must all be one type; the value "
+               (first (remove (fn [dd__290862_1] (let [t (fe-nth dd__290862_1 1)] (= t first-type))) (rest typed)))]
+        #?(:kotoba (throw (fe-error (str "map literal values must all be one type; the value "
+                      "at key "
+                      (map-literal-key-description-for-message first-key)
+                      " is " (map-literal-type-description first-type)
+                      " and the value at key "
+                      (map-literal-key-description-for-message other-key)
+                      " is " (map-literal-type-description other-type)) "kotoba.error/map-literal-value" entries)) :default (reject! (str "map literal values must all be one type; the value "
                       "at key "
                       (map-literal-key-description-for-message first-key)
                       " is " (map-literal-type-description first-type)
                       " and the value at key "
                       (map-literal-key-description-for-message other-key)
                       " is " (map-literal-type-description other-type))
-                 entries :kotoba.error/map-literal-value)
+                 entries :kotoba.error/map-literal-value))
         first-type)
       :i64)))
 
@@ -5499,14 +5625,14 @@
     is spelled as one.
   * more than `max-record-fields` entries -- the bound `defrecord` has."
   [form entries]
-  (let [typed (mapv (fn [[k v]] [k (map-literal-record-field-type v)]) entries)]
+  (let [typed #?(:kotoba (let [fe-lc__297740 (form/kids-of entries) fe-ln__297740 (vector-count fe-lc__297740)] (form/form-vec (loop [fe-li__297740 0 fe-la__297740 (form/no-forms)] (if (>= fe-li__297740 fe-ln__297740) fe-la__297740 (recur (+ fe-li__297740 1) (form/append-form fe-la__297740 (let [dd__293259_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__297740 fe-li__297740)] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] [k (map-literal-record-field-type v)])))))))) :default (mapv (fn [dd__293259_1] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] [k (map-literal-record-field-type v)])) entries))]
     ;; ADR 0353 floor :absence -- `nil` as a value SPELLS a record: it makes
     ;; that field an absent `[:option T]`, so a literal holding one is never
     ;; the i64 pair map (where `nil` used to lower to a legacy `option-i64`
     ;; and fail as `expected i64`). With no record type in context, T is
     ;; unknown, and that is refused by name: the literal's own source does not
     ;; say what the field holds when it is present.
-    (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
+    (when-let [[k _] (first #?(:kotoba (let [fe-lc__298338 (form/kids-of entries) fe-ln__298338 (vector-count fe-lc__298338)] (form/form-seq (loop [fe-li__298338 0 fe-la__298338 (form/no-forms)] (if (>= fe-li__298338 fe-ln__298338) fe-la__298338 (let [dd__293790_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__298338 fe-li__298338)] (recur (+ fe-li__298338 1) (if (do (let [v (fe-nth dd__293790_1 1)] (nil? v))) (form/append-form fe-la__298338 dd__293790_1) fe-la__298338))))))) :default (filter (fn [dd__293790_1] (let [v (fe-nth dd__293790_1 1)] (nil? v))) entries)))]
       (reject! (str "map literal value at key "
                     (map-literal-key-description-for-message k)
                     " is nil, which makes the field an absent [:option T], and "
@@ -5514,13 +5640,15 @@
                     "context (a declared record result, or a record field) or "
                     "write (option-none-of [:option T])")
                form :kotoba.error/map-literal-value))
-    (when (first-truthy (fn [[_ t]] (and (some? t) (not= :i64 t))) typed)
-      (when (> (count entries) max-record-fields)
+    (when (first-truthy (fn [dd__294312_1] (let [t (fe-nth dd__294312_1 1)] (and (some? t) (not= :i64 t)))) typed)
+      (let [_ #?(:kotoba (require-k (not (> (count entries) max-record-fields)) (str "map literal with keyword keys and a non-i64 value lowers "
+                      "to a closed record and exceeds the record field limit: "
+                      (count entries) " entries, at most " max-record-fields) "kotoba.error/map-literal-value" form) :default (when (> (count entries) max-record-fields)
         (reject! (str "map literal with keyword keys and a non-i64 value lowers "
                       "to a closed record and exceeds the record field limit: "
                       (count entries) " entries, at most " max-record-fields)
-                 form :kotoba.error/map-literal-value))
-      (mapv (fn [[k t]] [k (or t :i64)]) typed))))
+                 form :kotoba.error/map-literal-value)))]
+      #?(:kotoba (let [fe-lc__299697 (form/kids-of typed) fe-ln__299697 (vector-count fe-lc__299697)] (form/form-vec (loop [fe-li__299697 0 fe-la__299697 (form/no-forms)] (if (>= fe-li__299697 fe-ln__299697) fe-la__299697 (recur (+ fe-li__299697 1) (form/append-form fe-la__299697 (let [dd__294720_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__299697 fe-li__299697)] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])))))))) :default (mapv (fn [dd__294720_1] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])) typed))))))
 
 (defn map-literal-lowered-type
   "The type a map literal will lower to, read off its source alone -- what a
@@ -5559,8 +5687,8 @@
                     " is not a field of record " record-name)
                form :kotoba.error/map-literal-value))
     (list* 'record-new record
-           (map (fn [[field field-type]]
-                  (let [value (get form field ::absent)]
+           #?(:kotoba (let [fe-lc__301829 (form/kids-of fields) fe-ln__301829 (vector-count fe-lc__301829)] (form/form-seq (loop [fe-li__301829 0 fe-la__301829 (form/no-forms)] (if (>= fe-li__301829 fe-ln__301829) fe-la__301829 (recur (+ fe-li__301829 1) (form/append-form fe-la__301829 (let [dd__296784_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__301829 fe-li__301829)] (let [field (fe-nth dd__296784_1 0) field-type (fe-nth dd__296784_1 1)]
+                    (let [value (get form field ::absent)]
                     (if (or (= ::absent value) (nil? value))
                       (if (generic-option-type? field-type)
                         (list 'option-none-of field-type)
@@ -5572,8 +5700,22 @@
                                       (if (= ::absent value) " (the key is left out)" " (its value is nil)")
                                       "; only an [:option T] field is absent")
                                  form :kotoba.error/map-literal-value))
-                      (desugar-expected-value field-type value))))
-                fields))))
+                      (desugar-expected-value field-type value))))))))))) :default (map (fn [dd__296784_1]
+                  (let [field (fe-nth dd__296784_1 0) field-type (fe-nth dd__296784_1 1)]
+                    (let [value (get form field ::absent)]
+                    (if (or (= ::absent value) (nil? value))
+                      (if (generic-option-type? field-type)
+                        (list 'option-none-of field-type)
+                        (reject! (str "map literal field "
+                                      (map-literal-key-description-for-message field)
+                                      " of record " record-name " is "
+                                      (pr-str field-type)
+                                      ", which is not an option, so it cannot be absent"
+                                      (if (= ::absent value) " (the key is left out)" " (its value is nil)")
+                                      "; only an [:option T] field is absent")
+                                 form :kotoba.error/map-literal-value))
+                      (desugar-expected-value field-type value)))))
+                fields)))))
 
 (defn desugar-map
   "Lower a bounded literal into an owned map KIR operation.
@@ -5627,8 +5769,8 @@
   `desugar-map-against-record`."
   ([form] (desugar-map form nil))
   ([form contextual-type]
-  (when (> (count form) max-list-items)
-    (reject! "map entry count exceeds admission limit" form))
+  (let [_ #?(:kotoba (require-k (not (> (count form) max-list-items)) "map entry count exceeds admission limit" "kotoba.error/subset-reject" form) :default (when (> (count form) max-list-items)
+    (reject! "map entry count exceeds admission limit" form)))]
   (let [kinds (into #{} (map map-literal-key-kind) (keys form))
         context-record (let [t (canonical-closure-result-type contextual-type)]
                          (when (record-type? t) t))]
@@ -5639,22 +5781,30 @@
       (contains? kinds nil)
       (let [offender (first (remove map-literal-key-kind (keys form)))]
         (if (f64-literal-key? offender)
-          (reject! (str "map literal keys must be keywords, integers or strings; "
+          #?(:kotoba (throw (fe-error (str "map literal keys must be keywords, integers or strings; "
+                        "this literal has a floating point key, which has no "
+                        "portable key identity -- NaN compares unequal to "
+                        "itself, and +0.0 and -0.0 are equal while differing "
+                        "in bits, so neither the entry order nor duplicate-key "
+                        "detection is decidable") "kotoba.error/map-literal-key" form)) :default (reject! (str "map literal keys must be keywords, integers or strings; "
                         "this literal has a floating point key, which has no "
                         "portable key identity -- NaN compares unequal to "
                         "itself, and +0.0 and -0.0 are equal while differing "
                         "in bits, so neither the entry order nor duplicate-key "
                         "detection is decidable")
-                   form :kotoba.error/map-literal-key)
-          (reject! (str "map literal keys must be keywords, integers or strings; "
+                   form :kotoba.error/map-literal-key))
+          #?(:kotoba (throw (fe-error (str "map literal keys must be keywords, integers or strings; "
+                        "this literal has a key of kind: "
+                        (map-literal-key-description offender)) "kotoba.error/map-literal-key" form)) :default (reject! (str "map literal keys must be keywords, integers or strings; "
                         "this literal has a key of kind: "
                         (map-literal-key-description offender))
-                   form :kotoba.error/map-literal-key)))
+                   form :kotoba.error/map-literal-key))))
 
       (> (count kinds) 1)
-      (reject! (str "map literal keys must all be one kind; this literal mixes "
+      #?(:kotoba (throw (fe-error (str "map literal keys must all be one kind; this literal mixes "
+                    (str/join " and " (sort (map name kinds)))) "kotoba.error/map-literal-key" form)) :default (reject! (str "map literal keys must all be one kind; this literal mixes "
                     (str/join " and " (sort (map name kinds))))
-               form :kotoba.error/map-literal-key)
+               form :kotoba.error/map-literal-key))
 
       :else
       (let [kind (or (first kinds) :keyword)
@@ -5662,18 +5812,20 @@
         (if (= :keyword kind)
           (if-let [fields (keyword-map-literal-record-fields form entries)]
             (list* 'record-new (map-literal-record-type fields)
-                   (map (fn [[_ v] [_ field-type]]
-                          (desugar-expected-value field-type v))
+                   (map (fn [dd__302812_1 dd__302812_2]
+                          (let [v (fe-nth dd__302812_1 1) field-type (fe-nth dd__302812_2 1)]
+                            (desugar-expected-value field-type v)))
                         entries fields))
             (apply list 'map-new
-                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)))
+                   (mapcat (fn [dd__303005_1] (let [k (fe-nth dd__303005_1 0) v (fe-nth dd__303005_1 1)] [k (desugar-expr v)])) entries)))
           (let [item-type (map-literal-item-type kind entries)]
-            (when (> (count form) max-typed-map-entries)
+            (let [_ #?(:kotoba (require-k (not (> (count form) max-typed-map-entries)) (str "map literal with " (name kind)
+                            " keys exceeds the typed map entry limit") "kotoba.error/map-literal-key" form) :default (when (> (count form) max-typed-map-entries)
               (reject! (str "map literal with " (name kind)
                             " keys exceeds the typed map entry limit")
-                       form :kotoba.error/map-literal-key))
+                       form :kotoba.error/map-literal-key)))]
             (apply list 'typed-map-new [:map kind item-type]
-                   (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)))))))))
+                   (mapcat (fn [dd__303450_1] (let [k (fe-nth dd__303450_1 0) v (fe-nth dd__303450_1 1)] [k (desugar-expr v)])) entries)))))))))))
 
 (defn document-literal-key-frame [text]
   (str (count text) ":" text))
@@ -5705,12 +5857,17 @@
     (map? form) (str "09:{"
                      (apply str
                             (sort
-                             (map (fn [[key item]]
-                                    (str (document-literal-key-frame
+                             #?(:kotoba (let [fe-lc__311474 (form/kids-of form) fe-ln__311474 (vector-count fe-lc__311474)] (form/form-seq (loop [fe-li__311474 0 fe-la__311474 (form/no-forms)] (if (>= fe-li__311474 fe-ln__311474) fe-la__311474 (recur (+ fe-li__311474 1) (form/append-form fe-la__311474 (let [dd__304743_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__311474 fe-li__311474)] (let [key (fe-nth dd__304743_1 0) item (fe-nth dd__304743_1 1)]
+                                      (str (document-literal-key-frame
                                           (document-literal-sort-key key))
                                          (document-literal-key-frame
-                                          (document-literal-sort-key item))))
-                                  form)))
+                                          (document-literal-sort-key item))))))))))) :default (map (fn [dd__304743_1]
+                                    (let [key (fe-nth dd__304743_1 0) item (fe-nth dd__304743_1 1)]
+                                      (str (document-literal-key-frame
+                                          (document-literal-sort-key key))
+                                         (document-literal-key-frame
+                                          (document-literal-sort-key item)))))
+                                  form))))
                      "}")
     (seq? form) (str "10:("
                      (apply str
@@ -5751,29 +5908,30 @@
                  (keyword? form) (list 'document-keyword form)
                  (symbol? form) (list 'document-symbol (list 'symbol (str form)))
                  (vector? form)
-                 (do (when (> (count form) value/document-container-item-limit)
-                       (reject! "document vector literal exceeds item limit" form))
-                     (list* 'document-vector (map #(walk % (inc depth)) form)))
+                 (do (let [_ #?(:kotoba (require-k (not (> (count form) value/document-container-item-limit)) "document vector literal exceeds item limit" "kotoba.error/subset-reject" form) :default (when (> (count form) value/document-container-item-limit)
+                       (reject! "document vector literal exceeds item limit" form)))]
+                     (list* 'document-vector (map #(walk % (inc depth)) form))))
                  (set? form)
-                 (do (when (> (count form) value/document-container-item-limit)
-                       (reject! "document set literal exceeds item limit" form))
+                 (do (let [_ #?(:kotoba (require-k (not (> (count form) value/document-container-item-limit)) "document set literal exceeds item limit" "kotoba.error/subset-reject" form) :default (when (> (count form) value/document-container-item-limit)
+                       (reject! "document set literal exceeds item limit" form)))]
                      (list* 'document-set
                             (map #(walk % (inc depth))
-                                 (sort-by document-literal-sort-key form))))
+                                 (sort-by document-literal-sort-key form)))))
                  (map? form)
-                 (do (when (> (count form) value/document-container-item-limit)
-                       (reject! "document map literal exceeds entry limit" form))
+                 (do (let [_ #?(:kotoba (require-k (not (> (count form) value/document-container-item-limit)) "document map literal exceeds entry limit" "kotoba.error/subset-reject" form) :default (when (> (count form) value/document-container-item-limit)
+                       (reject! "document map literal exceeds entry limit" form)))]
                      (list* 'document-map
-                            (mapcat (fn [[key item]]
-                                      [(if (keyword? key)
+                            (mapcat (fn [dd__307827_1]
+                                      (let [key (fe-nth dd__307827_1 0) item (fe-nth dd__307827_1 1)]
+                                        [(if (keyword? key)
                                          key
                                          (walk key (inc depth)))
-                                       (walk item (inc depth))])
-                                    (sort-by (comp document-literal-sort-key key) form))))
+                                       (walk item (inc depth))]))
+                                    (sort-by (comp document-literal-sort-key key) form)))))
                  (seq? form)
-                 (do (when (> (count form) value/document-container-item-limit)
-                       (reject! "document list literal exceeds item limit" form))
-                     (list* 'document-list (map #(walk % (inc depth)) form)))
+                 (do (let [_ #?(:kotoba (require-k (not (> (count form) value/document-container-item-limit)) "document list literal exceeds item limit" "kotoba.error/subset-reject" form) :default (when (> (count form) value/document-container-item-limit)
+                       (reject! "document list literal exceeds item limit" form)))]
+                     (list* 'document-list (map #(walk % (inc depth)) form))))
                  :else (reject! "document requires a closed EDN literal tree" form))))]
       (walk literal 0))))
 
@@ -5797,9 +5955,10 @@
     (symbol? form) (some? (namespace form))
     (vector? form) (every? contextual-document-literal? form)
     (set? form) (every? contextual-document-literal? form)
-    (map? form) (every? (fn [[key item]]
-                          (and (contextual-document-literal? key)
-                               (contextual-document-literal? item)))
+    (map? form) (every? (fn [dd__309453_1]
+                          (let [key (fe-nth dd__309453_1 0) item (fe-nth dd__309453_1 1)]
+                            (and (contextual-document-literal? key)
+                               (contextual-document-literal? item))))
                         form)
     :else false))
 
@@ -5879,11 +6038,11 @@
   [f-form x]
   (cond
     (and (seq? f-form) (= 'fn (first f-form)))
-    (let [[_ params & body] f-form]
-      (when-not (and (vector? params) (= 1 (count params)) (seq body))
+    (let [params (fe-nth f-form 1) body (fe-nthnext f-form 2)]
+      (let [_ #?(:kotoba (require-k (and (vector? params) (= 1 (count params)) (seq body)) "a fn applied to a document collection takes one parameter and a body" "kotoba.error/subset-reject" f-form) :default (when-not (and (vector? params) (= 1 (count params)) (seq body))
         (reject! "a fn applied to a document collection takes one parameter and a body"
-                 f-form))
-      (list 'let [(first params) x] (implicit-do-body body)))
+                 f-form)))]
+      (list 'let [(first params) x] (implicit-do-body body))))
 
     (keyword? f-form) (list 'get x f-form '(document-null))
 
@@ -5929,17 +6088,19 @@
                            (cons op args)))
                 v)]
     (case op
-      merge (reduce (fn [a b] (list 'document-merge a b)) (first args) (rest args))
+      merge #?(:kotoba (let [fe-lc__315524 (form/kids-of (rest args)) fe-ln__315524 (vector-count fe-lc__315524)] (loop [fe-li__315524 0 a (first args)] (if (>= fe-li__315524 fe-ln__315524) a (recur (+ fe-li__315524 1) (let [b (typed-list-nth [:list [:ref :form/r]] fe-lc__315524 fe-li__315524)] (list 'document-merge a b)))))) :default (reduce (fn [a b] (list 'document-merge a b)) (first args) (rest args)))
 
       select-keys
       (let [m '__kotoba_sel_m
             ks (path! (second args))]
         (list 'let [m (first args)]
-              (reduce (fn [accumulated k]
+              #?(:kotoba (let [fe-lc__315733 (form/kids-of ks) fe-ln__315733 (vector-count fe-lc__315733)] (loop [fe-li__315733 0 accumulated '(document-map)] (if (>= fe-li__315733 fe-ln__315733) accumulated (recur (+ fe-li__315733 1) (let [k (typed-list-nth [:list [:ref :form/r]] fe-lc__315733 fe-li__315733)] (list 'if (list 'contains? m k)
+                              (list 'assoc accumulated k (list 'get m k nil-doc))
+                              accumulated)))))) :default (reduce (fn [accumulated k]
                         (list 'if (list 'contains? m k)
                               (list 'assoc accumulated k (list 'get m k nil-doc))
                               accumulated))
-                      '(document-map) ks)))
+                      '(document-map) ks))))
 
       get-in
       (let [ks (path! (second args))
@@ -5961,7 +6122,7 @@
           (build (first args) ks)))
 
       update
-      (let [[m k f & more] args
+      (let [m (fe-nth args 0) k (fe-nth args 1) f (fe-nth args 2) more (fe-nthnext args 3)
             current (list 'get m k nil-doc)
             applied (if (and (seq? f) (= 'fn (first f)))
                       (document-callback-call f current)
@@ -5972,20 +6133,20 @@
 
       empty? (list '= (list 'document-count (first args)) 0)
 
-      some (let [[p coll] args]
+      some (let [p (fe-nth args 0) coll (fe-nth args 1)]
              (list 'reduce (list 'fn [acc x] (list 'if acc acc (document-callback-call p x)))
                    false coll))
 
-      every? (let [[p coll] args]
+      every? (let [p (fe-nth args 0) coll (fe-nth args 1)]
                (list 'reduce (list 'fn [acc x] (list 'if acc (document-callback-call p x) false))
                      true coll))
 
       ;; a recursive helper, not a nested reduce: an inner loop's result type is
       ;; not resolved when an outer loop's argument types are
-      concat (reduce (fn [folded coll] (list doc-append-from-helper-name coll 0 folded))
-                     '(document-vector) args)
+      concat #?(:kotoba (let [fe-lc__317646 (form/kids-of args) fe-ln__317646 (vector-count fe-lc__317646)] (loop [fe-li__317646 0 folded '(document-vector)] (if (>= fe-li__317646 fe-ln__317646) folded (recur (+ fe-li__317646 1) (let [coll (typed-list-nth [:list [:ref :form/r]] fe-lc__317646 fe-li__317646)] (list doc-append-from-helper-name coll 0 folded)))))) :default (reduce (fn [folded coll] (list doc-append-from-helper-name coll 0 folded))
+                     '(document-vector) args))
 
-      keep (let [[f coll] args]
+      keep (let [f (fe-nth args 0) coll (fe-nth args 1)]
              (list 'reduce
                    (list 'fn [acc x]
                          (list 'let ['__kotoba_kept (document-callback-call f x)]
@@ -5996,7 +6157,7 @@
 
       ;; `(into to coll)`: a map target takes each [key value] entry, any other
       ;; target appends the item.
-      into (let [[to coll] args]
+      into (let [to (fe-nth args 0) coll (fe-nth args 1)]
              (list 'reduce
                    (list 'fn [acc x]
                          (list 'if (list '= (list 'document-kind acc) :map)
@@ -6042,9 +6203,9 @@
 
     (symbol? pattern)
     (do
-      (when (namespace pattern)
-        (reject! "match binding pattern must be an unqualified symbol" form))
-      {:temps [] :tests [] :binds [[pattern subject]]})
+      (let [_ #?(:kotoba (require-k (not (namespace pattern)) "match binding pattern must be an unqualified symbol" "kotoba.error/subset-reject" form) :default (when (namespace pattern)
+        (reject! "match binding pattern must be an unqualified symbol" form)))]
+      {:temps [] :tests [] :binds [[pattern subject]]}))
 
     (match-literal-pattern? pattern)
     ;; `=` is refused on `:string` by the safe value profile, so a string
@@ -6063,43 +6224,54 @@
       ;; this profile's bounded map literal checks its values as i64, so no
       ;; source can currently build a map whose value is a map, and a pattern
       ;; that can never match is a claim nothing can test.
-      (when nested?
+      (let [_ #?(:kotoba (require-k (not nested?) "match map pattern values admit `_`, an unqualified symbol, or a bounded literal" "kotoba.error/subset-reject" form) :default (when nested?
         (reject! "match map pattern values admit `_`, an unqualified symbol, or a bounded literal"
-                 form))
-      (when (empty? pattern)
-        (reject! "match map pattern requires at least one key" form))
-      (when (> (count pattern) max-match-pattern-keys)
-        (reject! "match map pattern key count exceeds admission limit" form))
-      (when-not (every? keyword? (keys pattern))
-        (reject! "match map pattern keys must be keywords" form))
+                 form)))]
+      (let [_ #?(:kotoba (require-k (not (empty? pattern)) "match map pattern requires at least one key" "kotoba.error/subset-reject" form) :default (when (empty? pattern)
+        (reject! "match map pattern requires at least one key" form)))]
+      (let [_ #?(:kotoba (require-k (not (> (count pattern) max-match-pattern-keys)) "match map pattern key count exceeds admission limit" "kotoba.error/subset-reject" form) :default (when (> (count pattern) max-match-pattern-keys)
+        (reject! "match map pattern key count exceeds admission limit" form)))]
+      (let [_ #?(:kotoba (require-k (every? keyword? (keys pattern)) "match map pattern keys must be keywords" "kotoba.error/subset-reject" form) :default (when-not (every? keyword? (keys pattern))
+        (reject! "match map pattern keys must be keywords" form)))]
       ;; Sorted by key text so the same source always yields the same KIR --
       ;; a literal map's own iteration order is not part of the source.
-      (reduce (fn [plan [key sub-pattern]]
-                (let [projection (synthetic "match-key")
+      #?(:kotoba (let [fe-lc__332210 (form/kids-of (sort-by (comp str key) pattern)) fe-ln__332210 (vector-count fe-lc__332210)] (loop [fe-li__332210 0 plan {:temps [] :tests [] :binds []}] (if (>= fe-li__332210 fe-ln__332210) plan (recur (+ fe-li__332210 1) (let [dd__322104_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__332210 fe-li__332210)] (let [key (fe-nth dd__322104_1 0) sub-pattern (fe-nth dd__322104_1 1)]
+                  (let [projection (synthetic "match-key")
                       sub (match-pattern-plan sub-pattern projection form true)]
                   (-> plan
                       (update :temps conj [projection (list 'get subject key)])
                       (update :temps into (:temps sub))
                       (update :tests conj (list match-has-marker subject key))
                       (update :tests into (:tests sub))
-                      (update :binds into (:binds sub)))))
+                      (update :binds into (:binds sub)))))))))) :default (reduce (fn [plan dd__322104_1]
+                (let [key (fe-nth dd__322104_1 0) sub-pattern (fe-nth dd__322104_1 1)]
+                  (let [projection (synthetic "match-key")
+                      sub (match-pattern-plan sub-pattern projection form true)]
+                  (-> plan
+                      (update :temps conj [projection (list 'get subject key)])
+                      (update :temps into (:temps sub))
+                      (update :tests conj (list match-has-marker subject key))
+                      (update :tests into (:tests sub))
+                      (update :binds into (:binds sub))))))
               {:temps [] :tests [] :binds []}
-              (sort-by (comp str key) pattern)))
+              (sort-by (comp str key) pattern))))))))
 
     (vector? pattern)
-    (reject! "match does not admit vector patterns" form)
+    #?(:kotoba (throw (fe-error "match does not admit vector patterns" "kotoba.error/subset-reject" form)) :default (reject! "match does not admit vector patterns" form))
 
     (set? pattern)
-    (reject! "match does not admit set patterns" form)
+    #?(:kotoba (throw (fe-error "match does not admit set patterns" "kotoba.error/subset-reject" form)) :default (reject! "match does not admit set patterns" form))
 
     (seq? pattern)
-    (reject! "match does not admit list patterns or guards" form)
+    #?(:kotoba (throw (fe-error "match does not admit list patterns or guards" "kotoba.error/subset-reject" form)) :default (reject! "match does not admit list patterns or guards" form))
 
     :else
-    (reject! (str "match admits `_`, an unqualified symbol, a bounded integer, "
+    #?(:kotoba (throw (fe-error (str "match admits `_`, an unqualified symbol, a bounded integer, "
+                  "keyword, boolean or string literal, and a keyword-keyed map "
+                  "pattern") "kotoba.error/subset-reject" form)) :default (reject! (str "match admits `_`, an unqualified symbol, a bounded integer, "
                   "keyword, boolean or string literal, and a keyword-keyed map "
                   "pattern")
-             form)))
+             form))))
 
 (defn match-conjunction
   "Nested `if` rather than `and` so the emitted KIR carries no chain temps and
@@ -6135,30 +6307,32 @@
   With no `:else` a miss traps through quot-by-zero, the same convention
   `case` and `condp` already use in this profile."
   [args form]
-  (when (empty? args)
-    (reject! "match requires a scrutinee expression" form))
-  (let [[scrutinee & clauses] args]
-    (when (odd? (count clauses))
-      (reject! "match requires pattern/result pairs" form))
-    (when (empty? clauses)
-      (reject! "match requires at least one pattern/result pair" form))
-    (when (> (quot (count clauses) 2) max-match-arms)
-      (reject! "match clause count exceeds admission limit" form))
+  (let [_ #?(:kotoba (require-k (not (empty? args)) "match requires a scrutinee expression" "kotoba.error/subset-reject" form) :default (when (empty? args)
+    (reject! "match requires a scrutinee expression" form)))]
+  (let [scrutinee (fe-nth args 0) clauses (fe-nthnext args 1)]
+    (let [_ #?(:kotoba (require-k (not (odd? (count clauses))) "match requires pattern/result pairs" "kotoba.error/subset-reject" form) :default (when (odd? (count clauses))
+      (reject! "match requires pattern/result pairs" form)))]
+    (let [_ #?(:kotoba (require-k (not (empty? clauses)) "match requires at least one pattern/result pair" "kotoba.error/subset-reject" form) :default (when (empty? clauses)
+      (reject! "match requires at least one pattern/result pair" form)))]
+    (let [_ #?(:kotoba (require-k (not (> (quot (count clauses) 2) max-match-arms)) "match clause count exceeds admission limit" "kotoba.error/subset-reject" form) :default (when (> (quot (count clauses) 2) max-match-arms)
+      (reject! "match clause count exceeds admission limit" form)))]
     (let [pairs (vec (partition 2 clauses))
-          else-positions (vec (keep-indexed (fn [index [pattern _]]
-                                              (when (= :else pattern) index))
+          else-positions (vec (keep-indexed (fn [index dd__325101_1]
+                                              (let [pattern (fe-nth dd__325101_1 0)]
+                                                (when (= :else pattern) index)))
                                             pairs))]
-      (when (> (count else-positions) 1)
-        (reject! "match admits at most one :else clause" form))
-      (when (and (seq else-positions)
+      (let [_ #?(:kotoba (require-k (not (> (count else-positions) 1)) "match admits at most one :else clause" "kotoba.error/subset-reject" form) :default (when (> (count else-positions) 1)
+        (reject! "match admits at most one :else clause" form)))]
+      (let [_ #?(:kotoba (require-k (not (and (seq else-positions)
+                 (not= (first else-positions) (dec (count pairs))))) "match :else clause must be last" "kotoba.error/subset-reject" form) :default (when (and (seq else-positions)
                  (not= (first else-positions) (dec (count pairs))))
-        (reject! "match :else clause must be last" form))
+        (reject! "match :else clause must be last" form)))]
       (let [else? (seq else-positions)
             default (if else? (second (last pairs)) '(quot 1 0))
             arms (if else? (subvec pairs 0 (dec (count pairs))) pairs)
             subject (synthetic "match")
-            plans (mapv (fn [[pattern _]] (match-pattern-plan pattern subject form false))
-                        arms)]
+            plans #?(:kotoba (let [fe-lc__337631 (form/kids-of arms) fe-ln__337631 (vector-count fe-lc__337631)] (form/form-vec (loop [fe-li__337631 0 fe-la__337631 (form/no-forms)] (if (>= fe-li__337631 fe-ln__337631) fe-la__337631 (recur (+ fe-li__337631 1) (form/append-form fe-la__337631 (let [dd__325764_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__337631 fe-li__337631)] (let [pattern (fe-nth dd__325764_1 0)] (match-pattern-plan pattern subject form false))))))))) :default (mapv (fn [dd__325764_1] (let [pattern (fe-nth dd__325764_1 0)] (match-pattern-plan pattern subject form false)))
+                        arms))]
         ;; An arm with no tests always matches, so anything after it can never
         ;; run. Dropping those clauses silently would make a typo in the last
         ;; arm invisible; saying so is the whole difference.
@@ -6171,10 +6345,16 @@
             (when-not (= (count names) (count (distinct names)))
               (reject! "match pattern binds the same symbol twice" form))))
         (list 'let [subject (desugar-expr scrutinee)]
-              (reduce (fn [fallback [plan [_ result]]]
-                        (match-arm plan (desugar-expr result) fallback))
+              #?(:kotoba (let [fe-lc__338535 (form/kids-of (reverse (map vector plans arms))) fe-ln__338535 (vector-count fe-lc__338535)] (loop [fe-li__338535 0 fallback (desugar-expr default)] (if (>= fe-li__338535 fe-ln__338535) fallback (recur (+ fe-li__338535 1) (let [dd__326627_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__338535 fe-li__338535)] (let [plan (fe-nth dd__326627_1 0)
+                              dd__326627_2 (fe-nth dd__326627_1 1)
+                              result (fe-nth dd__326627_2 1)]
+                          (match-arm plan (desugar-expr result) fallback))))))) :default (reduce (fn [fallback dd__326627_1]
+                        (let [plan (fe-nth dd__326627_1 0)
+                              dd__326627_2 (fe-nth dd__326627_1 1)
+                              result (fe-nth dd__326627_2 1)]
+                          (match-arm plan (desugar-expr result) fallback)))
                       (desugar-expr default)
-                      (reverse (map vector plans arms))))))))
+                      (reverse (map vector plans arms)))))))))))))))
 
 (defn destructure-binding
   "Expands ONE `[pattern value-expr]` `let`/`defn`-param binding into a flat
@@ -6197,33 +6377,38 @@
 
               (vector? candidate)
               (let [tmp (synthetic "destr-vector")
-                    [positional rest-part] (split-with (complement #{'&}) candidate)]
-                (when-not (every? supported-pattern? positional)
+                    dd__327884_1 (split-with (complement #{'&}) candidate)
+                    positional (fe-nth dd__327884_1 0)
+                    rest-part (fe-nth dd__327884_1 1)]
+                (let [_ #?(:kotoba (require-k (every? supported-pattern? positional) "vector destructuring items must be symbols or nested vector/map patterns" "kotoba.error/subset-reject" candidate) :default (when-not (every? supported-pattern? positional)
                   (reject! "vector destructuring items must be symbols or nested vector/map patterns"
-                           candidate))
-                (when (and (seq rest-part)
+                           candidate)))]
+                (let [_ #?(:kotoba (require-k (not (and (seq rest-part)
+                           (or (not= 2 (count rest-part))
+                               (not (symbol? (second rest-part)))))) "`&` in vector destructuring must be followed by exactly one rest-binding symbol" "kotoba.error/subset-reject" candidate) :default (when (and (seq rest-part)
                            (or (not= 2 (count rest-part))
                                (not (symbol? (second rest-part)))))
                   (reject! "`&` in vector destructuring must be followed by exactly one rest-binding symbol"
-                           candidate))
+                           candidate)))]
                 (into [[tmp value]]
                       (concat
-                       (mapcat (fn [[index item-pattern]]
-                                 (expand item-pattern (list 'nth tmp index)))
+                       (mapcat (fn [dd__328627_1]
+                                 (let [index (fe-nth dd__328627_1 0) item-pattern (fe-nth dd__328627_1 1)]
+                                   (expand item-pattern (list 'nth tmp index))))
                                (map-indexed vector positional))
                        ;; A rest binding retains the established homogeneous
                        ;; vector contract. Heterogeneous rest needs an exact
                        ;; sliced descriptor and is rejected by type checking
                        ;; until that representation is admitted explicitly.
                        (when-let [rest-name (second rest-part)]
-                         [[rest-name (list 'vector-drop tmp (count positional))]]))))
+                         [[rest-name (list 'vector-drop tmp (count positional))]]))))))
 
               (map? candidate)
               (let [;; `:keys [a ns/b]` and the namespaced form `:ns/keys [a b]`
                     ;; (ADR 0207): a qualified key symbol binds its bare name
                     ;; and looks up the qualified keyword.
-                    keys-slots (filterv (fn [k] (and (keyword? k) (= "keys" (name k))))
-                                        (keys candidate))
+                    keys-slots #?(:kotoba (let [fe-lc__329543 (form/kids-of (keys candidate)) fe-ln__329543 (vector-count fe-lc__329543)] (form/form-vec (loop [fe-li__329543 0 fe-la__329543 (form/no-forms)] (if (>= fe-li__329543 fe-ln__329543) fe-la__329543 (let [k (typed-list-nth [:list [:ref :form/r]] fe-lc__329543 fe-li__329543)] (recur (+ fe-li__329543 1) (if (do (and (keyword? k) (= "keys" (name k)))) (form/append-form fe-la__329543 k) fe-la__329543))))))) :default (filterv (fn [k] (and (keyword? k) (= "keys" (name k))))
+                                        (keys candidate)))
                     keys-vec (vec (mapcat (fn [slot]
                                             (let [v (get candidate slot)]
                                               (if (vector? v) v [slot])))
@@ -6232,11 +6417,13 @@
                                       (fn [slot]
                                         (let [v (get candidate slot)]
                                           (when (and (vector? v) (every? symbol? v))
-                                            (map (fn [k]
+                                            #?(:kotoba (let [fe-lc__330203 (form/kids-of v) fe-ln__330203 (vector-count fe-lc__330203)] (form/form-seq (loop [fe-li__330203 0 fe-la__330203 (form/no-forms)] (if (>= fe-li__330203 fe-ln__330203) fe-la__330203 (recur (+ fe-li__330203 1) (form/append-form fe-la__330203 (let [k (typed-list-nth [:list [:ref :form/r]] fe-lc__330203 fe-li__330203)] [(symbol (name k))
+                                                    (keyword (or (namespace k) (namespace slot))
+                                                             (name k))]))))))) :default (map (fn [k]
                                                    [(symbol (name k))
                                                     (keyword (or (namespace k) (namespace slot))
                                                              (name k))])
-                                                 v))))
+                                                 v)))))
                                       keys-slots))
                     key-names (mapv first key-entries)
                     defaults (get candidate :or {})
@@ -6245,36 +6432,51 @@
                     explicit (sort-by (comp pr-str val) explicit)
                     direct-symbols
                     (into (set key-names)
-                          (keep (fn [[binding-pattern _]]
-                                  (when (symbol? binding-pattern) binding-pattern)))
+                          (keep (fn [dd__330967_1]
+                                  (let [binding-pattern (fe-nth dd__330967_1 0)]
+                                    (when (symbol? binding-pattern) binding-pattern))))
                           explicit)]
-                (when-not (and (every? symbol? keys-vec)
+                (let [_ #?(:kotoba (require-k (and (every? symbol? keys-vec)
                                (map? defaults) (every? symbol? (keys defaults))
                                (every? direct-symbols (keys defaults))
                                (or (nil? as-name) (symbol? as-name))
-                               (every? (fn [[binding-pattern lookup-key]]
-                                         (and (supported-pattern? binding-pattern)
-                                              (keyword? lookup-key)))
+                               (every? (fn [dd__331431_1]
+                                         (let [binding-pattern (fe-nth dd__331431_1 0)
+                                               lookup-key (fe-nth dd__331431_1 1)]
+                                           (and (supported-pattern? binding-pattern)
+                                              (keyword? lookup-key))))
+                                       explicit)
+                               (or (seq key-entries) (seq explicit) as-name)) (str "map destructuring requires :keys, :as, or keyword-valued "
+                                "explicit entries, with :or defaults for direct symbol bindings") "kotoba.error/subset-reject" candidate) :default (when-not (and (every? symbol? keys-vec)
+                               (map? defaults) (every? symbol? (keys defaults))
+                               (every? direct-symbols (keys defaults))
+                               (or (nil? as-name) (symbol? as-name))
+                               (every? (fn [dd__331431_1]
+                                         (let [binding-pattern (fe-nth dd__331431_1 0)
+                                               lookup-key (fe-nth dd__331431_1 1)]
+                                           (and (supported-pattern? binding-pattern)
+                                              (keyword? lookup-key))))
                                        explicit)
                                (or (seq key-entries) (seq explicit) as-name))
                   (reject! (str "map destructuring requires :keys, :as, or keyword-valued "
                                 "explicit entries, with :or defaults for direct symbol bindings")
-                           candidate))
+                           candidate)))]
                 (let [tmp (synthetic "destr-map")
                       entries (concat key-entries explicit)]
                   (into [[tmp value]]
                         (concat
                          (mapcat
-                          (fn [[binding-pattern lookup-key]]
-                            (let [lookup
+                          (fn [dd__332215_1]
+                            (let [binding-pattern (fe-nth dd__332215_1 0) lookup-key (fe-nth dd__332215_1 1)]
+                              (let [lookup
                                   (if (and (symbol? binding-pattern)
                                            (contains? defaults binding-pattern))
                                     (list '__kotoba_destructure_get tmp lookup-key
                                           (desugar-expr (get defaults binding-pattern)))
                                     (list '__kotoba_destructure_get tmp lookup-key))]
-                              (expand binding-pattern lookup)))
+                              (expand binding-pattern lookup))))
                           entries)
-                         (when as-name [[as-name tmp]])))))
+                         (when as-name [[as-name tmp]]))))))
 
               :else (reject! "unsupported destructuring pattern" candidate)))]
     (expand pattern value-expr)))
@@ -6290,18 +6492,20 @@
   (cond
     (symbol? form) (if (contains? bound form) #{} #{form})
     (seq? form)
-    (let [[op & args] form]
+    (let [op (fe-nth form 0) args (fe-nthnext form 1)]
       (case op
         let
-        (let [[bindings & body] args]
+        (let [bindings (fe-nth args 0) body (fe-nthnext args 1)]
           (loop [pairs (partition 2 bindings) bound bound acc #{}]
             (if-let [[name value] (first pairs)]
               (recur (next pairs) (conj bound name) (set/union acc (form-free-symbols value bound)))
               (apply set/union acc (map #(form-free-symbols % bound) body)))))
         ;; The catch binder is bound in the handler and nowhere else.
         try
-        (let [[body clause] args
-              [_ binder handler] (try-clause-parts clause form)]
+        (let [body (fe-nth args 0) clause (fe-nth args 1)
+              dd__333976_1 (try-clause-parts clause form)
+              binder (fe-nth dd__333976_1 1)
+              handler (fe-nth dd__333976_1 2)]
           (set/union (form-free-symbols body bound)
                      (form-free-symbols handler (conj bound binder))))
         (apply set/union #{} (map #(form-free-symbols % bound) args))))
@@ -6319,11 +6523,11 @@
   [form helper-name loop-names captured]
   (cond
     (seq? form)
-    (let [[op & args] form]
+    (let [op (fe-nth form 0) args (fe-nthnext form 1)]
       (if (= op 'recur)
-        (do (when-not (= (count args) (count loop-names))
-              (reject! "recur argument count must match loop bindings" form))
-            (list* helper-name (concat args captured)))
+        (do (let [_ #?(:kotoba (require-k (= (count args) (count loop-names)) "recur argument count must match loop bindings" "kotoba.error/subset-reject" form) :default (when-not (= (count args) (count loop-names))
+              (reject! "recur argument count must match loop bindings" form)))]
+            (list* helper-name (concat args captured))))
         (cons op (map #(replace-recur % helper-name loop-names captured) args))))
     :else form))
 
@@ -6345,7 +6549,7 @@
     (get *function-arities* callback)
 
     (and (seq? callback) (= 'fn (first callback)))
-    (let [[_ params-or-clause & tail] callback
+    (let [params-or-clause (fe-nth callback 1) tail (fe-nthnext callback 2)
           clauses (if (vector? params-or-clause)
                     [params-or-clause]
                     (when (every? #(and (seq? %) (vector? (first %)))
@@ -6353,12 +6557,15 @@
                       (map first (cons params-or-clause tail))))]
       (when clauses
         (apply set/union
-               (map (fn [params]
+               #?(:kotoba (let [fe-lc__336326 (form/kids-of clauses) fe-ln__336326 (vector-count fe-lc__336326)] (form/form-seq (loop [fe-li__336326 0 fe-la__336326 (form/no-forms)] (if (>= fe-li__336326 fe-ln__336326) fe-la__336326 (recur (+ fe-li__336326 1) (form/append-form fe-la__336326 (let [params (typed-list-nth [:list [:ref :form/r]] fe-lc__336326 fe-li__336326)] (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
+                        (if amp-index
+                          (set (range amp-index 5))
+                          #{(count params)}))))))))) :default (map (fn [params]
                       (let [amp-index (first (keep-indexed #(when (= '& %2) %1) params))]
                         (if amp-index
                           (set (range amp-index 5))
                           #{(count params)})))
-                    clauses))))
+                    clauses)))))
 
     :else nil))
 
@@ -6394,11 +6601,11 @@
         helper {:name helper-name
                 :params (into [callback-param] coll-params)
                 :result :i64 :effects #{} :body resolver}]
-    (when (> (count (:params helper)) max-parameters)
-      (reject! "lazy-map callback plus sources exceed ABI-supported arity" form))
+    (let [_ #?(:kotoba (require-k (not (> (count (:params helper)) max-parameters)) "lazy-map callback plus sources exceed ABI-supported arity" "kotoba.error/subset-reject" form) :default (when (> (count (:params helper)) max-parameters)
+      (reject! "lazy-map callback plus sources exceed ABI-supported arity" form)))]
     (when *pending-loop-helpers*
       (swap! *pending-loop-helpers* conj helper))
-    (apply list helper-name callback-value (map desugar-expr colls))))
+    (apply list helper-name callback-value (map desugar-expr colls)))))
 
 (defn synthesize-lazy-filter [callback coll]
   (let [helper-name (synthetic "lazy_filter")
@@ -6452,38 +6659,40 @@
   provider-owned root facet. The named capability resolver both seals wire id
   24 and records namespace usage for fail-closed declaration checking."
   [op args form]
-  (let [[tag payload-type payload]
-        (case op
+  (let [dd__356733_1 (case op
           assert!
-          (do (when-not (<= 1 (count args) 2)
-                (reject! "assert! requires an assertion document and an optional facet" form))
+          (do (let [_ #?(:kotoba (require-k (<= 1 (count args) 2) "assert! requires an assertion document and an optional facet" "kotoba.error/subset-reject" form) :default (when-not (<= 1 (count args) 2)
+                (reject! "assert! requires an assertion document and an optional facet" form)))]
               [:assert dataspace-assert-type
                (list 'record-new dataspace-assert-type
-                     (first args) (or (second args) 0))])
+                     (first args) (or (second args) 0))]))
 
           retract!
-          (do (when-not (<= 1 (count args) 2)
-                (reject! "retract! requires an assertion document and an optional facet" form))
+          (do (let [_ #?(:kotoba (require-k (<= 1 (count args) 2) "retract! requires an assertion document and an optional facet" "kotoba.error/subset-reject" form) :default (when-not (<= 1 (count args) 2)
+                (reject! "retract! requires an assertion document and an optional facet" form)))]
               [:retract dataspace-retract-type
                (list 'record-new dataspace-retract-type
-                     (first args) (or (second args) 0))])
+                     (first args) (or (second args) 0))]))
 
           observe!
-          (do (when-not (<= 1 (count args) 2)
-                (reject! "observe! requires a pattern document and an optional facet" form))
+          (do (let [_ #?(:kotoba (require-k (<= 1 (count args) 2) "observe! requires a pattern document and an optional facet" "kotoba.error/subset-reject" form) :default (when-not (<= 1 (count args) 2)
+                (reject! "observe! requires a pattern document and an optional facet" form)))]
               [:observe dataspace-observe-type
                (list 'record-new dataspace-observe-type
-                     (first args) (or (second args) 0))])
+                     (first args) (or (second args) 0))]))
 
           facet-enter!
-          (do (when-not (empty? args)
-                (reject! "facet-enter! takes no arguments" form))
-              [:facet-enter :bool true])
+          (do (let [_ #?(:kotoba (require-k (empty? args) "facet-enter! takes no arguments" "kotoba.error/subset-reject" form) :default (when-not (empty? args)
+                (reject! "facet-enter! takes no arguments" form)))]
+              [:facet-enter :bool true]))
 
           facet-leave!
-          (do (when-not (= 1 (count args))
-                (reject! "facet-leave! requires one facet identifier" form))
-              [:facet-leave :i64 (first args)]))
+          (do (let [_ #?(:kotoba (require-k (= 1 (count args)) "facet-leave! requires one facet identifier" "kotoba.error/subset-reject" form) :default (when-not (= 1 (count args))
+                (reject! "facet-leave! requires one facet identifier" form)))]
+              [:facet-leave :i64 (first args)])))
+        tag (fe-nth dd__356733_1 0)
+        payload-type (fe-nth dd__356733_1 1)
+        payload (fe-nth dd__356733_1 2)
         request (list 'variant-new dataspace-request-type tag payload)
         lowered (list 'typed-cap-call
                       (resolve-capability-keyword! :dataspace/transact form)
