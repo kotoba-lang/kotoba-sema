@@ -82,7 +82,7 @@
 ;; arms land. A head outside this set and outside the ported arms is an ordinary call (`desugar-ordinary-call`).
 #?(:kotoba
    (defn unported-heads [] [:ref :form/r]
-     (form/edn-form "#{eval lazy-map lazy-filter document assert! retract! observe! facet-enter! facet-leave! cap-call typed-cap-call}"))
+     (form/edn-form "#{}"))
    :default nil)
 
 ;; the table-driven typed operations: op -> [arity message kinds-per-operand]

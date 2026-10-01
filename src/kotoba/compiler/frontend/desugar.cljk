@@ -2934,6 +2934,535 @@
        (dr (dr-env folded) (form/call2 "let" (form/vec2 subject (dr-form scrut)) (dr-form folded)))))
    :default nil)
 
+;; ---- coordination forms and capability calls on the Kotoba route: assert! retract! observe! facet-enter! facet-leave!, cap-call, typed-cap-call, eval ----
+;; The named capability resolver (`resolve-capability-keyword!`) seals the wire id from the registry table and notes the keyword in
+;; the used-capability set; a source location rides as Form span data on this route, so `attach-source-operation` is the identity.
+#?(:kotoba
+   (defn capability-id [env [:ref :fe/env] kw [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (let [id (tables/table-get (env-table env :cap-registry) kw)
+           _ (require-k (not (form/is-nil? id)) (string-concat "cap-call names an unregistered capability: " (kw-text kw))
+                        "kotoba.error/subset-reject" form)]
+       id))
+   :default nil)
+
+;; the dataspace descriptors (capability-kits/dataspace-v1.edn), spelled as the host's constants
+#?(:kotoba
+   (defn dataspace-types-k [which :string] [:ref :form/r]
+     (cond
+       (string=? which "assert") (form/edn-form "[:record :kotoba.dataspace/assert [[:assertion :document] [:facet :i64]]]")
+       (string=? which "retract") (form/edn-form "[:record :kotoba.dataspace/retract [[:assertion :document] [:facet :i64]]]")
+       (string=? which "observe") (form/edn-form "[:record :kotoba.dataspace/observe [[:pattern :document] [:facet :i64]]]")
+       (string=? which "request")
+       (form/edn-form "[:variant :kotoba.dataspace/request [[:assert [:record :kotoba.dataspace/assert [[:assertion :document] [:facet :i64]]]] [:retract [:record :kotoba.dataspace/retract [[:assertion :document] [:facet :i64]]]] [:observe [:record :kotoba.dataspace/observe [[:pattern :document] [:facet :i64]]]] [:facet-enter :bool] [:facet-leave :i64]]]")
+       :else
+       (form/edn-form "[:variant :kotoba.dataspace/result [[:asserted [:record :kotoba.dataspace/asserted [[:count :i64] [:notices :document]]]] [:retracted [:record :kotoba.dataspace/retracted [[:count :i64]]]] [:matches [:record :kotoba.dataspace/matches [[:bindings :document] [:notices :document]]]] [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]] [:error [:record :kotoba.dataspace/error [[:code :keyword] [:message :string]]]]]]")))
+   :default nil)
+
+;; the facet argument: the second operand, 0 when it is absent or nil/false (`(or (second args) 0)`)
+#?(:kotoba
+   (defn facet-or-zero [form [:ref :form/r]] [:ref :form/r]
+     (if (and (>= (argc form) 2)
+              (not (form/is-nil? (arg form 1)))
+              (not (and (form/is-bool? (arg form 1)) (not (form/bool-value (arg form 1))))))
+       (arg form 1)
+       (form/int-form 0)))
+   :default nil)
+
+;; [tag payload-type payload] of the coordination form NAME
+#?(:kotoba
+   (defn dataspace-payload [name :string form [:ref :form/r]] [:ref :form/r]
+     (let [nargs (argc form)]
+       (cond
+         (string=? name "assert!")
+         (let [_ (require-k (and (<= 1 nargs) (<= nargs 2)) "assert! requires an assertion document and an optional facet" "kotoba.error/subset-reject" form)]
+           (form/vec3 (form/keyword-form :assert) (dataspace-types-k "assert")
+                      (form/call3 "record-new" (dataspace-types-k "assert") (arg form 0) (facet-or-zero form))))
+         (string=? name "retract!")
+         (let [_ (require-k (and (<= 1 nargs) (<= nargs 2)) "retract! requires an assertion document and an optional facet" "kotoba.error/subset-reject" form)]
+           (form/vec3 (form/keyword-form :retract) (dataspace-types-k "retract")
+                      (form/call3 "record-new" (dataspace-types-k "retract") (arg form 0) (facet-or-zero form))))
+         (string=? name "observe!")
+         (let [_ (require-k (and (<= 1 nargs) (<= nargs 2)) "observe! requires a pattern document and an optional facet" "kotoba.error/subset-reject" form)]
+           (form/vec3 (form/keyword-form :observe) (dataspace-types-k "observe")
+                      (form/call3 "record-new" (dataspace-types-k "observe") (arg form 0) (facet-or-zero form))))
+         (string=? name "facet-enter!")
+         (let [_ (require-k (= 0 nargs) "facet-enter! takes no arguments" "kotoba.error/subset-reject" form)]
+           (form/vec3 (form/keyword-form :facet-enter) (form/keyword-form :bool) (form/bool-form true)))
+         :else
+         (let [_ (require-k (= 1 nargs) "facet-leave! requires one facet identifier" "kotoba.error/subset-reject" form)]
+           (form/vec3 (form/keyword-form :facet-leave) (form/keyword-form :i64) (arg form 0))))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-dataspace-form-k [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [p (dataspace-payload (form/symbol-value op) form)
+           tag (form/nth-of p 0)
+           payload (form/nth-of p 2)
+           request (form/call3 "variant-new" (dataspace-types-k "request") tag payload)
+           kw (form/keyword-form :dataspace/transact)
+           id (capability-id env kw form)
+           env1 (note-used-capability env kw)
+           r (desugar-expected-value env1 (dataspace-types-k "request") request)]
+       (dr (dr-env r)
+           (head-call (form/symbol-form "typed-cap-call")
+                      (form/cons-onto id (form/three-forms (dataspace-types-k "request") (dataspace-types-k "result") (dr-form r)))))))
+   :default nil)
+
+;; (cap-call :cap/name args...) with a keyword name: the wire id replaces the keyword
+#?(:kotoba
+   (defn desugar-cap-call [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (if (and (> (argc form) 0) (form/is-keyword? (arg form 0)))
+       (let [kw (arg form 0)
+             id (capability-id env kw form)
+             env1 (note-used-capability env kw)
+             rest-args (desugar-each env1 form 2 (form/no-forms))]
+         (dr (drs-env rest-args) (head-call (form/symbol-form "cap-call") (form/cons-onto id (drs-forms rest-args)))))
+       (desugar-ordinary-call-heads env op form)))
+   :default nil)
+
+;; the head kept, every operand desugared (the host's `(apply list op (map desugar-expr args))`)
+#?(:kotoba
+   (defn desugar-ordinary-call-heads [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [r (desugar-each env form 1 (form/no-forms))]
+       (dr (drs-env r) (head-call op (drs-forms r)))))
+   :default nil)
+
+;; the operand I of the form, nil-form past the end
+#?(:kotoba
+   (defn arg-or-nil [form [:ref :form/r] i :i64] [:ref :form/r]
+     (if (< i (argc form)) (arg form i) (form/nil-form)))
+   :default nil)
+
+;; (typed-cap-call :cap/name request-type result-type request & extra); a numeric id with exactly four operands keeps its id
+#?(:kotoba
+   (defn desugar-typed-cap-call [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (cond
+       (and (> (argc form) 0) (form/is-keyword? (arg form 0)))
+       (let [kw (arg form 0)
+             id (capability-id env kw form)
+             env1 (note-used-capability env kw)
+             req (if (<= 4 (argc form))
+                   (desugar-expected-value env1 (arg-or-nil form 1) (arg-or-nil form 3))
+                   (dr env1 (form/nil-form)))
+             extra (desugar-each (dr-env req) form 5 (form/no-forms))]
+         (dr (drs-env extra)
+             (head-call (form/symbol-form "typed-cap-call")
+                        (form/cons-onto id (form/cons-onto (arg-or-nil form 1) (form/cons-onto (arg-or-nil form 2) (form/cons-onto (dr-form req) (drs-forms extra))))))))
+       (and (= 4 (argc form)) (form/is-int? (arg form 0)))
+       (let [req (desugar-expected-value env (arg form 1) (arg form 3))]
+         (dr (dr-env req) (form/call4 "typed-cap-call" (arg form 0) (arg form 1) (arg form 2) (dr-form req))))
+       :else (desugar-ordinary-call-heads env op form)))
+   :default nil)
+
+;; (eval request): the catalogued code/eval ability with one :document request
+#?(:kotoba
+   (defn desugar-eval [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (if (tables/table-has? (env-arities env) op)
+       (desugar-ordinary-call-heads env op form)
+       (let [_ (require-k (= 1 (argc form)) "typed eval requires exactly one :document request" "kotoba.error/subset-reject" form)]
+         (desugar-named-op env (form/symbol-form "code/eval") (form/call1 "code/eval" (arg form 0))))))
+   :default nil)
+
+;; ---- lazy-map / lazy-filter on the Kotoba route: a synthesized recursive helper whose body is a lifted thunk ----
+;; The arities a callback provides: a module function's, or the union over the clauses of a literal fn (a variadic clause is not ported).
+#?(:kotoba
+   (defn arity-of-params [ps [:ref :form/r]] :i64
+     (if (has-amp? ps 0)
+       (throw (fe-unported "variadic fn clause" ps))
+       (form/count-of ps)))
+   :default nil)
+
+#?(:kotoba
+   (defn clause-arity-set [fn-form [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     ;; the clauses are the forms of FN-FORM from I; each is ([params] ...) and answers #{(count params)}
+     (if (>= i (form/count-of fn-form))
+       acc
+       (let [n (arity-of-params (form/nth-of (form/nth-of fn-form i) 0))]
+         (clause-arity-set fn-form (+ i 1) (set-add acc (form/int-form n))))))
+   :default nil)
+
+#?(:kotoba
+   (defn all-clause-shaped? [fn-form [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of fn-form))
+       true
+       (let [c (form/nth-of fn-form i)]
+         (and (form/is-seq? c) (> (form/count-of c) 0) (form/is-vec? (form/nth-of c 0)) (all-clause-shaped? fn-form (+ i 1))))))
+   :default nil)
+
+;; the set of arities the callback provides, nil-form when it is not a module function or a literal fn
+#?(:kotoba
+   (defn callback-supported-arities-k [env [:ref :fe/env] callback [:ref :form/r]] [:ref :form/r]
+     (cond
+       (top-level-function-symbol? env callback) (tables/table-get (env-arities env) callback)
+       (head-is? callback "fn")
+       (let [pc (if (> (form/count-of callback) 1) (form/nth-of callback 1) (form/nil-form))]
+         (cond
+           (form/is-vec? pc) (callback-single-arity pc)
+           (all-clause-shaped? callback 1) (clause-arity-set callback 1 (form/form-set (form/no-forms)))
+           :else (form/nil-form)))
+       :else (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn callback-single-arity [params [:ref :form/r]] [:ref :form/r]
+     (let [n (arity-of-params params)]
+       (form/form-set (form/one-form (form/int-form n)))))
+   :default nil)
+
+;; the callback as a closure value: the arity is checked against what it provides, a module function goes through fn-ref
+#?(:kotoba
+   (defn callback-closure-k [env [:ref :fe/env] kind :string callback [:ref :form/r] arity :i64] [:ref :fe/dr]
+     (let [arities (callback-supported-arities-k env callback)
+           _ (require-k (or (form/is-nil? arities) (tables/table-has? arities (form/int-form arity)))
+                        (string-concat kind (string-concat " callback does not provide arity " (string-from-i64 arity)))
+                        "kotoba.error/subset-reject" callback)]
+       (if (top-level-function-symbol? env callback)
+         (desugar-expr env (form/call1 "fn-ref" callback))
+         (desugar-expr env callback))))
+   :default nil)
+
+;; helper-name ++ suffix as a symbol
+#?(:kotoba
+   (defn suffixed [helper [:ref :form/r] suffix :string] [:ref :form/r]
+     (form/symbol-form (string-concat (form/symbol-value helper) suffix)))
+   :default nil)
+
+#?(:kotoba
+   (defn lazy-coll-params [helper [:ref :form/r] i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i n)
+       acc
+       (lazy-coll-params helper (+ i 1) n (form/append-form acc (suffixed helper (string-concat "_coll_" (string-from-i64 i)))))))
+   :default nil)
+
+;; (f p0) (f p1) ... for the parameters PS
+#?(:kotoba
+   (defn map-calls [f :string ps [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count ps))
+       acc
+       (map-calls f ps (+ i 1) (form/append-form acc (form/call1 f (typed-list-nth [:list [:ref :form/r]] ps i))))))
+   :default nil)
+
+#?(:kotoba
+   (defn lifted-with-lazy [env [:ref :fe/env] fn-form [:ref :form/r]] [:ref :fe/dr]
+     (let [saved (env-lazy? env)
+           r (lift-lambda-k (with-lazy env true) fn-form)]
+       (dr (with-lazy (dr-env r) saved) (dr-form r))))
+   :default nil)
+
+;; the helper definition map of the lazy synthesizers: no :loop-helper? key
+#?(:kotoba
+   (defn loop-helper-plain [helper [:ref :form/r] params [:ref :form/r] body [:ref :form/r]] [:ref :form/r]
+     (form/assoc-form
+      (form/assoc-form
+       (form/assoc-form
+        (form/assoc-form
+         (form/assoc-form (form/form-map (form/no-forms)) (form/keyword-form :name) helper)
+         (form/keyword-form :params) params)
+        (form/keyword-form :result) (form/keyword-form :i64))
+       (form/keyword-form :effects) (form/form-set (form/no-forms)))
+      (form/keyword-form :body) body))
+   :default nil)
+
+;; the thunk that yields the next cell of a lazy-map: empty when any source is
+#?(:kotoba
+   (defn lazy-map-resolver [helper [:ref :form/r] cb [:ref :form/r] cps [:list [:ref :form/r]]] [:ref :form/r]
+     (form/call2 "fn" (form/form-vec (form/no-forms))
+                 (form/call3 "if" (head-call (form/symbol-form "or") (map-calls "lazy-empty?" cps 0 (form/no-forms)))
+                             (form/int-form 0)
+                             (form/call2 "pair"
+                                         (form/call2 "fn" (form/form-vec (form/no-forms))
+                                                     (head-call (form/symbol-form "invoke") (form/cons-onto cb (map-calls "lazy-first" cps 0 (form/no-forms)))))
+                                         (form/call2 "fn" (form/form-vec (form/no-forms))
+                                                     (head-call helper (form/cons-onto cb (map-calls "lazy-rest" cps 0 (form/no-forms)))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-lazy-map [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (and (<= 2 (argc form)) (<= (argc form) 5)) "lazy-map requires a callback and one to four lazy sequences"
+                        "kotoba.error/subset-reject" form)
+           env0 (with-uses-lazy env)
+           callback (arg form 0)
+           arity (- (argc form) 1)
+           hs (synthetic env0 "lazy_map")
+           helper (dr-form hs)
+           cb (suffixed helper "_callback")
+           cps (lazy-coll-params helper 0 arity (form/no-forms))
+           cv (callback-closure-k (dr-env hs) "lazy-map" callback arity)
+           resolver (lifted-with-lazy (dr-env cv) (lazy-map-resolver helper cb cps))
+           _ (require-k (<= (+ arity 1) 64) "lazy-map callback plus sources exceed ABI-supported arity" "kotoba.error/subset-reject" form)
+           env1 (with-helper (dr-env resolver) (loop-helper-plain helper (form/form-vec (form/cons-onto cb cps)) (dr-form resolver)))
+           cols (desugar-each env1 form 2 (form/no-forms))]
+       (dr (drs-env cols) (head-call helper (form/cons-onto (dr-form cv) (drs-forms cols))))))
+   :default nil)
+
+#?(:kotoba
+   (defn lazy-filter-resolver [helper [:ref :form/r] cb [:ref :form/r] coll [:ref :form/r] value [:ref :form/r] cursor [:ref :form/r]] [:ref :form/r]
+     (form/call2 "fn" (form/form-vec (form/no-forms))
+                 (form/call2 "loop" (form/vec2 cursor coll)
+                             (form/call3 "if" (form/call1 "lazy-empty?" cursor)
+                                         (form/int-form 0)
+                                         (form/call2 "let" (form/vec2 value (form/call1 "lazy-first" cursor))
+                                                     (form/call3 "if" (form/call3 "invoke" (form/keyword-form :bool) cb value)
+                                                                 (form/call2 "pair"
+                                                                             (form/call2 "fn" (form/form-vec (form/no-forms)) value)
+                                                                             (form/call2 "fn" (form/form-vec (form/no-forms))
+                                                                                         (form/call2 (form/symbol-value helper) cb (form/call1 "lazy-rest" cursor))))
+                                                                 (form/call1 "recur" (form/call1 "lazy-rest" cursor))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-lazy-filter [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 2 (argc form)) "lazy-filter requires a unary predicate and lazy sequence" "kotoba.error/subset-reject" form)
+           env0 (with-uses-lazy env)
+           hs (synthetic env0 "lazy_filter")
+           helper (dr-form hs)
+           cb (suffixed helper "_callback")
+           coll (suffixed helper "_coll")
+           value (suffixed helper "_value")
+           cursor (suffixed helper "_cursor")
+           cv (callback-closure-k (dr-env hs) "lazy-filter" (arg form 0) 1)
+           resolver (lifted-with-lazy (dr-env cv) (lazy-filter-resolver helper cb coll value cursor))
+           env1 (with-helper (dr-env resolver) (loop-helper-plain helper (form/vec2 cb coll) (dr-form resolver)))
+           c (desugar-expr env1 (arg form 1))]
+       (dr (dr-env c) (form/call2 (form/symbol-value helper) (dr-form cv) (dr-form c)))))
+   :default nil)
+
+;; ---- closed document literals on the Kotoba route (the `document` head and any literal in a :document context) ----
+;; `contextual-document-literal?`: syntax that is unambiguously a closed document value (a call form and a simple symbol are not).
+#?(:kotoba
+   (defn contextual-document-literal-k? [f [:ref :form/r]] :bool
+     (cond
+       (or (form/is-nil? f) (form/is-bool? f) (form/is-int? f) (form/is-f64? f) (form/is-string? f) (form/is-keyword? f)) true
+       (form/is-symbol? f) (not (simple-symbol-form? f))
+       (or (form/is-vec? f) (form/is-set? f) (form/is-map? f)) (all-contextual-document? f 0)
+       :else false))
+   :default nil)
+
+#?(:kotoba
+   (defn all-contextual-document? [f [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of f))
+       true
+       (and (contextual-document-literal-k? (form/nth-of f i)) (all-contextual-document? f (+ i 1)))))
+   :default nil)
+
+;; ---- the sort key (stable, host-independent) used to order set members and map entries ----
+#?(:kotoba
+   (defn doc-frame [text :string] :string
+     (string-concat (string-from-i64 (string-byte-length text)) (string-concat ":" text)))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-sort-key [f [:ref :form/r]] :string
+     (cond
+       (form/is-nil? f) "00:nil"
+       (form/is-bool? f) (if (form/bool-value f) "01:true" "01:false")
+       (form/is-int? f) (string-concat "02:" (string-from-i64 (form/int-value f)))
+       (form/is-f64? f) (string-concat "03:" (string-from-i64 (form/bits-of f)))
+       (form/is-string? f) (string-concat "04:" (form/string-value f))
+       (form/is-keyword? f) (string-concat "05:" (kw-text f))
+       (form/is-symbol? f) (string-concat "06:" (form/symbol-value f))
+       (form/is-vec? f) (string-concat "07:[" (string-concat (doc-key-frames f 0 "") "]"))
+       (form/is-set? f) (string-concat "08:{" (string-concat (doc-join-frames (doc-sorted-strings (doc-child-keys f 0 (form/no-forms)) 0 (form/no-forms)) 0 "") "}"))
+       (form/is-map? f) (string-concat "09:{" (string-concat (doc-join-strings (doc-sorted-strings (doc-entry-keys f 0 (form/no-forms)) 0 (form/no-forms)) 0 "") "}"))
+       (form/is-seq? f) (string-concat "10:(" (string-concat (doc-key-frames f 0 "") ")"))
+       :else "99:?"))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-key-frames [f [:ref :form/r] i :i64 acc :string] :string
+     (if (>= i (form/count-of f))
+       acc
+       (doc-key-frames f (+ i 1) (string-concat acc (doc-frame (doc-sort-key (form/nth-of f i)))))))
+   :default nil)
+
+;; the sort keys of the members of a set, as string forms
+#?(:kotoba
+   (defn doc-child-keys [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of f))
+       acc
+       (doc-child-keys f (+ i 1) (form/append-form acc (form/string-form (doc-sort-key (form/nth-of f i)))))))
+   :default nil)
+
+;; the entry strings of a map: frame(key) frame(value)
+#?(:kotoba
+   (defn doc-entry-keys [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= (+ i 1) (form/count-of f))
+       acc
+       (doc-entry-keys f (+ i 2)
+                       (form/append-form acc (form/string-form (string-concat (doc-frame (doc-sort-key (form/nth-of f i)))
+                                                                              (doc-frame (doc-sort-key (form/nth-of f (+ i 1))))))))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-string-position [sorted [:list [:ref :form/r]] s :string i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (string-compare (form/string-value (typed-list-nth [:list [:ref :form/r]] sorted i)) s) 0)
+         i
+         (doc-string-position sorted s (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-sorted-strings [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count xs))
+       acc
+       (let [x (typed-list-nth [:list [:ref :form/r]] xs i)
+             p (doc-string-position acc (form/string-value x) 0)]
+         (doc-sorted-strings xs (+ i 1) (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) x))))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-join-frames [xs [:list [:ref :form/r]] i :i64 acc :string] :string
+     (if (>= i (vector-count xs))
+       acc
+       (doc-join-frames xs (+ i 1) (string-concat acc (doc-frame (form/string-value (typed-list-nth [:list [:ref :form/r]] xs i)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-join-strings [xs [:list [:ref :form/r]] i :i64 acc :string] :string
+     (if (>= i (vector-count xs))
+       acc
+       (doc-join-strings xs (+ i 1) (string-concat acc (form/string-value (typed-list-nth [:list [:ref :form/r]] xs i))))))
+   :default nil)
+
+;; ---- the elaboration: every node becomes a document constructor call; nodes and depth are bounded ----
+#?(:kotoba
+   (defn doc-charge [f [:ref :form/r] depth :i64 nodes :i64] :i64
+     (let [_ (require-k (<= depth 8) "document literal exceeds depth limit" "kotoba.error/subset-reject" f)
+           n (+ nodes 1)
+           _ (require-k (<= n 4096) "document literal exceeds node limit" "kotoba.error/subset-reject" f)]
+       n))
+   :default nil)
+
+;; the members of a vector/set/list (or the sorted members of a set) walked in order: [elaborated-list nodes]
+#?(:kotoba
+   (defn doc-walk-members [members [:list [:ref :form/r]] i :i64 depth :i64 nodes :i64 acc [:list [:ref :form/r]]] [:ref :form/r]
+     (if (>= i (vector-count members))
+       (form/vec2 (form/form-vec acc) (form/int-form nodes))
+       (let [w (doc-walk (typed-list-nth [:list [:ref :form/r]] members i) depth nodes)]
+         (doc-walk-members members (+ i 1) depth (form/int-value (form/nth-of w 1)) (form/append-form acc (form/nth-of w 0))))))
+   :default nil)
+
+;; the set's members ordered by their sort key (stable)
+#?(:kotoba
+   (defn doc-key-position [sorted [:list [:ref :form/r]] key :string i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (string-compare (doc-sort-key (typed-list-nth [:list [:ref :form/r]] sorted i)) key) 0)
+         i
+         (doc-key-position sorted key (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-sorted-members [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of f))
+       acc
+       (let [m (form/nth-of f i)
+             p (doc-key-position acc (doc-sort-key m) 0)]
+         (doc-sorted-members f (+ i 1) (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) m))))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-members-of [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of f))
+       acc
+       (doc-members-of f (+ i 1) (form/append-form acc (form/nth-of f i)))))
+   :default nil)
+
+;; the map's entries as [key value] vectors ordered by the key's sort key (stable)
+#?(:kotoba
+   (defn doc-entry-position [sorted [:list [:ref :form/r]] key :string i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (string-compare (doc-sort-key (form/nth-of (typed-list-nth [:list [:ref :form/r]] sorted i) 0)) key) 0)
+         i
+         (doc-entry-position sorted key (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-sorted-entries [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= (+ i 1) (form/count-of f))
+       acc
+       (let [e (form/vec2 (form/nth-of f i) (form/nth-of f (+ i 1)))
+             p (doc-entry-position acc (doc-sort-key (form/nth-of f i)) 0)]
+         (doc-sorted-entries f (+ i 2) (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) e))))))
+   :default nil)
+
+;; a map key: a keyword stays as written, anything else is walked
+#?(:kotoba
+   (defn doc-walk-key [k [:ref :form/r] depth :i64 nodes :i64] [:ref :form/r]
+     (if (form/is-keyword? k)
+       (form/vec2 k (form/int-form nodes))
+       (doc-walk k depth nodes)))
+   :default nil)
+
+;; the elaborated key/value pairs of a map's entries, flat: [elaborated-kids nodes]
+#?(:kotoba
+   (defn doc-walk-entries [entries [:list [:ref :form/r]] i :i64 depth :i64 nodes :i64 acc [:list [:ref :form/r]]] [:ref :form/r]
+     (if (>= i (vector-count entries))
+       (form/vec2 (form/form-vec acc) (form/int-form nodes))
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+             k (form/nth-of e 0)
+             kw (doc-walk-key k depth nodes)
+             vw (doc-walk (form/nth-of e 1) depth (form/int-value (form/nth-of kw 1)))]
+         (doc-walk-entries entries (+ i 1) depth (form/int-value (form/nth-of vw 1))
+                           (form/append-form (form/append-form acc (form/nth-of kw 0)) (form/nth-of vw 0))))))
+   :default nil)
+
+;; the walk: [elaborated nodes]
+#?(:kotoba
+   (defn doc-walk [f [:ref :form/r] depth :i64 nodes :i64] [:ref :form/r]
+     (let [n (doc-charge f depth nodes)]
+       (cond
+         (form/is-nil? f) (form/vec2 (form/call0 "document-null") (form/int-form n))
+         (form/is-bool? f) (form/vec2 (form/call1 "document-bool" f) (form/int-form n))
+         (form/is-int? f) (form/vec2 (form/call1 "document-i64" f) (form/int-form n))
+         (form/is-f64? f) (form/vec2 (form/call1 "document-f64" f) (form/int-form n))
+         (form/is-string? f) (form/vec2 (form/call1 "document-string" f) (form/int-form n))
+         (form/is-keyword? f) (form/vec2 (form/call1 "document-keyword" f) (form/int-form n))
+         (form/is-symbol? f) (form/vec2 (form/call1 "document-symbol" (form/call1 "symbol" (form/string-form (form/symbol-value f)))) (form/int-form n))
+         (form/is-vec? f) (doc-walk-container f depth n "document-vector" "document vector literal exceeds item limit")
+         (form/is-set? f) (doc-walk-container f depth n "document-set" "document set literal exceeds item limit")
+         (form/is-map? f) (doc-walk-map f depth n)
+         (form/is-seq? f) (doc-walk-container f depth n "document-list" "document list literal exceeds item limit")
+         :else (throw (fe-reject "document requires a closed EDN literal tree" "kotoba.error/subset-reject" f)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-walk-container [f [:ref :form/r] depth :i64 nodes :i64 head :string msg :string] [:ref :form/r]
+     (let [_ (require-k (<= (form/count-of f) 32) msg "kotoba.error/subset-reject" f)
+           members (if (form/is-set? f) (doc-sorted-members f 0 (form/no-forms)) (doc-members-of f 0 (form/no-forms)))
+           w (doc-walk-members members 0 (+ depth 1) nodes (form/no-forms))]
+       (form/vec2 (head-call (form/symbol-form head) (form/kids-of (form/nth-of w 0))) (form/nth-of w 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-walk-map [f [:ref :form/r] depth :i64 nodes :i64] [:ref :form/r]
+     (let [_ (require-k (<= (quot (form/count-of f) 2) 32) "document map literal exceeds entry limit" "kotoba.error/subset-reject" f)
+           w (doc-walk-entries (doc-sorted-entries f 0 (form/no-forms)) 0 (+ depth 1) nodes (form/no-forms))]
+       (form/vec2 (head-call (form/symbol-form "document-map") (form/kids-of (form/nth-of w 0))) (form/nth-of w 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn elaborate-document-literal-k [f [:ref :form/r]] [:ref :form/r]
+     (form/nth-of (doc-walk f 0 0) 0))
+   :default nil)
+
+;; (document literal)
+#?(:kotoba
+   (defn desugar-document-head [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k (= 1 (argc form)) "document requires exactly one closed literal tree" "kotoba.error/subset-reject" form)
+           e (elaborate-document-literal-k (arg form 0))]
+       (dr env e)))
+   :default nil)
+
+;; a literal in a :document context
+#?(:kotoba
+   (defn desugar-document-literal [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
+     (let [e (elaborate-document-literal-k form)]
+       (dr env e)))
+   :default nil)
+
 ;; a call whose operator is a symbol, in the order of the host's cond chain and then its `case op`
 #?(:kotoba
    (defn desugar-head [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
@@ -3078,6 +3607,15 @@
          (string=? name "char") (desugar-char env op form)
          (string=? name "string-join") (desugar-string-join env form)
          (string=? name "match") (desugar-match-k env form)
+         (or (string=? name "assert!") (string=? name "retract!") (string=? name "observe!")
+             (string=? name "facet-enter!") (string=? name "facet-leave!"))
+         (desugar-dataspace-form-k env op form)
+         (string=? name "cap-call") (desugar-cap-call env op form)
+         (string=? name "typed-cap-call") (desugar-typed-cap-call env op form)
+         (string=? name "eval") (desugar-eval env op form)
+         (string=? name "lazy-map") (desugar-lazy-map env form)
+         (string=? name "lazy-filter") (desugar-lazy-filter env form)
+         (string=? name "document") (desugar-document-head env form)
          (unported-head? env name) (throw (fe-unported name form))
          (not (< (string-find-byte name 47 0) 0)) (desugar-named-op env op form)
          :else (desugar-ordinary-call env op form))))
@@ -6745,7 +7283,7 @@
    (defn desugar-expr* [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
      (cond
        (absence-marker? form) (dr env form)
-       (document-ctx? ctx) (throw (fe-unported "document context" form))
+       (and (document-ctx? ctx) (contextual-document-literal-k? form)) (desugar-document-literal env form)
        (form/is-int? form) (dr env form)
        (form/is-vec? form) (desugar-vector-literal env form)
        (or (form/is-f64? form) (form/is-map? form) (form/is-set? form))
