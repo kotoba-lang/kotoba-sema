@@ -7145,7 +7145,20 @@
             (reject! "loop requires exactly one body expression (this profile has no `do`)" form))
           (let [loop-names (vec (take-nth 2 bindings))
                 loop-inits (mapv desugar-expr (take-nth 2 (rest bindings)))
-                desugared-body (binding [*abort-lexical-context* :loop]
+                ;; ADR 0353 floor :loop-slot-types. A loop binding is a
+                ;; lexical binding, as a `let`'s is: a slot holding a closure
+                ;; is called in the body, under the contract its init has.
+                ;; Before, the body desugared with the slot unknown, and
+                ;; `(f acc)` was refused as an unknown operation.
+                loop-contracts (reduce (fn [contracts [name init]]
+                                         (if-let [contract (expression-callable-contract init)]
+                                           (assoc contracts name contract)
+                                           (dissoc contracts name)))
+                                       *lexical-callable-contracts*
+                                       (partition 2 bindings))
+                desugared-body (binding [*abort-lexical-context* :loop
+                                         *lexical-bindings* (into *lexical-bindings* loop-names)
+                                         *lexical-callable-contracts* loop-contracts]
                                  (desugar-expr (first body)))
                 captured (vec (sort-by str (form-free-symbols desugared-body (set loop-names))))
                 helper-name (symbol (str "__kotoba_loop_" (vswap! *loop-counter* inc)))
@@ -14268,6 +14281,24 @@
           fs'
           (recur fs' (dec budget)))))))
 
+;; ADR 0353 floor :loop-slot-types. A loop-helper's parameters were typed
+;; from its call site BEFORE literals were (a map literal was `:map`, a
+;; vector literal of records refused as not i64 and left the `:i64`
+;; placeholder). Once literals are typed, the call site says what the slot
+;; is: the literal's record, the `[:list T]` of its items. Re-resolve the
+;; helpers' signatures from the typed call sites and type the literals the
+;; new slot types reach, to a fixed point.
+(defn- type-literals-and-loop-slots [functions shapes]
+  (if-not (first-truthy :loop-helper? functions)
+    (type-literals functions)
+    (loop [fs (type-literals functions) budget 8]
+      (let [fs' (-> fs
+                    (resolve-loop-helper-signatures shapes)
+                    type-literals)]
+        (if (or (zero? budget) (= fs' fs))
+          fs'
+          (recur fs' (dec budget)))))))
+
 (defn- infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -15952,6 +15983,8 @@
   [functions lambda-infos]
   (let [lambda-ids (mapv :id lambda-infos)
         function-names (set (map :name functions))
+        loop-helper-names (into #{} (comp (filter :loop-helper?) (map :name)) functions)
+        function-params (into {} (map (juxt :name :params)) functions)
         seed
         (into {}
               (map (fn [{:keys [name closure-param-indexes closure-result?
@@ -16175,6 +16208,17 @@
                                   ;; helper entry, not on the shared dispatcher
                                   ;; argument (only its closure handle is a
                                   ;; uniform checked position).
+                                  ;; ADR 0353 floor :loop-slot-types: a loop
+                                  ;; slot whose argument is a closure is a
+                                  ;; closure slot, called or not -- so the
+                                  ;; :function-values refusals ((+ f 1),
+                                  ;; (= f g)) read it as they read a let.
+                                  (when (contains? loop-helper-names op)
+                                    (doseq [[index arg] (map-indexed vector args)]
+                                      (when (= :closure (expression-status
+                                                         function-name arg env param-indexes
+                                                         @next-facts #{}))
+                                        (mark-param! op index))))
                                   (when (and (contains? function-names op)
                                              (not (closure-dispatcher-function?
                                                    function-name)))
@@ -16244,6 +16288,25 @@
                                                 " over a closure is refused; call it instead"
                                                 " (ADR 0353)")
                                            form :kotoba.error/function-value-arithmetic)))))
+                          ;; ADR 0353 floor :loop-slot-types: a number is not
+                          ;; a function value. A closure slot (a loop slot
+                          ;; holding one, a parameter a dispatcher calls) given
+                          ;; a number literal would be called as a handle and
+                          ;; trap `invalid-pair-handle`. 0 is exempt: it is the
+                          ;; empty lazy sequence's word.
+                          (when (and (contains? function-names op)
+                                     (not (closure-dispatcher-function? op)))
+                            (doseq [index (get-in facts [op :params] #{})]
+                              (let [arg (nth args index nil)]
+                                (when (and (kotoba-integer? arg) (not (zero? arg)))
+                                  (reject! (str "a number is not a function value: "
+                                                (if (contains? loop-helper-names op)
+                                                  (str "loop binding " (nth (get function-params op) index))
+                                                  (str "parameter " (nth (get function-params op) index)
+                                                       " of " op))
+                                                " holds a closure, and " arg
+                                                " is not one (ADR 0353)")
+                                           form :kotoba.error/function-value-number)))))
                           (doseq [arg args]
                             (refuse-closure-operands! function-name arg env
                                                       param-indexes)))))))]
@@ -20106,7 +20169,7 @@
         ;; ADR 0353 floor :literal-typing: a map or vector literal lowered
         ;; before any type was inferred is typed by its items, before rows
         ;; read it (a let-bound literal passed to a row is its record).
-        parsed (type-literals parsed)
+        parsed (type-literals-and-loop-slots parsed @loop-helper-shapes)
         parsed (binding [*schemas* (:schemas namespace-info)]
                  (specialize-row-parameters
                   parsed
