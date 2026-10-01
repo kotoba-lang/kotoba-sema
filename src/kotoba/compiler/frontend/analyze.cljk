@@ -2334,7 +2334,7 @@
                                      :kotoba.error/callable-result-type))
                         typed (assoc typed :result result)]
                     (assoc info :helper
-                           (if (closure-result-type? result {})
+                           (if (or (schema-ref-type? result) (closure-result-type? result {}))
                              typed
                              (dissoc helper :result-inferred?)))))
                 @lambda-infos))

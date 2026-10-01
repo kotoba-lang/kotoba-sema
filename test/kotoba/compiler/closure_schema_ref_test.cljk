@@ -1,0 +1,116 @@
+(ns kotoba.compiler.closure-schema-ref-test
+  "A closure contract may name a closed SCHEMA by reference: `[:fn [[[:ref :ns/R]]
+  [:ref :ns/R]]]`, not only the inlined `[:record :ns/R [...]]` descriptor
+  (2026-10-01, selfhost: kotoba-lang/lang/compat/kotoba/walk.kotoba).
+
+  `typed_closure_parameters_test` admitted a record through a closure
+  parameter when the descriptor was spelled inline in the contract. A
+  recursive record cannot be spelled inline -- `kotoba.form`'s `:form/r` holds
+  a `[:list [:ref :form/r]]` -- so `clojure.walk`'s `postwalk` over Form
+  (`(defn postwalk [f [:fn [[[:ref :form/r]] [:ref :form/r]]] x [:ref :form/r]]
+  ...)`) was refused at three places, each on the same ground: the profile
+  test `closure-result-type?` is asked with `{}` schemas, where a reference
+  resolves to nothing.
+
+    1. `validate-value-type!` (the contract's own parameter and result types):
+       `callable parameter type is outside the admitted dispatcher profile`;
+    2. `invoke-dispatcher-name` and the lambda helper's result (analyze):
+       `closure result type is outside the admitted dispatcher profile`;
+    3. the dispatcher family key: a call site keyed `[:ref R]` and a lambda
+       helper keyed by its canonical record built two families, so the
+       fallback of the one was an i64 trap (`expected [:ref R], got i64`).
+
+  and, once past those, `if branches must have the same value type` between a
+  `[:ref R]` and the `[:record R ...]` descriptor of the same identity, which
+  `same-expression-type?` already says are one type.
+
+  What is asserted:
+    - a reference passes THROUGH a closure parameter and RUNS;
+    - a reference comes BACK from a closure (typed result) and RUNS;
+    - both at once, for a recursive record (the `:form/r` shape);
+    - the join of a reference and the descriptor of the same identity;
+    - a reference to a schema that is not declared is still refused."
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
+               :cljs [cljs.test :refer [deftest is testing] :include-macros true])
+            [kotoba.sema :as sema]
+            [kotoba.kir :as kir]))
+
+(defn- answer
+  "Compile SOURCE and run `main` on the interpreter."
+  [source]
+  (kir/execute (kir/lower (sema/analyze source)) 'main [] {}))
+
+(defn- refusal [source]
+  (try (do (sema/analyze source) nil)
+       (catch #?(:clj Throwable :cljs :default) e
+         {:message (ex-message e)
+          :code (:kotoba.error/code (ex-data e))})))
+
+(defn- w [x] #?(:clj x :cljs (js/Number x)))
+
+(def ^:private pt-ns
+  "(ns m.probe (:schemas {:demo/pt [:record :demo/pt [[:x :i64]]]}))\n")
+
+(deftest a-schema-reference-passes-through-a-closure-parameter
+  (is (= 7 (w (answer
+               (str pt-ns
+                    "(defn apply-pt [f [:fn [[[:ref :demo/pt]] :i64]] p [:ref :demo/pt]] :i64 (f p))
+                     (defn main [] :i64
+                       (apply-pt (fn [p] (record-get [:ref :demo/pt] p :x))
+                                 (record-new [:ref :demo/pt] 7)))"))))))
+
+(deftest a-schema-reference-comes-back-from-a-closure
+  (is (= 7 (w (answer
+               (str pt-ns
+                    "(defn run [f [:fn [[:i64] [:ref :demo/pt]]] n :i64] [:ref :demo/pt] (f n))
+                     (defn main [] :i64
+                       (record-get [:ref :demo/pt]
+                                   (run (fn [n] (record-new [:ref :demo/pt] (+ n 1))) 6)
+                                   :x))"))))))
+
+(deftest a-reference-in-and-a-reference-out
+  (is (= 12 (w (answer
+                (str pt-ns
+                     "(defn rewrite [f [:fn [[[:ref :demo/pt]] [:ref :demo/pt]]] p [:ref :demo/pt]] [:ref :demo/pt] (f p))
+                      (defn main [] :i64
+                        (record-get [:ref :demo/pt]
+                                    (rewrite (fn [p] (record-new [:ref :demo/pt]
+                                                                 (+ 5 (record-get [:ref :demo/pt] p :x))))
+                                             (record-new [:ref :demo/pt] 7))
+                                    :x))"))))))
+
+(deftest a-recursive-record-goes-through-a-closure
+  ;; The reason this exists: `kotoba.form`'s `:form/r` refers to itself through
+  ;; a list, so its descriptor cannot be written inline in a contract.
+  (is (= 3 (w (answer
+               "(ns m.probe (:schemas {:t/node [:record :t/node [[:v :i64] [:kids [:list [:ref :t/node]]]]]}))
+                (defn leaf [v :i64] [:ref :t/node] (record-new [:ref :t/node] v (typed-list-new [:list [:ref :t/node]])))
+                (defn visit [f [:fn [[[:ref :t/node]] [:ref :t/node]]] x [:ref :t/node]] [:ref :t/node] (f x))
+                (defn main [] :i64
+                  (record-get [:ref :t/node]
+                              (visit (fn [n] (record-new [:ref :t/node]
+                                                         (+ 1 (record-get [:ref :t/node] n :v))
+                                                         (record-get [:ref :t/node] n :kids)))
+                                     (leaf 2))
+                              :v))")))))
+
+(deftest a-reference-and-its-descriptor-join-in-an-if
+  (is (= 3 (w (answer
+               (str pt-ns
+                    "(defn pick [c :bool p [:ref :demo/pt]] [:ref :demo/pt]
+                       (if c p (record-new [:record :demo/pt [[:x :i64]]] 3)))
+                     (defn main [] :i64
+                       (record-get [:ref :demo/pt] (pick false (record-new [:ref :demo/pt] 1)) :x))")))))
+  (is (= 1 (w (answer
+               (str pt-ns
+                    "(defn pick [c :bool p [:ref :demo/pt]] [:ref :demo/pt]
+                       (if c p (record-new [:record :demo/pt [[:x :i64]]] 3)))
+                     (defn main [] :i64
+                       (record-get [:ref :demo/pt] (pick true (record-new [:ref :demo/pt] 1)) :x))"))))))
+
+(deftest an-undeclared-schema-reference-is-still-refused
+  (testing "the contract names a schema the namespace never declared"
+    (is (some? (refusal
+                "(ns m.probe)
+                 (defn apply-pt [f [:fn [[[:ref :demo/nope]] :i64]] p [:ref :demo/nope]] :i64 (f p))
+                 (defn main [] :i64 0)")))))

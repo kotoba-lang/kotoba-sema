@@ -1722,10 +1722,11 @@
 (defn request-invoke-dispatcher
   ([result-type arity] (request-invoke-dispatcher result-type arity nil))
   ([result-type arity parameter-types]
-   (when *required-closure-dispatchers*
-     (vswap! *required-closure-dispatchers* conj
-             (dispatcher-key result-type arity parameter-types)))
-   (invoke-dispatcher-name result-type arity parameter-types)))
+   (let [result-type (canonical-closure-result-type result-type)]
+     (when *required-closure-dispatchers*
+       (vswap! *required-closure-dispatchers* conj
+               (dispatcher-key result-type arity parameter-types)))
+     (invoke-dispatcher-name result-type arity parameter-types))))
 
 #?(:kotoba nil :default (def non-shadowable-special-heads tables/non-shadowable-special-heads))
 

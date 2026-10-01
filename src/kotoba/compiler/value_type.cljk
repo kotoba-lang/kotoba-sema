@@ -231,7 +231,7 @@
         (let [r (validate-type p (+ depth 1) nodes)]
           (if (not (r-ok? r))
             r
-            (if (closure-result-type? p)
+            (if (or (schema-ref-type? p) (closure-result-type? p))
               (vt-callable-params params (+ i 1) t depth (r-nodes r))
               (reject-with "kotoba.error/callable-parameter-type"
                            "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
@@ -244,7 +244,7 @@
     (let [r (validate-type res (+ depth 1) nodes)]
       (if (not (r-ok? r))
         r
-        (if (closure-result-type? res)
+        (if (or (schema-ref-type? res) (closure-result-type? res))
           r
           (reject-with "kotoba.error/callable-result-type"
                        "callable result type is outside the admitted dispatcher profile" (r-nodes r)))))))

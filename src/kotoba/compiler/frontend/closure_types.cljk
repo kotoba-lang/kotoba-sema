@@ -306,14 +306,14 @@
              (reject! "callable parameter types cannot be callable or linear resources"
                       type :kotoba.error/callable-parameter-type))
            (validate-value-type! parameter-type (inc depth) nodes)
-           (when-not (closure-result-type? parameter-type {})
+           (when-not (or (schema-ref-type? parameter-type) (closure-result-type? parameter-type {}))
              (reject! "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
                       type :kotoba.error/callable-parameter-type)))
          (when (or (callable-type? result-type) (linear-resource-type? result-type))
            (reject! "callable results cannot be callable or linear resources"
                     type :kotoba.error/callable-result-type))
          (validate-value-type! result-type (inc depth) nodes)
-         (when-not (closure-result-type? result-type {})
+         (when-not (or (schema-ref-type? result-type) (closure-result-type? result-type {}))
            (reject! "callable result type is outside the admitted dispatcher profile"
                     type :kotoba.error/callable-result-type)))
        type)
@@ -576,7 +576,8 @@
   ([arity] (invoke-dispatcher-name :i64 arity))
   ([result-type arity] (invoke-dispatcher-name result-type arity nil))
   ([result-type arity parameter-types]
-   (when-not (closure-result-type? result-type {})
+   (when-not (or (schema-ref-type? result-type)
+                 (closure-result-type? (canonical-closure-result-type result-type) {}))
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
    (let [parameter-label (dispatcher-parameter-label parameter-types)

@@ -1471,6 +1471,11 @@
                (= then-type abort-bottom) else-type
                (= else-type abort-bottom) then-type
                (= then-type else-type) then-type
+               ;; a closed-schema reference and its nominal descriptor are one
+               ;; type (`same-expression-type?`): the join is the reference
+               ;; spelling when either branch has it
+               (same-expression-type? then-type else-type)
+               (if (schema-ref-type? else-type) else-type then-type)
                (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
                (lenient-branch-join then-type else-type)
                :else (reject! "if branches must have the same value type" form)))
