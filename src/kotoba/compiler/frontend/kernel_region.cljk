@@ -4,7 +4,7 @@
             [kotoba.compiler.frontend-tables :as tables]
             #?@(:kotoba [[kotoba.form :as form]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])
-            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-has? fl-nth fl-slice require-k] :default [first-truthy])]])
+            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-has? fl-nth fl-slice] :default [first-truthy])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -16,6 +16,20 @@
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]
                                  ;; kernel-base-uses accumulators
                                  :kr/u [:record :kr/u [[:problems [:list [:ref :form/r]]] [:params [:list [:ref :form/r]]] [:literals [:list [:ref :form/r]]] [:derived [:list [:ref :form/r]]] [:overwide [:list [:ref :form/r]]] [:overwide-alloc [:list [:ref :form/r]]] [:calls [:list [:ref :form/r]]] [:env [:ref :form/r]]]]})))
+
+
+;; A refusal is an abort (ADR 0007). `require-k` is module-local on purpose: an aborting function
+;; IMPORTED from another module is typed [:result T E] here and its abort does not propagate
+;; through a plain call, so every module keeps its own copy of the two helpers.
+#?(:kotoba
+   (defn fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg code form "subset"))
+   :default nil)
+
+#?(:kotoba
+   (defn require-k [ok :bool msg :string code :string form [:ref :form/r]] :i64
+     (if ok 0 (throw (fe-reject msg code form))))
+   :default nil)
 
 #?(:kotoba nil :default (def kernel-memory-operations tables/kernel-memory-operations))
 

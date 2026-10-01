@@ -2,7 +2,7 @@
   "Module `closure-types` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (59 forms, 832 lines). Depends on: base."
   (:require [kotoba.artifact.core :as artifact]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt] [kotoba.compiler.frontend-tables :as tables]])
-            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-nth fl-slice form->document require-k simple-symbol-form?] :default [first-truthy])]])
+            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-nth fl-slice form->document simple-symbol-form?] :default [first-truthy])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -26,6 +26,17 @@
    (defn fe-error [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
      (record-new [:ref :fe/err] msg code form "subset"))
    :default nil)
+
+
+;; A refusal is an abort (ADR 0007). `require-k` is module-local on purpose: an aborting function
+;; IMPORTED from another module is typed [:result T E] here and its abort does not propagate
+;; through a plain call, so every module keeps its own copy of the two helpers.
+#?(:kotoba
+   (defn require-k [ok :bool msg :string code :string form [:ref :form/r]] :i64
+     (if ok 0 (throw (fe-error msg code form))))
+   :default nil)
+
+
 
 #?(:kotoba
    (defn env-schemas [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :schemas))
@@ -113,14 +124,33 @@
 ;; `adt-depth-limit` -- which checks the same descriptors -- had been 12 since
 ;; osaho ADR 0025; a descriptor of depth 9..12 was admitted by the reference
 ;; interpreter and refused by this frontend. Unified at 12 on 2026-09-24.
-(def max-type-depth 64)
-(def max-type-nodes 512)
-(def max-variant-cases 32)
-(def max-heterogeneous-vector-items 32)
-(def max-record-fields 32)
+#?(:kotoba
+   (defn max-type-depth [] :i64 64)
+   :default
+(def max-type-depth 64))
+#?(:kotoba
+   (defn max-type-nodes [] :i64 512)
+   :default
+(def max-type-nodes 512))
+#?(:kotoba
+   (defn max-variant-cases [] :i64 32)
+   :default
+(def max-variant-cases 32))
+#?(:kotoba
+   (defn max-heterogeneous-vector-items [] :i64 32)
+   :default
+(def max-heterogeneous-vector-items 32))
+#?(:kotoba
+   (defn max-record-fields [] :i64 32)
+   :default
+(def max-record-fields 32))
+#?(:kotoba
+   (defn value-types [] [:ref :form/r]
+     (form/edn-form "#{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document}"))
+   :default
 (def value-types #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes
                    :option-i64 :result-i64
-                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
+                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document}))
 
 #?(:kotoba
    (defn callable-type? [type [:ref :form/r]] :bool (vt/callable-type? type))
@@ -216,8 +246,12 @@
 ;; once -- which element types exist, and what each one scales by -- because
 ;; the scale is the only thing that distinguishes an element index from a byte
 ;; offset, and a second table would let the two drift.
+#?(:kotoba
+   (defn slice-element-widths [] [:ref :form/r]
+     (form/edn-form "{:u8 1 :u16 2 :u32 4 :u64 8}"))
+   :default
 (def slice-element-widths
-  {:u8 1 :u16 2 :u32 4 :u64 8})
+  {:u8 1 :u16 2 :u32 4 :u64 8}))
 
 ;; `:f32` is DECLARED here and admitted nowhere. Naming it is the point: the
 ;; carrier is intended to reach binary32 elements (that is the Qwen weight
@@ -227,8 +261,12 @@
 ;; that admits what nothing can lower. So it is refused BY NAME, with a
 ;; message that says which half is missing, rather than falling through the
 ;; generic "unknown element type" arm where a reader would learn nothing.
+#?(:kotoba
+   (defn slice-declared-unadmitted-elements [] [:ref :form/r]
+     (form/edn-form "#{:f32}"))
+   :default
 (def slice-declared-unadmitted-elements
-  #{:f32})
+  #{:f32}))
 
 #?(:kotoba
    (defn slice-type? [type [:ref :form/r]] :bool (vt/slice-type? type))
@@ -781,8 +819,9 @@
            args (ct-arg-symbols arity 0 (form/no-forms))
            candidates (ct-candidates infos 0 arity result-type pts (form/no-forms))
            body (ct-dispatch-body candidates (- (vector-count candidates) 1) closure args (ct-fallback result-type))
+           dname (invoke-dispatcher-name result-type arity pts)
            base (ct-put-function (form/form-map (form/no-forms))
-                         (invoke-dispatcher-name result-type arity pts)
+                         dname
                          (form/form-vec (form/cons-onto closure args))
                          result-type
                          (form/form-set (form/no-forms))

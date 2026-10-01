@@ -1284,6 +1284,163 @@
      (if (fl-has? xs x 0) xs (form/append-form xs x)))
    :default nil)
 
+;; ---- generic Form helpers shared by the pass modules (Kotoba route) ----
+;; The host keeps dynamic data in Clojure maps/lists/symbol metadata; here it is a Form tree.
+;; Metadata has two in-band slots: a seq Form's :s carries the head the author wrote when a
+;; pure-head rewrite replaced it (host: meta :kotoba/pure-source-head), and a symbol Form's :n
+;; is 1 when the author wrote it ^:private (host: meta :private).
+
+;; the value of a keyword key in a Form map (nil when absent)
+#?(:kotoba
+   (defn fget [m [:ref :form/r] key :keyword] [:ref :form/r]
+     (form/form-get m (form/keyword-form key)))
+   :default nil)
+
+;; M with KEY bound to V
+#?(:kotoba
+   (defn fput [m [:ref :form/r] key :keyword v [:ref :form/r]] [:ref :form/r]
+     (form/assoc-form m (form/keyword-form key) v))
+   :default nil)
+
+#?(:kotoba
+   (defn fhas? [m [:ref :form/r] key :keyword] :bool
+     (form/form-has? m (form/keyword-form key)))
+   :default nil)
+
+;; Clojure truthiness of a Form: neither nil nor false
+#?(:kotoba
+   (defn ftruthy? [f [:ref :form/r]] :bool
+     (and (not (form/is-nil? f)) (not (and (form/is-bool? f) (not (form/bool-value f))))))
+   :default nil)
+
+;; the kids of F from index N, as a list
+#?(:kotoba
+   (defn fdrop [f [:ref :form/r] n :i64] [:list [:ref :form/r]]
+     (fl-slice (form/kids-of f) n (form/count-of f) (form/no-forms)))
+   :default nil)
+
+;; the same slice of a list
+#?(:kotoba
+   (defn fl-drop [xs [:list [:ref :form/r]] n :i64] [:list [:ref :form/r]]
+     (fl-slice xs n (vector-count xs) (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn fkw [text :string] [:ref :form/r]
+     (form/keyword-form (keyword-from-string text)))
+   :default nil)
+
+#?(:kotoba
+   (defn fsym [text :string] [:ref :form/r]
+     (form/symbol-form text))
+   :default nil)
+
+;; `(name x)`: the part of a symbol or keyword after its namespace
+#?(:kotoba
+   (defn fname [f [:ref :form/r]] :string
+     (let [t (if (form/is-keyword? f) (form-text f) (form/symbol-value f))
+           body (if (form/is-keyword? f) (string-substring t 1 (string-length t)) t)
+           slash (string-find-byte body 47 0)]
+       (if (or (< slash 0) (= (string-length body) 1))
+         body
+         (string-substring body (+ slash 1) (string-length body)))))
+   :default nil)
+
+;; `(namespace x)`: the part before the slash, "" when there is none
+#?(:kotoba
+   (defn fnamespace [f [:ref :form/r]] :string
+     (let [t (if (form/is-keyword? f) (form-text f) (form/symbol-value f))
+           body (if (form/is-keyword? f) (string-substring t 1 (string-length t)) t)
+           slash (string-find-byte body 47 0)]
+       (if (or (< slash 1) (= (string-length body) 1))
+         ""
+         (string-substring body 0 slash))))
+   :default nil)
+
+;; the head symbol's text of a seq Form, "" when it has none
+#?(:kotoba
+   (defn fhead [f [:ref :form/r]] :string
+     (if (and (form/is-seq? f) (> (form/count-of f) 0) (form/is-symbol? (form/nth-of f 0)))
+       (form/symbol-value (form/nth-of f 0))
+       ""))
+   :default nil)
+
+;; a list form headed by the symbol NAME
+#?(:kotoba
+   (defn fhead-is? [f [:ref :form/r] name :string] :bool
+     (string=? (fhead f) name))
+   :default nil)
+
+;; the metadata the host copies from SOURCE onto RESULT: the span, and for two seq forms the
+;; source head slot
+#?(:kotoba
+   (defn fmeta-from [source [:ref :form/r] result [:ref :form/r]] [:ref :form/r]
+     (let [r1 (if (= 0 (form/span-of source)) result (record-assoc [:ref :form/r] result :span (form/span-of source)))]
+       (if (and (form/is-seq? source) (form/is-seq? result) (not (string=? (record-get [:ref :form/r] source :s) "")))
+         (record-assoc [:ref :form/r] r1 :s (record-get [:ref :form/r] source :s))
+         r1)))
+   :default nil)
+
+;; a seq Form of ITEMS carrying SOURCE's metadata
+#?(:kotoba
+   (defn frebuild-seq [source [:ref :form/r] items [:list [:ref :form/r]]] [:ref :form/r]
+     (fmeta-from source (form/form-seq items)))
+   :default nil)
+
+;; the head the author wrote when a pure-head rewrite replaced a form ("" when it did not)
+#?(:kotoba
+   (defn fsource-head [f [:ref :form/r]] :string
+     (if (form/is-seq? f) (record-get [:ref :form/r] f :s) ""))
+   :default nil)
+
+#?(:kotoba
+   (defn fwith-source-head [f [:ref :form/r] head :string] [:ref :form/r]
+     (record-assoc [:ref :form/r] f :s head))
+   :default nil)
+
+#?(:kotoba
+   (defn fprivate-symbol? [f [:ref :form/r]] :bool
+     (and (form/is-symbol? f) (= 1 (form/int-value f))))
+   :default nil)
+
+;; the symbols of PATTERN other than `&` (`binding-symbols`), distinct
+#?(:kotoba
+   (defn fsymbols-into [f [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (form/is-symbol? f)
+       (if (string=? (form/symbol-value f) "&") acc (fl-add acc f))
+       (fsymbols-kids (form/kids-of f) 0 acc)))
+   :default nil)
+
+#?(:kotoba
+   (defn fsymbols-kids [kids [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count kids))
+       acc
+       (fsymbols-kids kids (+ i 1) (fsymbols-into (fl-nth kids i) acc))))
+   :default nil)
+
+;; every element of the Form collection F is distinct from the others
+#?(:kotoba
+   (defn fdistinct? [f [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of f))
+       true
+       (and (not (fl-has? (form/kids-of f) (form/nth-of f i) (+ i 1)))
+            (fdistinct? f (+ i 1)))))
+   :default nil)
+
+;; the elements of the list XS from I: the same element does not occur before I
+#?(:kotoba
+   (defn fl-distinct? [xs [:list [:ref :form/r]]] :bool
+     (fdistinct? (form/form-vec xs) 0))
+   :default nil)
+
+;; a count as text
+#?(:kotoba
+   (defn fcount-text [f [:ref :form/r]] :string
+     (string-from-i64 (form/count-of f)))
+   :default nil)
+
+
+
 #?(:kotoba
    (defn pr-kids [f [:ref :form/r] i :i64 sep :string acc :string] :string
      (if (>= i (form/count-of f))
