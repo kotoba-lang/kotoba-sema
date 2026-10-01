@@ -12932,6 +12932,15 @@
                  (not (record-field-type descriptor key)))
             (list 'do value 0)
 
+            ;; floor :row-get-and-match: a record's fields are static, so
+            ;; the field a get reads is written, not computed.
+            (and (record-type? descriptor) (not (keyword? key)))
+            (reject! (str "get on record " (second descriptor) " has the computed key "
+                          (use-site-text (nth args 1))
+                          ": a record's fields are static, so the field a get reads is a"
+                          " keyword literal; a computed key needs a [:map K V]")
+                     form :kotoba.error/record-projection-unresolved)
+
             (record-type? descriptor)
             (do
               (when-not (and (= 2 (count rewritten-args)) (keyword? key))
@@ -13849,40 +13858,76 @@
                           (filter params (disj branches param)))))))
           (tree-seq coll? seq form))))
 
-(defn- row-field-reads
-  "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`,
-  and the fields `(dissoc PARAM :k ..)` / `(select-keys PARAM :k ..)` name
-  (floor :row-operations: a row shrinks only by fields it has)."
+(defn- row-aliases
+  "PARAM and the synthetic names bound to PARAM itself in FORM: `match` binds
+  its scrutinee to a `__kotoba_match_N` temp and projects that (floor
+  :row-get-and-match), so a read off the temp is a read off PARAM. Only a
+  reserved name -- a program cannot write one -- so a binding the author wrote
+  stays a rebinding."
   [param form]
-  (into (sorted-set)
+  (into #{param}
         (mapcat (fn [x]
-                  (cond
-                    (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
-                         (keyword? (nth x 2))
-                         (or (= param (second x))
-                             ;; `(:k (if c m n))` reads :k off both branches
-                             ;; (floor :row-unification).
-                             (contains? (row-if-branches (second x)) param)))
-                    [(nth x 2)]
-                    (and (seq? x) (contains? '#{dissoc select-keys} (first x))
-                         (= param (second x)))
-                    (filter keyword? (drop 2 x))
-                    :else nil)))
+                  (when (and (seq? x) (= 'let (first x)) (vector? (second x)))
+                    (keep (fn [[b v]] (when (and (= param v) (reserved-binding-name? b)) b))
+                          (partition 2 (second x))))))
         (tree-seq coll? seq form)))
+
+(defn- row-get-receiver?
+  "Is X a `get` (or a match's presence test) whose receiver is one of
+  ALIASES? A `get` reads a row as `(:k m)` does (floor :row-get-and-match)."
+  [aliases x]
+  (and (seq? x)
+       (or (and (= 'get (first x)) (<= 3 (count x) 4))
+           (= match-has-marker (first x)))
+       (contains? aliases (second x))))
+
+(defn- row-field-reads
+  "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`
+  or `(get PARAM :k)`, and the fields `(dissoc PARAM :k ..)` /
+  `(select-keys PARAM :k ..)` name (floor :row-operations: a row shrinks only
+  by fields it has). `(get PARAM :k d)` does not require :k -- a record
+  without it answers d -- and neither does a match pattern's projection: an
+  arm naming a key the record lacks does not match (floor
+  :row-get-and-match)."
+  [param form]
+  (let [aliases (row-aliases param form)]
+    (into (sorted-set)
+          (mapcat (fn [x]
+                    (cond
+                      (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
+                           (keyword? (nth x 2))
+                           (or (contains? aliases (second x))
+                               ;; `(:k (if c m n))` reads :k off both branches
+                               ;; (floor :row-unification).
+                               (contains? (row-if-branches (second x)) param)))
+                      [(nth x 2)]
+                      (and (row-get-receiver? aliases x) (= 'get (first x)) (= 3 (count x))
+                           (keyword? (nth x 2)) (not (::match-projection (meta x))))
+                      [(nth x 2)]
+                      (and (seq? x) (contains? '#{dissoc select-keys} (first x))
+                           (= param (second x)))
+                      (filter keyword? (drop 2 x))
+                      :else nil)))
+          (tree-seq coll? seq form))))
 
 (defn- row-operated?
   "Is PARAM the receiver of a row operation in FORM, or merged by one (ADR
   0353 floor :row-operations)? Either makes it a row even when no field is
   read off it: `(defn- f [m] (assoc m :d 1))`."
   [param form]
-  (boolean
-   (first-truthy
-    (fn [x]
-      (and (seq? x)
-           (or (and (contains? '#{map-assoc dissoc select-keys merge} (first x))
-                    (= param (second x)))
-               (and (= 'merge (first x)) (first-truthy #{param} (rest x))))))
-    (tree-seq coll? seq form))))
+  (let [aliases (row-aliases param form)]
+    (boolean
+     (first-truthy
+      (fn [x]
+        (and (seq? x)
+             (or (and (contains? '#{map-assoc dissoc select-keys merge} (first x))
+                      (= param (second x)))
+                 (and (= 'merge (first x)) (first-truthy #{param} (rest x)))
+                 ;; floor :row-get-and-match: any `get` off it, a computed
+                 ;; key's included -- the specialization refuses that by
+                 ;; name -- and a match map pattern over it.
+                 (row-get-receiver? aliases x))))
+      (tree-seq coll? seq form)))))
 
 (defn- row-pass-through
   "`[[callee index] ...]` for every call in FORM that passes PARAM itself as an
@@ -14120,6 +14165,10 @@
               arg-type (fn [arg locals table]
                          (try (infer-expression-type arg locals table)
                               (catch #?(:clj Exception :cljs :default) _ nil)))
+              ;; A rebuilt form keeps its metadata: a match pattern's
+              ;; projection is marked (floor :row-get-and-match), and the
+              ;; specialization is where its arm is folded away.
+              keep-meta (fn [form rebuilt] (if (= form rebuilt) form (with-meta rebuilt (meta form))))
               rewrite
               (fn rw [form locals table final?]
                 (cond
@@ -14183,7 +14232,7 @@
                                   (label op) bad (nth (:params (get by-name op)) bad)
                                   (get rows bad) (nth args bad) (get types bad))
                           :else (apply list op args)))
-                      :else (apply list op (map #(rw % locals table final?) args))))
+                      :else (keep-meta form (apply list op (map #(rw % locals table final?) args)))))
                   (vector? form) (mapv #(rw % locals table final?) form)
                   :else form))
               signatures (fn [fs]
