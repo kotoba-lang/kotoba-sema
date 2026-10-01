@@ -4038,6 +4038,172 @@
        (dr env (form/call1 "f64-from-bits" (form/int-form (form/bits-of f))))))
    :default nil)
 
+;; ---- collection heads over a :document (map, filter, remove, merge, select-keys, get-in, assoc-in, update, some, every?, concat, keep, into) ----
+;; Each is rewritten to source built from primitives the frontend already lowers (`get`/`assoc` paths, `document-merge`, a `reduce` that
+;; builds a document vector), then desugared again.
+#?(:kotoba
+   (defn doc-callback-call [f [:ref :form/r] x [:ref :form/r]] [:ref :form/r]
+     (cond
+       (head-is? f "fn")
+       (let [params (if (> (form/count-of f) 1) (form/nth-of f 1) (form/nil-form))
+             _ (require-k (and (form/is-vec? params) (= 1 (form/count-of params)) (> (form/count-of f) 2))
+                          "a fn applied to a document collection takes one parameter and a body" "kotoba.error/subset-reject" f)]
+         (form/call2 "let" (form/vec2 (form/nth-of params 0) x) (implicit-do-list (args-from f 2))))
+       (form/is-keyword? f) (form/call3 "get" x f (form/call0 "document-null"))
+       :else (form/form-seq (form/two-forms f x))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-hof->reduce [op [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (let [acc (form/symbol-form "__kotoba_hof_acc")
+           x (form/symbol-form "__kotoba_hof_x")
+           call (doc-callback-call (arg form 0) x)
+           name (form/symbol-value op)
+           step (cond
+                  (or (string=? name "map") (string=? name "mapv"))
+                  (form/call2 "document-vector-conj" acc (form/call1 "__kotoba_document_of" call))
+                  (or (string=? name "filter") (string=? name "filterv"))
+                  (form/call3 "if" call (form/call2 "document-vector-conj" acc x) acc)
+                  :else (form/call3 "if" call acc (form/call2 "document-vector-conj" acc x)))]
+       (form/call3 "reduce" (form/call2 "fn" (form/vec2 acc x) step) (form/call0 "document-vector") (arg form 1))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-document-hof [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [f (doc-hof->reduce op form)]
+       (desugar-expr env f)))
+   :default nil)
+
+;; the literal key path of an operation: a non-empty vector, or a refusal
+#?(:kotoba
+   (defn doc-path [op [:ref :form/r] form [:ref :form/r] i :i64] [:ref :form/r]
+     (let [v (if (< i (argc form)) (arg form i) (form/nil-form))
+           _ (require-k (and (form/is-vec? v) (> (form/count-of v) 0))
+                        (string-concat (form/symbol-value op) " on a document takes a literal non-empty vector of keys")
+                        "kotoba.error/subset-reject" form)]
+       v))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-merge-fold [form [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (> i (argc form))
+       acc
+       (doc-merge-fold form (+ i 1) (form/call2 "document-merge" acc (form/nth-of form i)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-select-fold [ks [:ref :form/r] i :i64 m [:ref :form/r] acc [:ref :form/r]] [:ref :form/r]
+     (if (>= i (form/count-of ks))
+       acc
+       (let [k (form/nth-of ks i)]
+         (doc-select-fold ks (+ i 1) m
+                          (form/call3 "if" (form/call2 "contains?" m k)
+                                      (form/call3 "assoc" acc k (form/call3 "get" m k (form/call0 "document-null")))
+                                      acc)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-get-in-fold [ks [:ref :form/r] i :i64 f [:ref :form/r] default [:ref :form/r]] [:ref :form/r]
+     (if (= (+ i 1) (form/count-of ks))
+       (form/call3 "get" f (form/nth-of ks i) default)
+       (doc-get-in-fold ks (+ i 1) (form/call3 "get" f (form/nth-of ks i) (form/call0 "document-null")) default)))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-assoc-in-build [ks [:ref :form/r] i :i64 m [:ref :form/r] v [:ref :form/r]] [:ref :form/r]
+     (let [k (form/nth-of ks i)]
+       (if (= (+ i 1) (form/count-of ks))
+         (form/call3 "assoc" m k v)
+         (form/call3 "assoc" m k
+                     (doc-assoc-in-build ks (+ i 1) (form/call3 "get" m k (form/call0 "document-map")) v)))))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-concat-fold [form [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (> i (argc form))
+       acc
+       (doc-concat-fold form (+ i 1) (form/call3 "__kotoba_doc_append_from" (form/nth-of form i) (form/int-form 0) acc))))
+   :default nil)
+
+;; the operand I (0-based) of the call, nil-form past the end
+#?(:kotoba
+   (defn operand-or-nil [form [:ref :form/r] i :i64] [:ref :form/r]
+     (if (< i (argc form)) (arg form i) (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-update-applied [f [:ref :form/r] current [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (cond
+       (head-is? f "fn") (doc-callback-call f current)
+       (form/is-keyword? f) (form/call3 "get" current f (form/call0 "document-null"))
+       :else (form/form-seq (form/cons-onto f (form/cons-onto current (args-from-nth form 4))))))
+   :default nil)
+
+;; the operands of the call from 0-based index I as a list
+#?(:kotoba
+   (defn args-from-nth [form [:ref :form/r] i :i64] [:list [:ref :form/r]]
+     (if (< i (form/count-of form)) (args-from form i) (form/no-forms)))
+   :default nil)
+
+#?(:kotoba
+   (defn doc-head->form [op [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (let [name (form/symbol-value op)
+           acc (form/symbol-form "__kotoba_hof_acc")
+           x (form/symbol-form "__kotoba_hof_x")
+           nil-doc (form/call0 "document-null")]
+       (cond
+         (string=? name "merge") (doc-merge-fold form 2 (form/nth-of form 1))
+         (string=? name "select-keys")
+         (let [m (form/symbol-form "__kotoba_sel_m")
+               ks (doc-path op form 1)]
+           (form/call2 "let" (form/vec2 m (operand-or-nil form 0)) (doc-select-fold ks 0 m (form/call0 "document-map"))))
+         (string=? name "get-in")
+         (let [ks (doc-path op form 1)
+               default (if (= 3 (argc form)) (arg form 2) nil-doc)]
+           (doc-get-in-fold ks 0 (operand-or-nil form 0) default))
+         (string=? name "assoc-in")
+         (let [ks (doc-path op form 1)]
+           (doc-assoc-in-build ks 0 (operand-or-nil form 0) (operand-or-nil form 2)))
+         (string=? name "update")
+         (let [m (operand-or-nil form 0)
+               k (operand-or-nil form 1)
+               f (operand-or-nil form 2)
+               current (form/call3 "get" m k nil-doc)
+               applied (doc-update-applied f current form)]
+           (form/call3 "assoc" m k applied))
+         (string=? name "empty?") (form/call2 "=" (form/call1 "document-count" (operand-or-nil form 0)) (form/int-form 0))
+         (string=? name "some")
+         (let [call (doc-callback-call (operand-or-nil form 0) x)]
+           (form/call3 "reduce" (form/call2 "fn" (form/vec2 acc x) (form/call3 "if" acc acc call)) (form/bool-form false) (operand-or-nil form 1)))
+         (string=? name "every?")
+         (let [call (doc-callback-call (operand-or-nil form 0) x)]
+           (form/call3 "reduce" (form/call2 "fn" (form/vec2 acc x) (form/call3 "if" acc call (form/bool-form false))) (form/bool-form true) (operand-or-nil form 1)))
+         (string=? name "concat") (doc-concat-fold form 1 (form/call0 "document-vector"))
+         (string=? name "keep")
+         (let [call (doc-callback-call (operand-or-nil form 0) x)
+               kept (form/symbol-form "__kotoba_kept")]
+           (form/call3 "reduce"
+                       (form/call2 "fn" (form/vec2 acc x)
+                                   (form/call2 "let" (form/vec2 kept call)
+                                               (form/call3 "if" (form/call2 "=" (form/call1 "document-kind" kept) (form/keyword-form :null))
+                                                           acc
+                                                           (form/call2 "document-vector-conj" acc kept))))
+                       (form/call0 "document-vector") (operand-or-nil form 1)))
+         :else
+         (form/call3 "reduce"
+                     (form/call2 "fn" (form/vec2 acc x)
+                                 (form/call3 "if" (form/call2 "=" (form/call1 "document-kind" acc) (form/keyword-form :map))
+                                             (form/call3 "document-assoc" acc (form/call2 "__kotoba_doc_nth" x (form/int-form 0)) (form/call2 "__kotoba_doc_nth" x (form/int-form 1)))
+                                             (form/call2 "document-vector-conj" acc x)))
+                     (operand-or-nil form 0) (operand-or-nil form 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-document-head-op [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [f (doc-head->form op form)]
+       (desugar-expr env f)))
+   :default nil)
+
 ;; a call whose operator is a symbol, in the order of the host's cond chain and then its `case op`
 #?(:kotoba
    (defn desugar-head [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
@@ -4066,13 +4232,13 @@
               (= 2 (argc form))
               (not (tables/table-has? (env-lexical env) op))
               (guess-document-form? env (arg form 1)))
-         (throw (fe-unported "document collection lowering" form))
+         (desugar-document-hof env op form)
          (and (tables/table-has? (env-table env :doc-heads) op)
               (not (tables/table-has? (env-lexical env) op))
               (not (top-level-function-symbol? env op))
               (> (argc form) 0)
               (guess-document-form? env (document-head-target op form)))
-         (throw (fe-unported "document head lowering" form))
+         (desugar-document-head-op env op form)
          (string=? name "if") (desugar-if env form ctx)
          (string=? name "do") (desugar-do-arm env form ctx)
          (string=? name "and") (desugar-and env form 1)
