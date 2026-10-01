@@ -1225,6 +1225,61 @@
    :default nil)
 
 #?(:kotoba
+   (defn fd-vec [f [:ref :form/r] i :i64 acc :document] :document
+     (if (>= i (form/count-of f))
+       acc
+       (fd-vec f (+ i 1) (document-vector-conj acc (form->document (form/nth-of f i))))))
+   :default nil)
+
+#?(:kotoba
+   (defn fd-map [f [:ref :form/r] i :i64 acc :document] :document
+     (if (>= (+ i 1) (form/count-of f))
+       acc
+       (fd-map f (+ i 2) (document-assoc acc (form->document (form/nth-of f i)) (form->document (form/nth-of f (+ i 1)))))))
+   :default nil)
+
+;; the items of a set Form sorted by their printed text (`canonical-text` sorts a set that way)
+#?(:kotoba
+   (defn fd-first-greater [xs [:list [:ref :form/r]] text :string i :i64] :i64
+     (if (>= i (vector-count xs))
+       i
+       (if (> (string-compare (pr-form (fl-nth xs i)) text) 0) i (fd-first-greater xs text (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn fd-sorted [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of f))
+       acc
+       (let [x (form/nth-of f i)
+             p (fd-first-greater acc (pr-form x) 0)]
+         (fd-sorted f (+ i 1) (fl-slice acc p (vector-count acc) (form/append-form (fl-slice acc 0 p (form/no-forms)) x))))))
+   :default nil)
+
+#?(:kotoba
+   (defn fd-vec-of [xs [:list [:ref :form/r]] i :i64 acc :document] :document
+     (if (>= i (vector-count xs))
+       acc
+       (fd-vec-of xs (+ i 1) (document-vector-conj acc (form->document (fl-nth xs i))))))
+   :default nil)
+
+;; a Form as the :document the artifact digest is taken over (a list reads as a vector, a
+;; set as a vector sorted by its items' text, f64 and bytes forms as nil)
+#?(:kotoba
+   (defn form->document [f [:ref :form/r]] :document
+     (cond
+       (form/is-nil? f) (document-null)
+       (form/is-bool? f) (document-bool (form/bool-value f))
+       (form/is-int? f) (document-i64 (form/int-value f))
+       (form/is-string? f) (document-string (form/string-value f))
+       (form/is-keyword? f) (document-keyword (form/keyword-value f))
+       (form/is-symbol? f) (document-symbol (symbol (form/symbol-value f)))
+       (form/is-map? f) (fd-map f 0 (document-map))
+       (form/is-set? f) (fd-vec-of (fd-sorted f 0 (form/no-forms)) 0 (document-vector))
+       (or (form/is-seq? f) (form/is-vec? f)) (fd-vec f 0 (document-vector))
+       :else (document-null)))
+   :default nil)
+
+#?(:kotoba
    (defn fl-add [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
      (if (fl-has? xs x 0) xs (form/append-form xs x)))
    :default nil)
