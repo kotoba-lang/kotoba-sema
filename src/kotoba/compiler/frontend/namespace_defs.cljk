@@ -39,7 +39,10 @@
                (into #{} (map (fn [x] (if (symbol? x) x (symbol (name x))))) heads)))
            #{}))
        (catch Exception _ #{}))
-     :cljs #{})))
+     ;; ClojureScript cannot read the resource, so it answers the embedded copy
+     ;; the Kotoba route uses (frontend-tables, compared with the resource by
+     ;; test): the same forbidden set on every runtime, `binding` included.
+     :cljs tables/forbidden-heads)))
 
 #?(:kotoba nil :default
 (defn load-grammar-declared-heads

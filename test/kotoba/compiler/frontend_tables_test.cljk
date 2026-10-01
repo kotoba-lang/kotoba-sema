@@ -15,6 +15,12 @@
   (is (identical? tables/document-fixed-operations frontend/document-fixed-operations))
   (is (identical? tables/arithmetic frontend/arithmetic)))
 
+(deftest binding-is-forbidden-on-every-runtime
+  ;; ClojureScript used to answer an empty catalog set, so nbb admitted a local
+  ;; named `binding` that the JVM and the Kotoba route refuse.
+  (is (contains? frontend/forbidden-heads 'binding))
+  (is (contains? frontend/forbidden-heads 'volatile!)))
+
 (deftest the-readers-agree-with-get-and-contains
   (is (tables/table-has? tables/arithmetic '+))
   (is (not (tables/table-has? tables/arithmetic 'nope)))
