@@ -265,7 +265,7 @@
              '#{atom swap! reset! deref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
                 hetero-vector typed-set record match-result match-variant match-option})))
-(def max-functions 1024)
+(def max-functions 16384)
 (def max-namespace-docstring-chars 65536)
 ;; ADR-2607182410: bounds an optional `ns` `:capabilities` declaration set.
 ;; 256, not max-functions -- matches cap-call's own [0,255] id space (at

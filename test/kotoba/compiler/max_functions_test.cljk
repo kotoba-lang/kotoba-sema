@@ -1,0 +1,34 @@
+(ns kotoba.compiler.max-functions-test
+  "The function-count admission bound is 16384 (amu ADR 0358; 1024 before
+  2026-10-01). The selfhost compiler's linked closure is thousands of
+  functions and the linked project is analysed as one module, so the bound
+  that mattered was the whole-program one. The value lives in
+  `lang/guest-grammar.edn` `:admission-limits :max-functions`; this checks the
+  vendored copy, the frontend's constant, and that a module past the old bound
+  is admitted while one past the new bound is still refused."
+  (:require [kotoba.lang.error :as kerror]
+            [kotoba.test :refer [deftest is]]
+            [clojure.string :as str]
+            [kotoba.sema :as sema]
+            [kotoba.compiler.frontend :as frontend]))
+
+(defn- leaves [n]
+  (str/join "\n" (map #(str "(defn f" % " [x :i64] :i64 (+ x " (mod % 7) "))") (range n))))
+
+(deftest the-bound-is-sixteen-thousand-three-hundred-eighty-four
+  (is (= 16384 frontend/max-functions))
+  (is (= frontend/max-functions sema/max-functions)))
+
+(deftest a-module-past-the-old-bound-is-admitted
+  (let [hir (sema/analyze (str "(ns m.big {:kotoba/export [main]})\n"
+                               (leaves 1100)
+                               "\n(defn main [] :i64 (f1099 0))"))]
+    (is (some? hir))
+    (is (< 1024 (count (:functions hir))))))
+
+(deftest a-module-past-the-new-bound-is-still-refused
+  (with-redefs [sema/max-functions 8]
+    (is (thrown-with-msg? kerror/ExceptionInfo #"function count"
+                          (sema/analyze (str "(ns m.big {:kotoba/export [main]})\n"
+                                             (leaves 9)
+                                             "\n(defn main [] :i64 (f8 0))"))))))
