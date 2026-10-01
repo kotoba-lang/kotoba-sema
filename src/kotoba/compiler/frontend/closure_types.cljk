@@ -1,0 +1,947 @@
+(ns kotoba.compiler.frontend.closure-types
+  "Module `closure-types` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (59 forms, 832 lines). Depends on: base."
+  (:require [kotoba.artifact.core :as artifact]
+            #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
+            [kotoba.compiler.frontend.base :refer [first-truthy reject!]])
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
+                                 ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]]]]
+                                 :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+
+;; forward references inside this module (the cut keeps the original form order)
+(declare default-kind generic-option-type? canonical-list-type? parametric-result-type? heterogeneous-vector-type? typed-set-type? canonical-typed-map-type? variant-type? record-type? validate-value-type! closure-result-type?)
+
+
+;; ---- Kotoba-route refusals -------------------------------------------------
+;; The host's `reject!` throws an ex-info. On this route a refusal is an abort
+;; (ADR 0007): `(throw (fe-error msg code form))`, caught by the boundary that
+;; tries. Discipline: a throw or a call of an aborting function sits in TAIL
+;; position or as a `let` binding value, never inside a loop.
+#?(:kotoba
+   (defn fe-error [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
+     (record-new [:ref :fe/err] msg code form "subset"))
+   :default nil)
+
+#?(:kotoba
+   (defn env-schemas [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :schemas))
+   :default nil)
+
+;; the keyword's text, ":bool"
+#?(:kotoba
+   (defn kw-text [f [:ref :form/r]] :string
+     (document-edn-print (document-keyword (form/keyword-value f))))
+   :default nil)
+
+;; the kind of result type `desugar-result-expr` admits without the schema machinery: the flat closure types
+#?(:kotoba
+   (defn flat-result-type? [t [:ref :form/r]] :bool
+     (and (form/is-keyword? t)
+          (let [s (kw-text t)]
+            (or (string=? s ":i64") (string=? s ":bool") (string=? s ":f32") (string=? s ":f64")
+                (string=? s ":string") (string=? s ":bytes") (string=? s ":vector-i64")
+                (string=? s ":vector-f64") (string=? s ":document")))))
+   :default nil)
+
+;; `closure-default-value-expr` as the three answers its callers ask: 0 none (nil), 1 the literal `false`
+;; (non-nil, falsey), 2 a truthy default expression
+#?(:kotoba
+   (defn default-kind-keyword [t [:ref :form/r]] :i64
+     (let [s (kw-text t)]
+       (cond
+         (string=? s ":bool") 1
+         (or (string=? s ":i64") (string=? s ":string") (string=? s ":bytes") (string=? s ":keyword")
+             (string=? s ":symbol") (string=? s ":f64") (string=? s ":f32") (string=? s ":vector-i64")
+             (string=? s ":vector-f64") (string=? s ":document") (string=? s ":map") (string=? s ":option-i64")
+             (string=? s ":result-i64") (string=? s ":string-index") (string=? s ":disjoint-set-i64"))
+         2
+         :else 0)))
+   :default nil)
+
+;; every element of the Form vector V from index I has a non-nil default (kind >= 1); FIELDS? reads [name type] pairs
+#?(:kotoba
+   (defn all-defaults? [v [:ref :form/r] i :i64 fields? :bool] :bool
+     (if (>= i (form/count-of v))
+       true
+       (let [item (form/nth-of v i)
+             t (if fields? (form/nth-of item 1) item)]
+         (and (>= (default-kind t) 1) (all-defaults? v (+ i 1) fields?)))))
+   :default nil)
+
+;; some variant case [tag payload-type] of V (from I) has a truthy default payload
+#?(:kotoba
+   (defn some-variant-default? [v [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of v))
+       false
+       (or (= 2 (default-kind (form/nth-of (form/nth-of v i) 1)))
+           (some-variant-default? v (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn default-kind [t [:ref :form/r]] :i64
+     (cond
+       (form/is-keyword? t) (default-kind-keyword t)
+       (generic-option-type? t) 2
+       (canonical-list-type? t) 2
+       (parametric-result-type? t)
+       (if (or (= 2 (default-kind (form/nth-of t 1))) (= 2 (default-kind (form/nth-of t 2)))) 2 0)
+       (heterogeneous-vector-type? t) (if (all-defaults? (form/nth-of t 1) 0 false) 2 0)
+       (typed-set-type? t) 2
+       (canonical-typed-map-type? t) 2
+       (variant-type? t) (if (some-variant-default? (form/nth-of t 2) 0) 2 0)
+       (record-type? t) (if (all-defaults? (form/nth-of t 2) 0 true) 2 0)
+       :else 0))
+   :default nil)
+
+#?(:kotoba
+   (defn valid-type? [t [:ref :form/r]] :bool
+     (try (let [n (validate-value-type! t)] true)
+          (catch e false)))
+   :default nil)
+;; Docstrings carry no meaning a declaration depends on and are outside the
+;; definition CID, so their bound exists only to keep input bounded. It was
+;; 4096, which refused 3 of the compiler's own sources whose ns docstrings
+;; run to 27,879 chars -- this workspace writes its "why" in docstrings on
+;; purpose (measured 2026-09-11, adr-2609111900). 64 KiB is still a bound.
+;; The type-descriptor bounds below are kotoba-lang `lang/limits.edn`
+;; `:language/static` (adr-2609242100 P1), compared against this file by amu
+;; `value_bounds_agreement_test`. Depth was 8 here while osaho's
+;; `adt-depth-limit` -- which checks the same descriptors -- had been 12 since
+;; osaho ADR 0025; a descriptor of depth 9..12 was admitted by the reference
+;; interpreter and refused by this frontend. Unified at 12 on 2026-09-24.
+(def max-type-depth 64)
+(def max-type-nodes 512)
+(def max-variant-cases 32)
+(def max-heterogeneous-vector-items 32)
+(def max-record-fields 32)
+(def value-types #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes
+                   :option-i64 :result-i64
+                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
+
+#?(:kotoba
+   (defn callable-type? [type [:ref :form/r]] :bool (vt/callable-type? type))
+   :default
+(defn callable-type? [type]
+  (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6))))
+
+#?(:kotoba
+   (defn callable-clauses [type [:ref :form/r]] [:ref :form/r]
+     (if (callable-type? type)
+       (form/form-vec (form/rest-list type))
+       (form/nil-form)))
+   :default
+(defn callable-clauses [type]
+  (when (callable-type? type) (subvec type 1))))
+
+#?(:kotoba
+   (defn parametric-result-type? [type [:ref :form/r]] :bool (vt/result-type? type))
+   :default
+(defn parametric-result-type? [type]
+  (and (vector? type) (= 3 (count type)) (= :result (first type)))))
+
+#?(:kotoba
+   (defn variant-type? [type [:ref :form/r]] :bool (vt/variant-type? type))
+   :default
+(defn variant-type? [type]
+  (and (vector? type) (= 3 (count type)) (= :variant (first type)))))
+
+#?(:kotoba
+   (defn generic-option-type? [type [:ref :form/r]] :bool (vt/option-type? type))
+   :default
+(defn generic-option-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :option (first type)))))
+
+#?(:kotoba
+   (defn canonical-list-type? [type [:ref :form/r]] :bool (vt/list-type? type))
+   :default
+(defn canonical-list-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :list (first type)))))
+
+#?(:kotoba
+   (defn stream-type? [type [:ref :form/r]] :bool (vt/stream-type? type))
+   :default
+(defn stream-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :stream (first type)))))
+
+#?(:kotoba
+   (defn task-type? [type [:ref :form/r]] :bool (vt/task-type? type))
+   :default
+(defn task-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :task (first type)))))
+
+#?(:kotoba
+   (defn linear-resource-type? [type [:ref :form/r]] :bool (vt/linear-resource-type? type))
+   :default
+(defn linear-resource-type? [type]
+  (or (stream-type? type) (task-type? type))))
+
+#?(:kotoba
+   (defn heterogeneous-vector-type? [type [:ref :form/r]] :bool (vt/hetero-type? type))
+   :default
+(defn heterogeneous-vector-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :vector (first type)))))
+
+#?(:kotoba
+   (defn typed-set-type? [type [:ref :form/r]] :bool (vt/set-type? type))
+   :default
+(defn typed-set-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :set (first type)))))
+
+#?(:kotoba
+   (defn canonical-typed-map-type? [type [:ref :form/r]] :bool (vt/map-type? type))
+   :default
+(defn canonical-typed-map-type? [type]
+  (and (vector? type) (= 3 (count type)) (= :map (first type)))))
+
+#?(:kotoba
+   (defn record-type? [type [:ref :form/r]] :bool (vt/record-type? type))
+   :default
+(defn record-type? [type]
+  (and (vector? type) (= 3 (count type)) (= :record (first type)))))
+
+#?(:kotoba
+   (defn schema-ref-type? [type [:ref :form/r]] :bool (vt/schema-ref-type? type))
+   :default
+(defn schema-ref-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :ref (first type))
+       (keyword? (second type)) (namespace (second type)))))
+
+;; slice-value: `[:slice T]`, the ADR 0285 bulk carrier.
+;;
+;; The element widths, in BYTES. The map is the authority for two facts at
+;; once -- which element types exist, and what each one scales by -- because
+;; the scale is the only thing that distinguishes an element index from a byte
+;; offset, and a second table would let the two drift.
+(def slice-element-widths
+  {:u8 1 :u16 2 :u32 4 :u64 8})
+
+;; `:f32` is DECLARED here and admitted nowhere. Naming it is the point: the
+;; carrier is intended to reach binary32 elements (that is the Qwen weight
+;; case ADR 0285 exists for), and there is no `slice-load-f32` on either
+;; native ISA to reach them with. Recording it as available before the load
+;; exists would be the defect amu ADR 0284 named, in miniature -- an admission
+;; that admits what nothing can lower. So it is refused BY NAME, with a
+;; message that says which half is missing, rather than falling through the
+;; generic "unknown element type" arm where a reader would learn nothing.
+(def slice-declared-unadmitted-elements
+  #{:f32})
+
+#?(:kotoba
+   (defn slice-type? [type [:ref :form/r]] :bool (vt/slice-type? type))
+   :default
+(defn slice-type? [type]
+  (and (vector? type) (= 2 (count type)) (= :slice (first type)))))
+
+#?(:kotoba
+   (defn slice-element-type [type [:ref :form/r]] [:ref :form/r]
+     (if (slice-type? type) (form/nth-of type 1) (form/nil-form)))
+   :default
+(defn slice-element-type [type]
+  (when (slice-type? type) (second type))))
+
+(defn structured-type? [#?@(:kotoba [type [:ref :form/r]] :default [type])] #?@(:kotoba [:bool])
+  (or (parametric-result-type? type) (variant-type? type) (generic-option-type? type)
+      (canonical-list-type? type)
+      (stream-type? type) (task-type? type)
+      (heterogeneous-vector-type? type) (typed-set-type? type)
+      (canonical-typed-map-type? type) (record-type? type) (schema-ref-type? type)
+      (slice-type? type)
+      (callable-type? type)))
+
+#?(:kotoba
+   (defn validate-value-type-counted! [type [:ref :form/r] depth :i64 nodes :i64] :i64
+     (let [r (vt/validate-type type depth nodes)]
+       (if (vt/outcome-ok? r)
+         (vt/outcome-nodes r)
+         (throw (fe-error (vt/outcome-msg r) (vt/outcome-code r) type)))))
+   :default nil)
+
+;; Kotoba: the one-argument form is a fresh node budget; the count is threaded
+;; (`validate-value-type-counted!`) where the host mutates a volatile.
+#?(:kotoba
+   (defn validate-value-type! [type [:ref :form/r]] :i64
+     (validate-value-type-counted! type 0 0))
+   :default
+(defn validate-value-type!
+  ([type] (validate-value-type! type 0 (volatile! 0)))
+  ([type depth nodes]
+   (vswap! nodes inc)
+   (when (> @nodes max-type-nodes)
+     (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
+   (when (> depth max-type-depth)
+     (reject! "value type exceeds depth limit" type :kotoba.error/value-type-depth-limit))
+   (cond
+     (callable-type? type)
+     (let [clauses (callable-clauses type)
+           arities (mapv (comp count first) clauses)]
+       (when-not (and (seq clauses)
+                      (every? #(and (vector? %) (= 2 (count %))
+                                    (vector? (first %))
+                                    (<= (count (first %)) 4))
+                              clauses)
+                      (= (count arities) (count (distinct arities))))
+         (reject! "callable type requires one to five unique [parameter-types result-type] clauses"
+                  type :kotoba.error/callable-type))
+       (doseq [[parameter-types result-type] clauses]
+         ;; A parameter type is admitted exactly when it is admitted as a
+         ;; closure RESULT type -- one predicate, `closure-result-type?`, so
+         ;; the two sides cannot drift (2026-09-12, adr-2609111900;
+         ;; `lang/guest-grammar.edn` `:callable-type` `:parameter-types`).
+         ;; Until then the sentence here was `callable parameter types
+         ;; currently require the i64 closure ABI`, and that was
+         ;; IMPLEMENTATION STATE: a dispatcher is an ordinary KIR function
+         ;; with a typed signature, and the helper a lambda lowers to is
+         ;; another, so an argument of any admitted value type crosses a
+         ;; closure call exactly as it crosses a direct call. What the rule
+         ;; keeps out is what the result side keeps out: a callable (no
+         ;; closure-typed word exists) and a linear resource (no dispatcher
+         ;; may duplicate or drop it), by the same sentence shape.
+         (doseq [parameter-type parameter-types]
+           (when (or (callable-type? parameter-type)
+                     (linear-resource-type? parameter-type))
+             (reject! "callable parameter types cannot be callable or linear resources"
+                      type :kotoba.error/callable-parameter-type))
+           (validate-value-type! parameter-type (inc depth) nodes)
+           (when-not (closure-result-type? parameter-type {})
+             (reject! "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
+                      type :kotoba.error/callable-parameter-type)))
+         (when (or (callable-type? result-type) (linear-resource-type? result-type))
+           (reject! "callable results cannot be callable or linear resources"
+                    type :kotoba.error/callable-result-type))
+         (validate-value-type! result-type (inc depth) nodes)
+         (when-not (closure-result-type? result-type {})
+           (reject! "callable result type is outside the admitted dispatcher profile"
+                    type :kotoba.error/callable-result-type)))
+       type)
+     ;; `keyword?` first, and it is not redundant. `value-types` is a set of
+     ;; keywords, so the membership test can only ever succeed for one -- but
+     ;; ClojureScript HASHES the argument to answer it, and a `.kotoba`
+     ;; integer literal is a JS bigint, which cannot carry the property the
+     ;; hasher writes. So `(typed-set-count 3 0)` -- a program that has simply
+     ;; written a value where a TYPE belongs -- died here with `Cannot create
+     ;; property 'closure_uid_...' on bigint '3'` instead of reaching the
+     ;; `:else` arm four lines down that says exactly what is wrong with it.
+     ;; Measured 2026-09-03: 42 of the 66 operations that take a declared type
+     ;; crashed this way under nbb, and none of them on the JVM, where a Long
+     ;; hashes. The guard costs nothing and removes the divergence.
+     (and (keyword? type) (contains? value-types type))
+     type
+     (schema-ref-type? type)
+     type
+     ;; slice-value: `[:slice T]`. The element type is a closed set, not a
+     ;; recursive value type -- a slice names host memory, and the only thing
+     ;; that can live in host memory here is a machine integer of a width the
+     ;; ISAs can load. So this arm does NOT recurse: `[:slice [:slice :u8]]`
+     ;; and `[:slice :string]` are refused by the same clause that refuses
+     ;; `[:slice :banana]`, which is what keeps the carrier two words wide.
+     (slice-type? type)
+     (let [element (slice-element-type type)]
+       (when (contains? slice-declared-unadmitted-elements element)
+         (reject! (str "slice element type is declared but not admitted: no native element load exists for "
+                       element)
+                  type :kotoba.error/slice-element-not-admitted))
+       (when-not (contains? slice-element-widths element)
+         (reject! (str "slice element type must be one of "
+                       (pr-str (vec (sort (keys slice-element-widths)))))
+                  type :kotoba.error/slice-element-type))
+       type)
+     (parametric-result-type? type)
+     (do (validate-value-type! (second type) (inc depth) nodes)
+         (validate-value-type! (nth type 2) (inc depth) nodes)
+         type)
+     (generic-option-type? type)
+     (do (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (canonical-list-type? type)
+     (do (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (stream-type? type)
+     (do (when-not (= :bytes (second type))
+           (reject! "stream payload must be bytes" type))
+         (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (task-type? type)
+     (do (when-not (stream-type? (second type))
+           (reject! "task payload must be a stream resource" type))
+         (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (heterogeneous-vector-type? type)
+     (let [item-types (second type)]
+       (when-not (and (vector? item-types)
+                      (<= (count item-types) max-heterogeneous-vector-items))
+         (reject! "heterogeneous vector types must be a bounded vector" type :kotoba.error/hetero-vector-type))
+       (vswap! nodes inc)
+       (when (> @nodes max-type-nodes)
+         (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
+       (doseq [item-type item-types]
+         (validate-value-type! item-type (inc depth) nodes))
+       type)
+     (typed-set-type? type)
+     (do (when (contains? #{:f32 :f64} (second type))
+           (reject! "direct floating set items are outside the structured scalar ABI" type :kotoba.error/floating-set-item))
+         (validate-value-type! (second type) (inc depth) nodes)
+         type)
+     (canonical-typed-map-type? type)
+     ;; Said as two refusals because they are two different facts. A floating
+     ;; VALUE is outside the structured scalar ABI; a floating KEY additionally
+     ;; has no identity to be a key BY -- NaN compares unequal to itself, and
+     ;; +0.0 and -0.0 are equal while differing in bits, so neither the total
+     ;; order the entry chain is kept in nor duplicate-key detection is
+     ;; decidable. One message covering both told the reader neither.
+     (do (when (contains? #{:f32 :f64} (second type))
+           (reject! (str "map key type " (second type) " has no portable key "
+                         "identity: NaN compares unequal to itself, and +0.0 "
+                         "and -0.0 are equal while differing in bits, so "
+                         "neither the entry order nor duplicate-key detection "
+                         "is decidable")
+                    type :kotoba.error/floating-map-kv))
+         (when (contains? #{:f32 :f64} (nth type 2))
+           (reject! (str "map value type " (nth type 2)
+                         " is outside the structured scalar ABI")
+                    type :kotoba.error/floating-map-kv))
+         (validate-value-type! (second type) (inc depth) nodes)
+         (validate-value-type! (nth type 2) (inc depth) nodes)
+         type)
+     (record-type? type)
+     (let [[_ type-id fields] type]
+       (when-not (and (keyword? type-id) (namespace type-id))
+         (reject! "record type id must be a qualified keyword" type :kotoba.error/record-type-id))
+       (when-not (and (vector? fields) (seq fields) (<= (count fields) max-record-fields)
+                      (every? #(and (vector? %) (= 2 (count %)) (keyword? (first %))) fields)
+                      (= (count fields) (count (distinct (map first fields)))))
+         (reject! "record fields must be a non-empty unique bounded vector" type :kotoba.error/record-fields))
+       (vswap! nodes + (+ 2 (* 2 (count fields))))
+       (when (> @nodes max-type-nodes)
+         (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
+       (doseq [[_ field-type] fields]
+         (validate-value-type! field-type (inc depth) nodes))
+       type)
+     (variant-type? type)
+     (let [[_ type-id cases] type]
+       (when-not (and (keyword? type-id) (namespace type-id))
+         (reject! "variant type id must be a qualified keyword" type :kotoba.error/variant-type-id))
+       (when-not (and (vector? cases) (seq cases) (<= (count cases) max-variant-cases)
+                      (every? #(and (vector? %) (= 2 (count %)) (keyword? (first %))) cases)
+                      (= (count cases) (count (distinct (map first cases)))))
+         (reject! "variant cases must be a non-empty unique bounded vector" type :kotoba.error/variant-cases))
+       (vswap! nodes + (+ 2 (* 2 (count cases))))
+       (when (> @nodes max-type-nodes)
+         (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
+       (doseq [[_ payload-type] cases]
+         (validate-value-type! payload-type (inc depth) nodes))
+       type)
+     :else (reject! "value type is outside the safe profile" type :kotoba.error/value-type-outside-profile)))))
+
+;; Closed namespace schema table used by descriptor-aware source elaboration.
+;; It must be defined before closure dispatch helpers so their one-argument
+;; canonicalization path observes the active per-function binding.
+(def ^:dynamic *schemas* nil)
+
+(def closure-flat-result-types
+  #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document})
+
+;; variants, vector literals, throw/try/catch =====
+;; a top-level schema reference resolved through the env's schemas (nested references stay closed edges)
+#?(:kotoba
+   (defn canonical-closure-result-type [env [:ref :fe/env] t [:ref :form/r]] [:ref :form/r]
+     (if (and (schema-ref-type? t) (form/is-map? (env-schemas env)))
+       (let [r (form/form-get (env-schemas env) (form/nth-of t 1))]
+         (if (form/is-nil? r) t r))
+       t))
+   :default
+(defn canonical-closure-result-type
+  "Resolve a top-level schema reference before it becomes dispatcher identity.
+  Nested references remain closed schema edges and are not recursively expanded."
+  ([type] (canonical-closure-result-type type *schemas*))
+  ([type schemas]
+   (if (and (schema-ref-type? type) (map? schemas))
+     (or (get schemas (second type)) type)
+     type))))
+
+(defn closure-default-value-expr
+  "Return a bounded inhabitant for a dispatcher result type, or nil when the
+  descriptor cannot yet be represented by the closed trap synthesizer."
+  [type]
+  (cond
+    (= :i64 type) 0
+    (= :bool type) false
+    (= :string type) ""
+    (= :bytes type) '(bytes-empty)
+    (= :keyword type) :kotoba.closure/trap
+    (= :symbol type) '(symbol "")
+    (= :f64 type) '(f64-from-bits 0)
+    (= :f32 type) '(f32-from-bits 0)
+    (= :vector-i64 type) '(vector-new)
+    (= :vector-f64 type) '(vector-f64-new)
+    (= :document type) '(document-null)
+    (= :map type) '(map-new)
+    (= :option-i64 type) '(option-none)
+    (= :result-i64 type) '(result-ok 0)
+    (= :string-index type) '(string-index-new)
+    (= :disjoint-set-i64 type) '(disjoint-set-i64-new 0)
+
+    (generic-option-type? type)
+    (list 'option-none-of type)
+
+    (canonical-list-type? type)
+    (list 'typed-list-new type)
+
+    (parametric-result-type? type)
+    (if-let [ok-value (closure-default-value-expr (second type))]
+      (list 'result-ok-of type ok-value)
+      (when-let [error-value (closure-default-value-expr (nth type 2))]
+        (list 'result-err-of type error-value)))
+
+    (heterogeneous-vector-type? type)
+    (let [values (mapv closure-default-value-expr (second type))]
+      (when (every? some? values)
+        (apply list 'hetero-vector-new type values)))
+
+    (typed-set-type? type)
+    (list 'typed-set-new type)
+
+    (canonical-typed-map-type? type)
+    (list 'typed-map-new type)
+
+    (variant-type? type)
+    (first-truthy (fn [[tag payload-type]]
+            (when-let [payload (closure-default-value-expr payload-type)]
+              (list 'variant-new type tag payload)))
+          (nth type 2))
+
+    (record-type? type)
+    (let [values (mapv (comp closure-default-value-expr second) (nth type 2))]
+      (when (every? some? values)
+        (apply list 'record-new type values)))
+
+    :else nil))
+
+;; the dispatcher profile test (schemas {}: nothing is resolved here, exactly as the host calls it)
+#?(:kotoba
+   (defn closure-result-type? [t [:ref :form/r]] :bool
+     (and (valid-type? t)
+          (or (flat-result-type? t)
+              (and (or (record-type? t) (generic-option-type? t) (parametric-result-type? t) (variant-type? t)
+                       (canonical-list-type? t) (heterogeneous-vector-type? t) (typed-set-type? t)
+                       (canonical-typed-map-type? t))
+                   (>= (default-kind t) 1)))))
+   :default
+(defn closure-result-type?
+  ([type] (closure-result-type? type *schemas*))
+  ([type schemas]
+   (let [type (canonical-closure-result-type type schemas)
+         valid? (try
+                  (validate-value-type! type)
+                  true
+                  (catch #?(:clj Exception :cljs :default) _ false))]
+     (and valid?
+          (or (contains? closure-flat-result-types type)
+              (and (or (record-type? type)
+                       (generic-option-type? type)
+                       (parametric-result-type? type)
+                       (variant-type? type)
+                       (canonical-list-type? type)
+                       (heterogeneous-vector-type? type)
+                       (typed-set-type? type)
+                       (canonical-typed-map-type? type))
+                   (some? (closure-default-value-expr type)))))))))
+
+(defn dispatcher-result-label [result-type]
+  (if (keyword? result-type)
+    (name result-type)
+    (str "t_" (artifact/sha256 result-type))))
+
+(defn i64-parameter-types?
+  "True when PARAMETER-TYPES names no type but `:i64` -- the closure ABI as it
+  was before typed parameters (2026-09-12), and the shape whose dispatcher
+  keeps its old name so an i64 program keeps its CID. `nil` (no contract at
+  the call) is this shape."
+  [parameter-types]
+  (every? #(= :i64 %) parameter-types))
+
+(defn dispatcher-parameter-label
+  "The name segment a typed-parameter dispatcher family carries, or nil for
+  the all-`:i64` family. A digest, like a structured result's label: the
+  family is one function per distinct clause signature, and the signature is
+  what the name must be a function of."
+  [parameter-types]
+  (when-not (i64-parameter-types? parameter-types)
+    (str "p_" (artifact/sha256 (vec parameter-types)))))
+
+(defn invoke-dispatcher-name
+  ([arity] (invoke-dispatcher-name :i64 arity))
+  ([result-type arity] (invoke-dispatcher-name result-type arity nil))
+  ([result-type arity parameter-types]
+   (when-not (closure-result-type? result-type {})
+     (reject! "closure result type is outside the admitted dispatcher profile"
+              result-type))
+   (let [parameter-label (dispatcher-parameter-label parameter-types)
+         structured-result? (not (keyword? result-type))]
+     (symbol (str "__kotoba_invoke"
+                  (if (and parameter-label structured-result?)
+                    ;; Typed parameters AND a structured result: ONE digest of
+                    ;; the whole clause signature. Two 64-hex digests side by
+                    ;; side (`p_<64>_t_<64>`) made a 156-character name, and
+                    ;; `max-symbol-chars` is 128 -- a name this compiler wrote
+                    ;; was refused by this compiler's own `valid-name?` the
+                    ;; moment it travelled as TEXT (the project linker, amu
+                    ;; `--source-path`, re-reads the linked source), as
+                    ;; `invalid function name` pointing at a span the author
+                    ;; never wrote (2026-09-15, `[:fn [[<record>] <record>]]`
+                    ;; through a template module). A single-module analysis
+                    ;; never validated the synthesized name, so the same
+                    ;; program was admitted there and refused linked. The two
+                    ;; families that already had names keep them: all-i64
+                    ;; parameters (`t_<64>`, or bare) and typed parameters with
+                    ;; a keyword result (`p_<64>_<keyword>`).
+                    (str "_pt_" (artifact/sha256 [(vec parameter-types) result-type]))
+                    (str (when parameter-label (str "_" parameter-label))
+                         (when-not (= :i64 result-type)
+                           (str "_" (dispatcher-result-label result-type)))))
+                  "$arity" arity)))))
+
+(defn nth-pair-second [expr n]
+  (nth (iterate (fn [value] (list 'pair-second value)) expr) n))
+
+(defn lambda-dispatchers [lambda-infos required-dispatchers]
+  (let [requested (into #{}
+                        (mapcat (fn [{:keys [arity helper parameter-types]}]
+                                  ;; A lambda with contract-typed parameters
+                                  ;; belongs to the family of exactly its
+                                  ;; clause signature and to no i64 family:
+                                  ;; an i64 dispatcher calling it would hand
+                                  ;; an i64 word to a typed parameter.
+                                  (if parameter-types
+                                    [[(:result helper) arity parameter-types]]
+                                    [[:i64 arity] [(:result helper) arity]])))
+                        lambda-infos)
+        requested (into requested required-dispatchers)]
+    (mapv
+     (fn [[result-type arity parameter-types]]
+       (let [closure (symbol (str "__kotoba_closure_"
+                                  (dispatcher-result-label result-type) "_" arity))
+             args (mapv #(symbol (str "__kotoba_invoke_arg_" %)) (range arity))
+             candidates (filter #(and (= arity (:arity %))
+                                      (= result-type (get-in % [:helper :result]))
+                                      (= parameter-types (:parameter-types %)))
+                                lambda-infos)
+             ;; A closure id belonging to a different result family is a
+             ;; type error at the dynamic boundary.  Produce a result-typed
+             ;; trap instead of silently coercing it to false/zero.
+             fallback (case result-type
+                        :bool '(= (quot 1 0) 0)
+                        :string '(if (= (quot 1 0) 0) "" "")
+                        :vector-i64 '(vector-drop (vector-new) 1)
+                        :document '(if (= (quot 1 0) 0)
+                                     (document-null)
+                                     (document-null))
+                        (if-let [default (closure-default-value-expr result-type)]
+                          (list 'if '(= (quot 1 0) 0) default default)
+                          '(quot 1 0)))
+             body (reduce
+                   (fn [fallback {:keys [id captures helper]}]
+                     (let [capture-chain (list 'pair-second closure)
+                           capture-values
+                           (map-indexed (fn [index _]
+                                          (list 'pair-first
+                                                (nth-pair-second capture-chain index)))
+                                        captures)]
+                       (list 'if (list '= (list 'pair-first closure) id)
+                             (apply list (:name helper) (concat capture-values args))
+                             fallback)))
+                   fallback (reverse candidates))]
+         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types)
+                  :params (into [closure] args)
+                  :result result-type :effects #{} :body body}
+           ;; the typed family says its argument types; the i64 family is
+           ;; defaulted to all-i64 downstream exactly as before
+           parameter-types (assoc :param-types (into [:i64] parameter-types)))))
+     (sort-by (juxt (comp dispatcher-result-label first) second
+                    #(or (dispatcher-parameter-label (nth % 2 nil)) ""))
+              requested))))
+
+(defn linear-typed-cap-call?
+  "True when `form` is a 5-element typed-cap-call whose result type is a
+  linear task/stream resource."
+  [form]
+  (and (seq? form)
+       (= 'typed-cap-call (first form))
+       (= 5 (count form))
+       (linear-resource-type? (nth form 3))))
+
+(defn linear-consume-head?
+  [op]
+  (contains? '#{bytes-task-byte-count task-ready?} op))
+
+(defn form-contains-linear-call?
+  [form]
+  (boolean (first-truthy linear-typed-cap-call? (tree-seq coll? seq form))))
+
+(defn mentions-sym?
+  [form sym]
+  (boolean (first-truthy #(= % sym) (tree-seq coll? seq form))))
+
+(defn exclusive-use-of-linear
+  "If `form` exclusively moves or consumes `sym` (no other linear calls),
+  returns `{:kind :move|:consume}`. Returns nil on mismatch.
+
+  ADR 0138: balanced `if` arms (same kind).
+  ADR 0139: pure non-linear nested `let` wrappers — needed for `case` /
+  `condp` which desugar to `(let [tmp dispatch] (if …))` multi-arm chains."
+  [form sym]
+  (cond
+    (= form sym)
+    {:kind :move}
+
+    (and (seq? form)
+         (linear-consume-head? (first form))
+         (= 2 (count form))
+         (= sym (second form)))
+    {:kind :consume}
+
+    ;; ADR 0138: balanced if — both arms exclusive-use sym the same way;
+    ;; test must not mention sym or produce linear calls.
+    (and (seq? form) (= 'if (first form)) (>= (count form) 3))
+    (let [test (nth form 1)
+          then (nth form 2)
+          else (when (>= (count form) 4) (nth form 3))]
+      (when (and else
+                 (not (mentions-sym? test sym))
+                 (not (form-contains-linear-call? test)))
+        (let [t (exclusive-use-of-linear then sym)
+              e (exclusive-use-of-linear else sym)]
+          (when (and t e (= (:kind t) (:kind e)))
+            t))))
+
+    ;; ADR 0139: non-linear let wrappers (case/condp dispatch temps).
+    (and (seq? form) (= 'let (first form)) (vector? (second form))
+         (even? (count (second form))))
+    (let [bindings (second form)
+          body-forms (nnext form)
+          result-expr (when (= 1 (count body-forms)) (first body-forms))
+          pairs (when result-expr (partition 2 bindings))]
+      (when (and result-expr
+                 (seq pairs)
+                 (every? (fn [[name value]]
+                           (and (simple-symbol? name)
+                                (not= name sym)
+                                (not (mentions-sym? value sym))
+                                (not (form-contains-linear-call? value))))
+                         pairs))
+        (exclusive-use-of-linear result-expr sym)))
+
+    :else nil))
+
+(defn linear-let-move
+  "ADR 0137–0142: admit forms that bind exactly one linear typed-cap-call
+  (possibly among non-linear bindings) and exclusively move or consume it.
+
+  ADR 0138: multi-binding companions, nested non-linear outers, balanced if.
+  ADR 0139: exclusive-use walks non-linear lets so multi-arm `case` / `cond` /
+  `condp` (desugared to nested if + dispatch lets) are admitted when every
+  arm exclusive-uses the binding the same way.
+  ADR 0142: one-arm linear `if` — linear produce+consume fully closed inside
+  exactly one arm; the other arm has no linear calls (conditional get).
+
+  Returns the underlying typed-cap-call when admitted, else nil."
+  [body]
+  (letfn [(walk [form]
+            (cond
+              (linear-typed-cap-call? form)
+              form
+
+              (and (seq? form)
+                   (linear-consume-head? (first form))
+                   (= 2 (count form))
+                   (linear-typed-cap-call? (second form)))
+              (second form)
+
+              (and (seq? form) (= 'let (first form)) (vector? (second form))
+                   (even? (count (second form))))
+              (let [bindings (second form)
+                    body-forms (nnext form)
+                    result-expr (when (= 1 (count body-forms)) (first body-forms))]
+                (when result-expr
+                  (let [pairs (partition 2 bindings)
+                        linear-pairs (filter (fn [[_ v]] (linear-typed-cap-call? v)) pairs)
+                        non-linear-pairs (remove (fn [[_ v]] (linear-typed-cap-call? v)) pairs)]
+                    (cond
+                      ;; Exactly one linear binding (+ optional non-linear companions)
+                      (and (= 1 (count linear-pairs))
+                           (every? (fn [[name value]]
+                                     (and (simple-symbol? name)
+                                          (not (form-contains-linear-call? value))))
+                                   non-linear-pairs))
+                      (let [[sym call] (first linear-pairs)]
+                        (when (and (simple-symbol? sym)
+                                   (every? (fn [[_ v]] (not (mentions-sym? v sym)))
+                                           non-linear-pairs)
+                                   (exclusive-use-of-linear result-expr sym))
+                          call))
+
+                      ;; Pure non-linear outer wrappers — recurse into body
+                      (and (empty? linear-pairs)
+                           (seq pairs)
+                           (every? (fn [[name value]]
+                                     (and (simple-symbol? name)
+                                          (not (form-contains-linear-call? value))))
+                                   pairs))
+                      (walk result-expr)
+
+                      :else nil))))
+
+              ;; ADR 0142: one-arm linear if — produce+consume closed in one arm
+              (and (seq? form) (= 'if (first form)) (>= (count form) 3))
+              (let [test (nth form 1)
+                    then (nth form 2)
+                    else (if (>= (count form) 4) (nth form 3) 0)]
+                (when-not (form-contains-linear-call? test)
+                  (let [then-lin (form-contains-linear-call? then)
+                        else-lin (form-contains-linear-call? else)]
+                    (cond
+                      (and then-lin (not else-lin)) (walk then)
+                      (and else-lin (not then-lin)) (walk else)
+                      ;; both arms linear: require the same producer call form
+                      (and then-lin else-lin)
+                      (let [t (walk then) e (walk else)]
+                        (when (and t e (= t e)) t))
+                      :else nil))))
+
+              :else nil))]
+    (walk body)))
+
+(defn unwrap-linear-bool-answers
+  "ADR 0353 floor :bool-predicates elaborates `(task-ready? x)` to
+  `(= (task-ready? x) 1)` so it answers :bool. Ownership is about the
+  consume, not about the comparison around it: the linear shapes below see
+  the consume itself (only an elaborated, marked head is unwrapped)."
+  [form]
+  (cond
+    (and (seq? form) (= '= (first form)) (= 3 (count form))
+         (seq? (second form))
+         (linear-consume-head? (first (second form)))
+         (::i64-answer (meta (first (second form))))
+         (= 1 (nth form 2)))
+    (unwrap-linear-bool-answers (second form))
+
+    (seq? form) (apply list (map unwrap-linear-bool-answers form))
+    (vector? form) (mapv unwrap-linear-bool-answers form)
+    :else form))
+
+(defn check-linear-resource-ownership! [functions]
+  (doseq [{:keys [param-types result body] :as function} functions
+          :let [body (unwrap-linear-bool-answers body)]]
+    (when (first-truthy linear-resource-type? param-types)
+      (reject! "linear resources require move-aware parameters"
+               (:name function)))
+    (let [linear-calls
+          (->> (tree-seq coll? seq body)
+               (keep (fn [form]
+                       (when (linear-typed-cap-call? form) form)))
+               vec)
+          direct
+          (cond
+            (linear-typed-cap-call? body)
+            body
+
+            (and (seq? body)
+                 (linear-consume-head? (first body))
+                 (= 2 (count body))
+                 (linear-typed-cap-call? (second body)))
+            (second body)
+
+            ;; ADR 0137–0139: let-bound affine move / consume (+ if/case arms)
+            :else
+            (linear-let-move body))]
+      (when (or (and (linear-resource-type? result)
+                     (or (nil? direct)
+                         (not= result (nth direct 3))))
+                (and (seq linear-calls)
+                     (not= [direct] linear-calls)))
+        (reject! "linear result must be one direct typed capability move"
+                 (:name function))))))
+
+(defn type-alias-form? [value]
+  (and (vector? value) (= 2 (count value)) (= :alias (first value))
+       (symbol? (second value))))
+
+(defn resolve-type-alias! [type constants]
+  (if (type-alias-form? type)
+    (let [name (second type)]
+      (when-not (contains? constants name)
+        (reject! "type alias must name a declared constant" type))
+      (let [resolved (get constants name)]
+        (validate-value-type! resolved)
+        resolved))
+    type))
+
+(defn parameter-type-item?
+  "Does this item occupy a TYPE position rather than a pattern position?
+
+  Every value type is either a keyword or a vector whose head is a keyword --
+  `:fn` `:result` `:variant` `:option` `:list` `:stream` `:task` `:vector`
+  `:set` `:map` `:record` `:ref`, plus the `[:alias name]` form. No parameter
+  pattern can look like that: vector destructuring binds symbols, so its head
+  is a symbol, and map destructuring is a map. The two positions are therefore
+  distinguishable item by item, which is what lets annotations be per-parameter
+  instead of all-or-nothing."
+  [item]
+  (or (keyword? item)
+      (and (vector? item) (keyword? (first item)))))
+
+(defn typed-param-parts
+  "Read `[name]` and `[name :type]` per parameter, in any mixture.
+
+  An unannotated parameter is `:i64`, exactly as before -- so every non-i64
+  host boundary is still written down, which is the property this function
+  exists to keep. What is gone is the all-or-nothing rule: annotating one
+  parameter used to force annotating every parameter in the vector, so a
+  function taking one string among four counters carried three `:i64`s that
+  said nothing. That is most of the annotation churn in a .cljc port, and none
+  of it was carrying information.
+
+  Scanning is per item and unambiguous (see `parameter-type-item?`); it does
+  not depend on the vector's length or on any item's index, which is what the
+  old alternating-pairs rule needed."
+  [raw-params constants]
+  (loop [items (vec raw-params) parts []]
+    (if (empty? items)
+      parts
+      (let [pattern (first items)
+            _ (when (parameter-type-item? pattern)
+                (reject! "parameter name expected, found a type" pattern))
+            annotated? (parameter-type-item? (second items))
+            type (if annotated?
+                   (let [declared (second items)]
+                     (if (type-alias-form? declared)
+                       (resolve-type-alias! declared constants)
+                       declared))
+                   :i64)]
+        (when annotated? (validate-value-type! type))
+        (when (and (or (contains? #{:f32 :f64 :string :keyword :map :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} type)
+                       (structured-type? type))
+                   (not (or (symbol? pattern)
+                            (and (= type :map) (map? pattern))
+                            (and (contains? #{:vector-i64 :vector-f64} type)
+                                 (vector? pattern))
+                            (and (heterogeneous-vector-type? type)
+                                 (vector? pattern))
+                            (and (or (canonical-typed-map-type? type)
+                                     (record-type? type)
+                                     (schema-ref-type? type))
+                                 (map? pattern)))))
+          (reject! "typed values require plain-symbol bindings" pattern))
+        (recur (subvec items (if annotated? 2 1))
+               (conj parts (cond-> {:pattern pattern
+                                    :type (if (callable-type? type) :i64 type)}
+                             ;; `:i64` from an absent annotation is PROVISIONAL,
+                             ;; the same way an absent result type is. Written
+                             ;; `:i64` and inferred `:i64` are indistinguishable
+                             ;; downstream without this mark, and only the
+                             ;; second one may be refined.
+                             (not annotated?) (assoc :inferred? true)
+                             (callable-type? type) (assoc :callable-contract type))))))))

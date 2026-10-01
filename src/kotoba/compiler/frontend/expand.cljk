@@ -1,0 +1,1691 @@
+(ns kotoba.compiler.frontend.expand
+  "Module `expand` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (57 forms, 1564 lines). Depends on: base, closure-types."
+  (:require [kotoba.lang.coll :as set]
+            [kotoba.lang.text :as str]
+            [kotoba.compiler.frontend-tables :as tables]
+            #?@(:kotoba [[kotoba.form :as form]])
+            #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])
+            [kotoba.compiler.frontend.base :refer [capability-registry first-truthy reject!]]
+            [kotoba.compiler.frontend.closure-types :refer [callable-type? max-record-fields record-type? resolve-type-alias! structured-type? type-alias-form? typed-param-parts validate-value-type! variant-type?]])
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
+                                 ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]]]]
+                                 :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+
+;; forward references inside this module (the cut keeps the original form order)
+(declare rewrite-state-ability-form binding-symbols rewrite-record-constructors rewrite-record-member-access*)
+
+
+#?(:kotoba
+   (defn member-of? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64 end :i64] :bool
+     (if (>= i end)
+       false
+       (if (form/eq (typed-list-nth [:list [:ref :form/r]] xs i) x) true (member-of? xs x (+ i 1) end))))
+   :default nil)
+(def max-arity-clauses 8)
+(def max-parameters 64)
+(def max-symbol-chars 128)
+(def max-function-docstring-chars 65536)
+
+#?(:kotoba
+   (defn kotoba-integer? [form [:ref :form/r]] :bool (form/is-int? form))
+   :default
+(defn kotoba-integer?
+  "True for a value that is (or stands for) a `.kotoba` integer literal --
+  plain `integer?` on `:clj`. On `:cljs` a literal may be EITHER a JS
+  `bigint` (read from `.kotoba` source via `kotoba.compiler.kotoba-reader`)
+  OR a plain cljs number (synthesized directly by this namespace's own
+  desugaring, e.g. `desugar-and`'s vacuous `1`, `when`'s trailing `0`, `get`'s
+  default `0` -- ordinary Clojure literals in THIS file's source, never
+  routed through the reader) -- both are valid until
+  `kotoba.kir/eval-expr` coerces every literal to `bigint` via
+  `cljs-i64/->bigint` at the single point it enters the runtime value
+  stream. Plain cljs `integer?`/`int?` do not recognize `bigint`
+  (confirmed live), so this checks both forms explicitly."
+  [form]
+  #?(:clj (integer? form) :cljs (or (i64/bigint-value? form) (integer? form)))))
+
+;; ADR-544 step 1 (pure S-expression core + cljk surface): the pure head set
+;; (lam app rel query perform handle ref) is admitted as DESUGARING source
+;; forms. Each admitted head lowers onto machinery the frontend already has,
+;; so NOTHING new reaches validation, inference or any backend -- a pure-head
+;; module produces the HIR its clojure-shaped twin produces.
+;;
+;;   (lam [params] body...)   -> (fn [params] body...)      lambda lift
+;;   (app f a...)             -> (f a...)                   prefix application
+;;   (ref name)               -> name                       definition reference
+;;   (perform :kind/op v...)  -> (cap-call :kind/op v...)    capability call
+;;
+;; `rel query handle` are NOT given a lowering here. They stay rejected with
+;; `operation has no admitted lowering`. Naming them in this comment is not
+;; admitting them: `rel`/`query` need a relational value model this compiler
+;; does not have, and `handle` needs an effect handler, which is a different
+;; thing from the abort ability's `try`/`catch` (lang/abort-ability.edn) and
+;; has no primitive to desugar onto. A head with no existing primitive cannot
+;; be "desugared to existing primitives", so it waits.
+;;
+;; `ref` is deliberately narrow. It takes ONE simple symbol and evaluates to
+;; that symbol -- it is the pure spelling of naming a definition, not a
+;; content-address dereference. `(ref cid:...)` from the ADR's identity
+;; pipeline is a later slice and needs the retrieved-definition machinery;
+;; admitting a wider `ref` now would mean admitting a spelling whose meaning
+;; is not yet decided.
+;;
+;; `perform` is the pure spelling of `cap-call` and carries exactly its
+;; authority -- no more. The capability keyword is resolved by the existing
+;; `resolve-capability-keyword!` against the registry, the namespace's
+;; declared `:capabilities` set is checked against it by the existing
+;; declare-then-check, and because this rewrite runs BEFORE
+;; `check-pure-product-source-forms!` a `perform` in a `:pure-product` module
+;; is already a `cap-call` when that check reads the tree -- so it is refused
+;; by the head set that already refuses `cap-call`, with no second list to
+;; keep in step. The NUMERIC id form is not admitted: wire ids are ABI, not
+;; source vocabulary (ADR-2607279200 Consequences).
+;;
+;; The rewrite runs on the SEXPR tree right after read-forms, BEFORE
+;; reject-reserved-source-symbols! and check-pure-product-source-forms!, so
+;; the rest of the compiler (desugar, validate, lift-lambda) sees only the
+;; already-lowered forms. Per the language's structural semantics, `quote` is
+;; skipped (it is structural-only; a quoted lam is not a call).
+
+
+(def ^:dynamic *pure-definition-names*
+  "The top-level names a module defines, collected before the pure-head
+  rewrite walks it. `(ref name)` is admitted only for a name in this set.
+
+  Why the restriction exists, and why it is not incidental: `ref` is ALSO
+  Clojure's STM constructor, and this language forbids it --
+  `lang/surface-status.edn` `:no-ambient-mutation` names `ref` on the
+  `:authority` shielding axis and `lang/guest-grammar.edn` `:forbidden-heads`
+  lists it beside `dosync`, `locking`, `volatile!`, `var` and `binding`.
+  Because this rewrite runs BEFORE `forbidden-heads` is consulted, an
+  unrestricted pure `ref` would silently take that refusal away: measured
+  2026-09-06 against kotoba-sema a2f86f87, `(let [r (ref n)] n)` was
+  ADMITTED, where before slice 2 it was refused
+  `dynamic loading, interop, mutation, and metaprogramming are forbidden`.
+
+  A definition name is the one shape the two readings do not share. STM's
+  `(ref x)` takes an INITIAL VALUE; ADR-544's `(ref name)` names a
+  definition. Restricting to names the module actually defines keeps the pure
+  reading and gives every other shape its security refusal back.
+
+  Names introduced by `defrecord` / `defmulti` / `defdesugar` expansion are
+  NOT here: those passes run after this one. `(ref <generated-name>)` is
+  refused, which is the fail-closed direction.")
+
+(defn nothing-rewritten?
+  "True when every rewritten child is the very object it started as.
+  `identical?` and not `=`, because the point is to return the ORIGINAL
+  collection rather than an equal copy: an equal copy of a map literal is a
+  rebuilt map, and rebuilding is what hashes."
+  [originals rewritten]
+  (and (= (count originals) (count rewritten))
+       (every? true? (map identical? originals rewritten))))
+
+;; State ability, slice 1 (kotoba-lang `lang/state-ability.edn`). The two
+;; operations of the pure ability `state`, and how many values each takes.
+;; `(perform :state/get)` and `(perform :state/put v)` are NOT capability
+;; calls: they are answered by a handler written in the language, so this
+;; rewrite leaves them (and `(handle body (with handler init))`) for
+;; `expand-state-ability-forms`, which runs after the reserved-prefix check.
+;; `:state/transact` is a host capability of the same kind name and still
+;; takes the `cap-call` route.
+(def state-ability-operations {:state/get 0 :state/put 1})
+
+(defn state-ability-perform-form? [form]
+  (and (seq? form) (= 'perform (first form))
+       (contains? state-ability-operations (second form))))
+
+(defn state-ability-handle-form? [form]
+  (and (seq? form) (= 'handle (first form)) (= 3 (count form))
+       (let [clause (nth form 2)]
+         (and (seq? clause) (= 'with (first clause))))))
+
+(defn rewrite-pure-app-form [form]
+  (cond
+    (seq? form)
+    (let [head (first form)]
+      (cond
+        (= 'quote head)
+        form
+        (or (state-ability-perform-form? form) (state-ability-handle-form? form))
+        (let [rewritten (mapv rewrite-pure-app-form form)]
+          (if (nothing-rewritten? form rewritten)
+            form
+            (with-meta (apply list rewritten) (meta form))))
+        (= 'lam head)
+        (let [rewritten (cons 'fn (mapv rewrite-pure-app-form (rest form)))]
+          (with-meta rewritten (meta form)))
+        (= 'app head)
+        ;; `(app)` used to rewrite to `()`, and an empty call form is not a
+        ;; shape any later pass names -- the operator went missing and the
+        ;; message came from whatever tripped over the hole first. Refuse it
+        ;; here, where the operator is the thing that is absent.
+        (do (when (empty? (rest form))
+              (reject! "app requires an operator: (app f arg ...)"
+                       form :kotoba.error/pure-app-operator))
+            (let [rewritten (apply list (mapv rewrite-pure-app-form (rest form)))]
+              (with-meta rewritten (meta form))))
+        (= 'ref head)
+        (let [arguments (rest form)]
+          (when-not (and (= 1 (count arguments))
+                         (simple-symbol? (first arguments))
+                         (contains? *pure-definition-names* (first arguments)))
+            (reject! (str "ref names one definition this module defines: "
+                          "(ref name). Every other shape of `ref` is Clojure's "
+                          "STM constructor, and state must not be ambient")
+                     form :kotoba.error/ambient-forbidden))
+          ;; The span of the `(ref name)` form, not of the bare symbol: a
+          ;; later refusal about this name should point at what the author
+          ;; wrote. `vary-meta` rather than `with-meta` so a symbol that
+          ;; already carries reader metadata keeps it.
+          (vary-meta (first arguments) merge (meta form)))
+        ;; `rel` / `query` -- the relational pair, onto the kgraph, which is
+        ;; the language's only relational plane (ADR-2607198300 calls it "the
+        ;; language's in-mem EAVT view"). `rel` asserts a datom, `query` reads
+        ;; one back.
+        ;;
+        ;; This adds NO authority. Measured 2026-09-06: `kgraph-assert!` and
+        ;; `kgraph-get` are both already admitted under
+        ;; `:language-profile :pure-product`, so a module can do this today by
+        ;; spelling the primitives; the pure heads are a second spelling of an
+        ;; operation the profile already permits.
+        ;;
+        ;; `query` inherits the primitive's sentinel: `kgraph-get` answers
+        ;; i64 MIN for an absent (e,a). It is NOT wrapped in an `[:option T]`
+        ;; here, and that is deliberate -- a datom whose value IS i64 MIN is
+        ;; indistinguishable from an absent one, so an option would promise a
+        ;; totality the store does not have. Hiding a real ambiguity behind a
+        ;; type is worse than carrying it in the open.
+        (= 'rel head)
+        (let [arguments (rest form)]
+          (when-not (= 3 (count arguments))
+            (reject! "rel asserts one datom: (rel entity attribute value)"
+                     form :kotoba.error/pure-rel-arity))
+          (with-meta (list* 'kgraph-assert! (mapv rewrite-pure-app-form arguments))
+            (meta form)))
+        (= 'query head)
+        (let [arguments (rest form)]
+          (when-not (= 2 (count arguments))
+            (reject! (str "query reads one datom: (query entity attribute). "
+                          "It is a point read, not a pattern query -- there is "
+                          "no relational pattern form in this language yet")
+                     form :kotoba.error/pure-query-arity))
+          (with-meta (list* 'kgraph-get (mapv rewrite-pure-app-form arguments))
+            (meta form)))
+        ;; `handle` -- the elimination form for the one ability a guest can
+        ;; actually handle.
+        ;;
+        ;; Kotoba has two: capability effects, whose answer comes from the HOST
+        ;; and which a guest is not permitted to intercept, and `:abort`
+        ;; (lang/abort-ability.edn), which `try` eliminates. `handle` is `try`.
+        ;;
+        ;; That this cannot reach the capability half is not a convention, it
+        ;; is enforced, and it was measured before this landed: `(try (cap-call
+        ;; :clock/now 0) (catch e 7))` is refused `try body cannot abort; there
+        ;; is nothing to catch`, because a cap-call contributes no `:abort` to
+        ;; the row. So the pure spelling inherits exactly that refusal --
+        ;; `handle` cannot be used to intercept an effect the host answers.
+        ;;
+        ;; `perform` and `handle` are therefore NOT a matched pair here, and
+        ;; the asymmetry is real rather than hidden: `perform` introduces a
+        ;; capability effect that only the host answers, `handle` eliminates
+        ;; the abort ability. Recorded in lang/surface-status.edn.
+        (= 'handle head)
+        (let [rewritten (cons 'try (mapv rewrite-pure-app-form (rest form)))]
+          (with-meta rewritten
+            (assoc (meta form) :kotoba/pure-source-head 'handle)))
+        (= 'perform head)
+        (let [arguments (rest form)]
+          (when-not (and (seq arguments)
+                         (keyword? (first arguments))
+                         (namespace (first arguments)))
+            (reject! (str "perform names one registered capability keyword: "
+                          "(perform :kind/op value ...)")
+                     form :kotoba.error/pure-perform-capability))
+          (let [rewritten (list* 'cap-call (first arguments)
+                                 (mapv rewrite-pure-app-form (rest arguments)))]
+            ;; The head the AUTHOR wrote, kept on the rewritten form. Without
+            ;; it a `:pure-product` module containing `perform` was refused
+            ;; `form outside pure-product profile: cap-call` -- naming a head
+            ;; that is nowhere in the source, because by the time that check
+            ;; reads the tree the rewrite has already happened. The refusal
+            ;; itself was right; only the word was wrong.
+            (with-meta rewritten
+              (assoc (meta form) :kotoba/pure-source-head 'perform))))
+        :else
+        (let [rewritten (mapv rewrite-pure-app-form form)]
+          (if (nothing-rewritten? form rewritten)
+            form
+            (with-meta (apply list rewritten) (meta form))))))
+    (vector? form)
+    (let [rewritten (mapv rewrite-pure-app-form form)]
+      (if (nothing-rewritten? form rewritten) form rewritten))
+    (map? form)
+    ;; REBUILDING a map literal is not free, and it is not free in a way only
+    ;; one runtime shows. `(into {} ...)` over nine or more entries produces a
+    ;; PersistentHashMap, which HASHES its keys -- and a `.kotoba` integer
+    ;; literal is a JS bigint under ClojureScript, which `cljs.core/hash`
+    ;; cannot tag. So rebuilding every literal unconditionally turned every
+    ;; i64-keyed map literal of nine entries or more into
+    ;; `Cannot create property 'closure_uid_...' on bigint '0'` -- an internal
+    ;; failure -- under nbb, while the JVM rebuilt the same literal and went on
+    ;; to admit or refuse it correctly. Measured 2026-09-06: the portable suite
+    ;; has 0 failures at 9a23bbc~1 and 2 at 9a23bbc, both of them
+    ;; `a-typed-literal-is-bounded-by-the-typed-map-entry-limit`. Nine is the
+    ;; array-map -> hash-map transition, which is why eight entries were fine.
+    ;;
+    ;; So: walk the entries as a seq (that hashes nothing), and return the
+    ;; ORIGINAL map when no child changed. A module with no pure head in it
+    ;; now leaves this pass as the identical object it entered as, which is
+    ;; what a no-op should mean. When a child DID change, the map is rebuilt
+    ;; with `array-map`, which keeps the reader's own flat representation and
+    ;; its insertion order instead of promoting to a hashed one.
+    (let [entries (seq form)
+          rewritten (mapv (fn [entry]
+                            [(rewrite-pure-app-form (key entry))
+                             (rewrite-pure-app-form (val entry))])
+                          entries)]
+      (if (every? true? (map (fn [entry [k v]]
+                               (and (identical? (key entry) k)
+                                    (identical? (val entry) v)))
+                             entries rewritten))
+        form
+        (with-meta (apply array-map (mapcat identity rewritten)) (meta form))))
+    :else
+    form))
+
+(defn top-level-definition-names
+  "The names a module's top level defines, read syntactically. This runs
+  before any expansion, so it sees exactly the `def` / `defn` / `defn-` an
+  author wrote."
+  [forms]
+  (into #{}
+        (keep (fn [form]
+                (when (and (seq? form)
+                           (contains? '#{def defn defn-} (first form))
+                           (simple-symbol? (second form)))
+                  (second form))))
+        forms))
+
+(defn rewrite-pure-application-forms [forms]
+  (binding [*pure-definition-names* (top-level-definition-names forms)]
+    (mapv rewrite-pure-app-form forms)))
+
+(defn implicit-do-body
+  "The ONE expression a `defn` / `defn-` / `fn` body is, from the one or more
+  forms the author wrote.
+
+  `lang/guest-grammar.edn` `:implicit-body-forms` puts `defn`, `defn-` and
+  `fn` in `:sequences` (2026-09-12, adr-2609111900): several body forms
+  collapse to `do`, exactly as `let`'s do in `sequenced-body` above, and for
+  the same reason -- `do` is a first-class head that keeps a kernel store or
+  a cap-call in non-final position alive, where a nested `let` would make it
+  an unused binding. `(defn f [x] a b)` and `(defn f [x] (do a b))` are one
+  function with one body; the same forms, so the same HIR and the same CID.
+
+  Until 2026-09-12 every one of those sites REFUSED a second form (`function
+  must contain one result expression`, `single-arity fn value requires
+  exactly one body`, `map fn must contain one result expression; ...`). That
+  was IMPLEMENTATION STATE, not a property: the collapse adds no semantics
+  the `do` head does not already have. Measured against the compiler's own
+  225 sources (lang/selfhost-distance.edn, measurement 14): 14 modules were
+  refused at exactly this sentence, and 272 `defn` forms carry a guard
+  `(when-not ok (throw ...))` before their result.
+
+  An EMPTY body is not this function's to answer: every caller refuses it
+  first, with the sentence it always had, and hands only a non-empty seq
+  here. The `do` takes the first form's reader metadata (its location), the
+  forms themselves keep their own."
+  [forms]
+  (if (= 1 (count forms))
+    (first forms)
+    (let [m (meta (first forms))
+          collapsed (apply list 'do forms)]
+      (if (seq m) (with-meta collapsed m) collapsed))))
+
+(defn specialize-variadic-clause
+  "One monomorphic `[params body]` for a `[fixed ... & rest]` clause at ARITY.
+
+  This is THE lowering of a variadic clause, and there is one of it: the `fn`
+  profile has specialized `(fn [a & r] ...)` this way since closures were
+  admitted (`lang/surface-status.edn` `:first-class-closure-values`: \"[fixed ... &
+  rest] specialized through closure arity 4; rest is a pair-chain\"), and a
+  variadic `defn` (2026-09-12) reuses it rather than lowering `&` a second
+  way. The surplus arguments become ordinary positional parameters named
+  under the reserved prefix, and REST is bound to the pair-chain `(list ...)`
+  of exactly those parameters -- so at arity `(count fixed)` it is `(list)`,
+  the empty chain, and `first` / `second` / `rest` / `empty?` / `cons` and
+  `apply`'s trailing argument all read it as they read any other list value.
+
+  PREFIX keeps the two callers' synthetic names apart in a linked source,
+  where a lambda's clause and a defn's clause can sit side by side; the
+  names themselves are never user-writable (`reject-reserved-source-symbols!`).
+
+  MIN-ARITY is the number of fixed PARAMETERS, which is `(count fixed)` for a
+  lambda and fewer for a defn whose fixed items carry `[name :type]`
+  annotations; the caller that knows the difference says so."
+  [{:keys [fixed rest-name body min-arity]} arity prefix]
+  (let [extras (mapv #(symbol (str prefix %))
+                     (range (- arity (or min-arity (count fixed)))))]
+    [(into (vec fixed) extras)
+     (list 'let [rest-name (apply list 'list extras)] body)]))
+
+(defn uniqueness-key
+  "A stand-in for `v` that is safe to HASH on every runtime.
+
+   ClojureScript cannot hash a JS `bigint`: `cljs.core/hash` reaches
+   `goog.getUid`, which sets a property on the object, and a bigint is a
+   primitive. It throws `Cannot create property 'closure_uid_...' on bigint`.
+
+   That would be a curiosity if `distinct` hashed everything, but it does not
+   -- up to eight elements it stays linear and compares with `=`, so the
+   throw only appears from the NINTH. Measured 2026-08-24 on nbb 1.5.212:
+
+     (case i 0 .. 7 default)   compiles
+     (case i 0 .. 8 default)   Cannot create property 'closure_uid_...'
+     (case x :a .. :i default) compiles      ;; keywords hash fine
+     the same 64-arm case on the JVM          compiles
+
+   A `.kotoba` integer literal is a bigint on ClojureScript and a Long on the
+   JVM, so this was ClojureScript-only, and only for integer dispatch values.
+   The visible cost was in the source people write: `aiueos/kotoba/sha256.kotoba`
+   spells SHA-256's 64 round constants as a 63-deep nested `if`, which is what
+   is left when `case` is not available for a constant table.
+
+   Integers are keyed by their decimal text, which is identical on both
+   runtimes (`(str 5)`, `(str 5N)` and `(str (bigint 5))` are all \"5\"), and
+   tagged so that the integer 5 does not collide with the string \"5\" or the
+   keyword :5."
+  [v]
+  (if (kotoba-integer? v) [::integer (str v)] [::literal v]))
+
+#?(:kotoba
+   (defn all-distinct? [xs [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count xs))
+       true
+       (and (not (member-of? xs (typed-list-nth [:list [:ref :form/r]] xs i) 0 i)) (all-distinct? xs (+ i 1)))))
+   :default
+(defn all-distinct?
+  "Uniqueness over values that may include `.kotoba` integer literals."
+  [xs]
+  (= (count xs) (count (distinct (map uniqueness-key xs))))))
+
+(defn valid-name? [value]
+  (and (simple-symbol? value) (<= (count (name value)) max-symbol-chars)))
+
+(defn preserve-form-meta [source result]
+  (if-let [m (meta source)]
+    (with-meta result m)
+    result))
+
+(defn state-rebuild-seq [form items]
+  (if (seq (meta form)) (with-meta (apply list items) (meta form)) (apply list items)))
+
+(defn state-clause-function-name [handler op]
+  (symbol (str "__kotoba_state_" handler "_" (name op))))
+
+(defn state-rewrite-children
+  "Rewrite FORM's children, returning FORM itself when none changed: a map or
+  set literal rebuilt needlessly would hash its keys, which a ClojureScript
+  bigint literal cannot survive (see `rewrite-pure-app-form`)."
+  [form]
+  (cond
+    (seq? form)
+    (let [items (mapv rewrite-state-ability-form form)]
+      (if (every? true? (map identical? form items)) form (state-rebuild-seq form items)))
+    (vector? form)
+    (let [items (mapv rewrite-state-ability-form form)]
+      (if (every? true? (map identical? form items)) form (with-meta items (meta form))))
+    (map? form)
+    (let [entries (seq form)
+          items (mapv (fn [e] [(rewrite-state-ability-form (key e)) (rewrite-state-ability-form (val e))]) entries)]
+      (if (every? true? (map (fn [e [k v]] (and (identical? (key e) k) (identical? (val e) v))) entries items))
+        form
+        (with-meta (apply array-map (mapcat identity items)) (meta form))))
+    :else form))
+
+(defn rewrite-state-ability-form
+  "`(perform :state/get)` -> `(__kotoba_state_perform :get)`,
+  `(perform :state/put v)` -> `(__kotoba_state_perform :put v)`,
+  `(handle body (with h init))` -> `(__kotoba_state_handle :h init body)`.
+  Everything else is walked and returned identical when nothing changed."
+  [form]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+    (state-ability-perform-form? form)
+    (let [[_ op & values] form
+          expected (get state-ability-operations op)]
+      (when-not (= expected (count values))
+        (reject! (str "perform " op " takes "
+                      (if (zero? expected) "no value" "exactly one value")
+                      "; got " (count values))
+                 form :kotoba.error/state-shape))
+      (state-rebuild-seq form (list* '__kotoba_state_perform (keyword (name op))
+                                     (map rewrite-state-ability-form values))))
+    (state-ability-handle-form? form)
+    (let [[_ body clause] form
+          [_ handler init & extra] clause]
+      (when-not (and (simple-symbol? handler) (= 3 (count clause)) (empty? extra))
+        (reject! "handle installs one handler with one initial state: (handle body (with handler init))"
+                 form :kotoba.error/state-shape))
+      (state-rebuild-seq form (list '__kotoba_state_handle (keyword (name handler))
+                                    (rewrite-state-ability-form init)
+                                    (rewrite-state-ability-form body))))
+    :else (state-rewrite-children form)))
+
+(def state-clause-parameters
+  "The parameters each clause of a :state handler takes: the current state,
+  then the operation's values."
+  {:get 1 :put 2})
+
+(defn state-resume-rewrite
+  "Inside ONE handler clause body, `(resume value state)` becomes the reserved
+  head; a resume of any other arity is refused here, by its own name."
+  [form handler op]
+  (cond
+    (and (seq? form) (= 'quote (first form))) form
+    (and (seq? form) (= 'resume (first form)))
+    (do (when-not (= 3 (count form))
+          (reject! (str "resume takes the resumed value and the next state: (resume value state); handler "
+                        handler " clause " (name op) " passes " (dec (count form)))
+                   form :kotoba.error/state-resume))
+        (state-rebuild-seq form (list '__kotoba_state_resume
+                                      (state-resume-rewrite (nth form 1) handler op)
+                                      (state-resume-rewrite (nth form 2) handler op))))
+    (seq? form) (state-rebuild-seq form (map #(state-resume-rewrite % handler op) form))
+    (vector? form) (with-meta (mapv #(state-resume-rewrite % handler op) form) (meta form))
+    :else form))
+
+(defn parse-defhandler
+  "One `(defhandler name doc? [:state S] (get [s] body) (put [s v] body))`
+  form -> `{:handler {...} :defns [...]}`. Each clause becomes a private defn
+  whose parameters are typed by the handler's state type."
+  [form]
+  (let [[_ handler & more] form
+        _ (when-not (and (simple-symbol? handler) (valid-name? handler))
+            (reject! "defhandler requires a handler name: (defhandler name [:state S] (get [s] ...) (put [s v] ...))"
+                     form :kotoba.error/state-handler-shape))
+        more (if (string? (first more)) (rest more) more)
+        [signature & clauses] more]
+    (when-not (and (vector? signature) (= 2 (count signature)) (keyword? (first signature)))
+      (reject! (str "defhandler " handler " requires an ability signature: [:state S]")
+               form :kotoba.error/state-handler-shape))
+    (when-not (= :state (first signature))
+      (reject! (str "defhandler supports only the :state ability in state slice 1; "
+                    handler " names " (pr-str (first signature)))
+               form :kotoba.error/state-handler-shape))
+    (let [state-type (second signature)
+          _ (validate-value-type! state-type)
+          parsed (mapv (fn [clause]
+                         (when-not (and (seq? clause) (symbol? (first clause))
+                                        (vector? (second clause)) (seq (drop 2 clause)))
+                           (reject! (str "handler " handler " clause must be (op [state value ...] body): "
+                                         (pr-str clause))
+                                    form :kotoba.error/state-handler-shape))
+                         (let [op (keyword (name (first clause)))
+                               params (second clause)
+                               body (drop 2 clause)]
+                           {:op op :params params
+                            :body (if (< 1 (count body)) (cons 'do body) (first body))}))
+                       clauses)
+          ops (mapv :op parsed)]
+      (when-not (and (= (set ops) (set (keys state-clause-parameters)))
+                     (= (count ops) (count (distinct ops))))
+        (reject! (str "handler " handler " does not match the :state ability: it must define exactly get and put, once each; it defines "
+                      (if (seq ops) (str/join ", " (map name ops)) "nothing"))
+                 form :kotoba.error/state-handler-type))
+      (doseq [{:keys [op params]} parsed]
+        (let [expected (get state-clause-parameters op)]
+          (when-not (and (= expected (count params)) (every? simple-symbol? params)
+                         (= (count params) (count (distinct params))))
+            (reject! (str "handler " handler " does not match the :state ability: its " (name op)
+                          " clause takes " (if (= 1 expected) "[state]" "[state value]")
+                          ", got " (pr-str params))
+                     form :kotoba.error/state-handler-type))))
+      {:handler {:name handler :state-type state-type
+                 :clauses (into {} (map (fn [{:keys [op]}]
+                                          [op {:fn (state-clause-function-name handler op)}]))
+                                parsed)}
+       :defns (mapv (fn [{:keys [op params body]}]
+                      (with-meta
+                        (list 'defn- (state-clause-function-name handler op)
+                              (vec (mapcat (fn [p] [p state-type]) params))
+                              (state-resume-rewrite (rewrite-state-ability-form body) handler op))
+                        (meta form)))
+                    parsed)})))
+
+(defn expand-state-ability-forms
+  "Source-level expansion of the state ability. Returns `{:forms :handlers}`;
+  a module that mentions none of it comes back as the identical vector with
+  no handlers, so it lowers to the bytes it did before the ability existed."
+  [forms]
+  (if-not (first-truthy (fn [x] (or (and (seq? x) (= 'defhandler (first x)))
+                                    (state-ability-perform-form? x)
+                                    (state-ability-handle-form? x)))
+                        (tree-seq coll? seq forms))
+    {:forms forms :handlers {}}
+    (let [out (reduce (fn [{:keys [forms handlers]} form]
+                        (if (and (seq? form) (= 'defhandler (first form)))
+                          (let [{:keys [handler defns]} (parse-defhandler form)
+                                key (keyword (name (:name handler)))]
+                            (when (contains? handlers key)
+                              (reject! (str "duplicate handler name: " (:name handler))
+                                       form :kotoba.error/state-handler-shape))
+                            {:forms (into forms defns) :handlers (assoc handlers key handler)})
+                          {:forms (conj forms (rewrite-state-ability-form form)) :handlers handlers}))
+                      {:forms [] :handlers {}}
+                      forms)]
+      out)))
+
+(defn normalize-effect-ceiling
+  "Translate a public effect ceiling declared as capability keywords into the
+  same `[:cap/call id]` row shape `infer-effects` produces."
+  [ceiling form]
+  (when (some? ceiling)
+    (when-not (and (set? ceiling) (seq ceiling) (every? keyword? ceiling))
+      (reject! "effect ceiling must be a non-empty set of capability keywords" form))
+    (into #{}
+          (map (fn [kw]
+                 (if-let [id (get capability-registry kw)]
+                   [:cap/call id]
+                   ;; The pure ability `state` (lang/state-ability.edn) is a
+                   ;; row member of its own, not a capability.
+                   (if (= :state kw)
+                     :state
+                     (reject! (str "effect ceiling names unregistered capability: " kw)
+                              form)))))
+          ceiling)))
+
+(defn defn-parts
+  "Parse Kotoba's bounded function declaration shape. A docstring is inert
+  metadata and is deliberately discarded before lowering. An optional result
+  keyword follows the parameter vector: `(defn f [s :string] :string s)`.
+  An optional public effect ceiling map may follow the result (or params):
+  `(defn f [x] {:effects #{:clock/now}} (clock/now x))`. Inferred effects
+  outside that ceiling fail closed. Other attributes remain outside the profile."
+  [form constants]
+  (let [[_ name & declaration] form
+        [docstring declaration] (if (string? (first declaration))
+                                  [(first declaration) (rest declaration)]
+                                  [nil declaration])
+        raw-params (first declaration)
+        tail (rest declaration)
+        [result tail] (if (or (keyword? (first tail))
+                              (structured-type? (first tail))
+                              (type-alias-form? (first tail)))
+                        [(resolve-type-alias! (first tail) constants) (rest tail)]
+                        ;; No annotation: `:i64` is provisional. `infer-absent-results`
+                        ;; replaces it with the body's inferred type, so an
+                        ;; unannotated `defn` can return a predicate.
+                        [::absent tail])
+        ceiling-form (first tail)
+        [effects-ceiling body]
+        (if (and (map? ceiling-form)
+                 (contains? ceiling-form :effects)
+                 (= #{:effects} (set (keys ceiling-form))))
+          [(normalize-effect-ceiling (:effects ceiling-form) form) (rest tail)]
+          [nil tail])
+        ;; Several body forms are ONE `do` from here on (`implicit-do-body`;
+        ;; guest-grammar `:implicit-body-forms :sequences` holds defn since
+        ;; 2026-09-12), so every later reader of `:body` -- the variadic
+        ;; specialization, the affine check, the elaboration site that
+        ;; refuses `function must contain one result expression` -- sees a
+        ;; one-form seq. An empty body is left empty: that refusal is still
+        ;; the empty body's, with the sentence it always had.
+        body (if (< 1 (count body)) (list (implicit-do-body body)) body)]
+    (when (and docstring (> (count docstring) max-function-docstring-chars))
+      (reject! "function docstring exceeds admission limit" docstring))
+    (when-not (= ::absent result) (validate-value-type! result))
+    (cond-> {:name name :raw-params raw-params
+             :result (if (or (= ::absent result) (callable-type? result)) :i64 result)
+             :body body}
+      (= ::absent result) (assoc :result-inferred? true)
+      (callable-type? result) (assoc :callable-result-contract result)
+      effects-ceiling (assoc :effects-ceiling effects-ceiling))))
+
+(defn multi-arity-declaration?
+  [declaration]
+  (and (seq declaration)
+       (every? #(and (seq? %) (vector? (first %))) declaration)))
+
+(defn abi-arity-name [source-name arity]
+  (symbol (str (name source-name) "$arity$" arity)))
+
+(defn variadic-params? [raw-params]
+  (and (vector? raw-params) (boolean (first-truthy #(= '& %) raw-params))))
+
+(defn variadic-clause-parts
+  "Read `[fixed ... & rest]` for a defn clause: the fixed items (which may
+  carry `[name :type]` annotations and destructuring patterns, exactly as a
+  fixed-arity defn's may), the rest name, and the number of fixed
+  PARAMETERS. Every malformed spelling is refused by name."
+  [raw-params constants form]
+  (let [amp-index (first (keep-indexed #(when (= '& %2) %1) raw-params))]
+    (when-not (= amp-index (- (count raw-params) 2))
+      (reject! "variadic defn requires [fixed ... & rest]: `&` must be followed by exactly one rest name and nothing else"
+               raw-params))
+    (let [fixed (subvec raw-params 0 amp-index)
+          rest-name (peek raw-params)
+          fixed-parts (typed-param-parts fixed constants)
+          min-arity (count fixed-parts)]
+      ;; `&` is a simple symbol to `valid-name?`; measured before this line
+      ;; existed, `(defn- f [a & &] a)` was admitted with a rest named `&`.
+      (when-not (and (valid-name? rest-name) (not= '& rest-name))
+        (reject! "variadic defn requires [fixed ... & rest]: the rest name must be a simple symbol"
+                 raw-params))
+      (when (contains? (set (mapcat #(binding-symbols (:pattern %)) fixed-parts)) rest-name)
+        (reject! (str "variadic rest name " rest-name " shadows a fixed parameter of the same clause")
+                 raw-params))
+      (when (> min-arity max-parameters)
+        (reject! "function parameters exceed ABI-supported arity" raw-params
+                 :kotoba.error/max-parameters))
+      {:fixed fixed :rest-name rest-name :min-arity min-arity})))
+
+(defn expand-defn-parts
+  "Return one or more monomorphic clauses for a source defn. Multi-arity is
+  syntax-only: every call is resolved before HIR and no backend performs
+  argument-count dispatch (ADR 0017).
+
+  A `[fixed ... & rest]` clause is multi-arity syntax too (2026-09-12). In a
+  closed module every call of the function is known, so the clause is
+  specialized -- by the `fn` profile's own lowering, `specialize-variadic-
+  clause` -- once per arity a call site uses, from the fixed count through
+  `max-parameters`, plus the smallest arity no fixed clause holds, so the
+  body is analyzed even when nothing calls it. An arity nothing calls is not
+  emitted. CALL-ARITIES is this name's set of called arities
+  (`variadic-call-arities`).
+
+  Until 2026-09-12 the single-arity path READ `&` AS A PARAMETER: measured at
+  6f49a83, `(defn f [a & r] r)` compiled as a three-parameter function whose
+  second parameter was named `&`, so `(f 1 2 3)` answered 3 and `(f 1 2)` was
+  refused `f takes 3 arguments`. It accepted the source and answered the
+  wrong thing; the multi-arity path refused the same clause by name. Both
+  paths now go through this one."
+  [form constants call-arities]
+  (let [[op source-name & declaration0] form
+        ;; The name is checked HERE, before anything reads it, because the
+        ;; very next line calls `(name source-name)` and `name` is defined on
+        ;; a symbol / keyword / string and nothing else. Measured 2026-09-03
+        ;; on amu 57ba0ee0, fifteen shapes reached it and raised a raw host
+        ;; error -- `(defn)` and `(defn nil [] 0)` (nil), `(defn 42 [] 0)`,
+        ;; `(defn 1.5 [] 0)`, `(defn true [] 0)`, `(defn [f] [] 0)`,
+        ;; `(defn {} [] 0)`, `(defn #{} [] 0)`, `(defn (f) [] 0)`, the same
+        ;; nine under `defn-`, and the multi-arity spellings -- so
+        ;; `Doesn't support name: 42` left as exit 70 `internal compiler
+        ;; error`. `(defn "f" [] 0)` and `(defn :f [] 0)` did NOT crash, only
+        ;; because `name` happens to accept a string and a keyword; they were
+        ;; refused 200 lines later with `invalid function name`. One arity of
+        ;; the same declaration was guarded and the others were not.
+        ;;
+        ;; The wording is that sibling's, verbatim, and so is the code. A
+        ;; caller who wrote a name that is not a bounded simple symbol gets
+        ;; one sentence for that fact whichever non-symbol they wrote; a
+        ;; second phrasing here would only mean the compiler knew two things
+        ;; where there is one.
+        ;;
+        ;; Rejecting on FORM rather than on the name is what gives the reader
+        ;; somewhere to act: `nil`, `42` and `{}` carry no reader metadata, so
+        ;; a refusal pointed at the name has no span at all. The offending
+        ;; value travels in `ex-data` instead, where the CLI envelope does not
+        ;; copy it.
+        _ (when-not (valid-name? source-name)
+            (reject! "invalid function name" form :kotoba.error/subset-reject
+                     {:function source-name}))
+        [docstring declaration] (if (string? (first declaration0))
+                                  [(first declaration0) (rest declaration0)]
+                                  [nil declaration0])
+        ;; Public is the head AND the name's metadata. `(defn ^:private h
+        ;; ...)` is `defn-` spelled the way Clojure spells it; until
+        ;; 2026-09-11 the reader could not read it at all (`kotoba-reader`'s
+        ;; `\^` arm), and once it could, deciding on the head alone would
+        ;; have compiled a declared-private function as public -- the one
+        ;; outcome worse than refusing it. Every OTHER metadata key
+        ;; (`:no-doc`, `:tag`, `:deprecated`, anything) is documentation to
+        ;; this analyzer and is not read. The name keeps its metadata: a
+        ;; symbol with metadata is equal to itself, so `valid-name?` and the
+        ;; name-keyed maps below see the same symbol they always did
+        ;; (`reader_metadata_test` measures this rather than assumes it).
+        public? (and (= op 'defn) (not (:private (meta source-name))))]
+    (when (and docstring (> (count docstring) max-function-docstring-chars))
+      (reject! "function docstring exceeds admission limit" docstring))
+    (when (re-find #"\$arity\$" (name source-name))
+      (reject! "function name uses reserved multi-arity ABI marker" source-name))
+    (cond
+      (and (not (multi-arity-declaration? declaration))
+           (not (variadic-params? (first declaration))))
+      [(assoc (defn-parts form constants) :source-name source-name :public? public?)]
+
+      :else
+      (let [;; A single variadic clause is the multi-arity declaration of
+            ;; one clause, and takes the same path.
+            declaration (if (multi-arity-declaration? declaration)
+                          declaration
+                          [(apply list declaration)])]
+        (when (> (count declaration) max-arity-clauses)
+          (reject! "multi-arity clause count exceeds admission limit" form))
+        (let [raws (mapv (fn [clause]
+                           (defn-parts (list* op source-name clause) constants))
+                         declaration)
+              fixed-raws (remove #(variadic-params? (:raw-params %)) raws)
+              variadic-raws (filter #(variadic-params? (:raw-params %)) raws)
+              _ (when (> (count variadic-raws) 1)
+                  (reject! "defn admits at most one variadic clause" form))
+              fixed-clauses
+              (mapv (fn [raw]
+                      (assoc raw :source-name source-name
+                             :logical-arity (count (typed-param-parts (:raw-params raw) constants))
+                             :public? public?))
+                    fixed-raws)
+              fixed-arities (set (map :logical-arity fixed-clauses))
+              variadic-clauses
+              (when-let [raw (first variadic-raws)]
+                (let [{:keys [min-arity] :as parts}
+                      (variadic-clause-parts (:raw-params raw) constants form)
+                      ;; The body is a one-form seq (`defn-parts` collapsed
+                      ;; several forms to one `do`); an empty clause keeps its
+                      ;; shape so `function must contain one result
+                      ;; expression` still names it downstream.
+                      body (:body raw)
+                      used (set (filter #(<= min-arity % max-parameters) call-arities))
+                      always (first (remove fixed-arities (range min-arity (inc max-parameters))))
+                      arities (sort (remove fixed-arities (cond-> used always (conj always))))]
+                  (mapv (fn [arity]
+                          (let [[params body*]
+                                (specialize-variadic-clause
+                                 (assoc parts :body (first body)) arity "__kotoba_rest_arg_")]
+                            (assoc raw :raw-params params
+                                   :body (if (= 1 (count body)) [body*] body)
+                                   :source-name source-name :logical-arity arity
+                                   :public? public? :variadic? true)))
+                        arities)))
+              clauses (into fixed-clauses variadic-clauses)
+              arities (mapv :logical-arity clauses)]
+          (when-not (= (count arities) (count (distinct arities)))
+            (reject! "duplicate multi-arity clause" form))
+          (if (and (= 1 (count clauses)) (:variadic? (first clauses)))
+            ;; One specialization of a variadic clause is one ordinary
+            ;; function: the plain name, as the linker writes a one-clause
+            ;; export, so its interface and CID are those of the fixed-arity
+            ;; defn an author would have written by hand.
+            [(dissoc (first clauses) :variadic?)]
+            (mapv #(assoc % :name (abi-arity-name source-name (:logical-arity %))) clauses)))))))
+
+(defn binding-symbols [pattern]
+  (->> (tree-seq coll? seq pattern)
+       (filter symbol?)
+       (remove #{'&})
+       set))
+
+(defn closed-multimethod-literal? [value]
+  (or (kotoba-integer? value) (keyword? value) (boolean? value) (string? value)))
+
+(defn expand-closed-multimethod-forms [forms]
+  (let [declarations (filter #(and (seq? %) (= 'defmulti (first %))) forms)
+        methods (filter #(and (seq? %) (= 'defmethod (first %))) forms)
+        declaration-names (mapv second declarations)]
+    (when-not (= (count declaration-names) (count (distinct declaration-names)))
+      (reject! "duplicate defmulti declaration" declarations))
+    (let [declarations-by-name
+          (into {}
+                (map (fn [form]
+                       (let [[_ name dispatch & extra] form]
+                         (when-not (and (symbol? name) (nil? (namespace name))
+                                        (symbol? dispatch) (nil? (namespace dispatch))
+                                        (empty? extra))
+                           (reject! "defmulti requires an unqualified name and one unqualified dispatch function symbol"
+                                    form))
+                         [name {:form form :dispatch dispatch}]))
+                     declarations))
+          methods-by-name
+          (group-by second methods)]
+      (doseq [form methods]
+        (let [[_ name dispatch-value params & body] form]
+          (when-not (contains? declarations-by-name name)
+            (reject! "defmethod requires a matching defmulti declaration" form))
+          (when-not (closed-multimethod-literal? dispatch-value)
+            (reject! "defmethod dispatch value must be a bounded literal or :default" form))
+          (when-not (and (vector? params) (<= (count params) max-parameters)
+                         (every? #(and (symbol? %) (nil? (namespace %))) params)
+                         (= (count params) (count (distinct params))))
+            (reject! "defmethod parameters must be a unique vector of unqualified symbols within the ABI arity"
+                     form))
+          (when (empty? body)
+            (reject! "defmethod requires at least one body expression" form))))
+      (let [expanded
+            (into {}
+                  (map
+                   (fn [[name {:keys [dispatch form]}]]
+                     (let [method-forms (get methods-by-name name)]
+                       (when (empty? method-forms)
+                         (reject! "defmulti requires at least one closed-world defmethod" form))
+                       (let [params (nth (first method-forms) 3)
+                             _ (doseq [method method-forms]
+                                 (when-not (= params (nth method 3))
+                                   (reject! "all defmethods must use the same parameter vector"
+                                            method)))
+                             values (mapv #(nth % 2) method-forms)
+                             ;; Same hashing hazard as `case`: a dispatch
+                             ;; value may be an integer literal, which is a
+                             ;; bigint on ClojureScript.
+                             _ (when-not (all-distinct? values)
+                                 (reject! "duplicate defmethod dispatch value" method-forms))
+                             default-method (first (filter #(= :default (nth % 2))
+                                                           method-forms))
+                             ordinary (remove #(= :default (nth % 2)) method-forms)
+                             body-form (fn [method]
+                                         (let [body (drop 4 method)]
+                                           (if (= 1 (count body))
+                                             (first body)
+                                             (list* 'do body))))
+                             clauses (mapcat (fn [method]
+                                               [(nth method 2) (body-form method)])
+                                             ordinary)
+                             clauses (cond-> (vec clauses)
+                                       default-method (conj (body-form default-method)))
+                             generated (list 'defn name params
+                                             (list* 'case
+                                                    (list* dispatch params)
+                                                    clauses))]
+                         [name generated])))
+                   declarations-by-name))]
+        (into [] (remove nil?)
+              (map (fn [form]
+                     (cond
+                       (and (seq? form) (= 'defmulti (first form)))
+                       (get expanded (second form))
+
+                       (and (seq? form) (= 'defmethod (first form)))
+                       nil
+
+                       :else form))
+                   forms))))))
+
+#?(:kotoba nil :default (def protocol-declaration-heads tables/protocol-declaration-heads))
+
+(defn protocol-documentation-stripped
+  "A protocol declaration's method forms, with Clojure's two DOCUMENTATION
+  positions removed: a leading string after the protocol name, and a trailing
+  string after a method's parameter vector.
+
+  Both are documentation and neither reaches dispatch. Nothing about the
+  bounded closed-world profile depends on their absence -- `ns` and `defn`
+  both admit a docstring under `max-*-docstring-chars`, and a protocol was
+  the one declaration head that did not.
+
+  Measured 2026-09-11 at 90baa17, through `amu check --jvm-free`:
+
+      (defprotocol IP (-scan [this pattern]))                  exit 0
+      (defprotocol IP \"the one operation\" (-scan [this p]))   exit 65
+      (defprotocol IP (-scan [this pattern] \"method doc\"))     exit 65
+
+  with `defprotocol requires unique bounded (method [this ...]) signatures`
+  for both -- a message about SIGNATURES, raised by a string that is not one.
+  A reader given that sentence looks at the parameter vectors.
+
+  The cost was not cosmetic. The four `:kotoba.error/protocol-declaration`
+  findings in the Q9 wave-1 corpus all came from ONE declaration --
+  `datom.source/IPatternSource`, whose docstring states the three invariants
+  every implementation must satisfy -- and the only way past it was to delete
+  that text. A migration that requires deleting the contract to compile is
+  narrowing the component, which is what ADR-q9 forbids.
+
+  Stripping is deliberately narrow. A trailing string is removed only from a
+  method form that has MORE than the two elements a signature needs, so a
+  malformed `(m \"doc\")` still arrives malformed rather than being quietly
+  rewritten into `(m)`, and a non-string trailing element -- `(m [this] 42)`
+  -- is not touched at all."
+  [tail]
+  (mapv (fn [m]
+          (if (and (seq? m) (> (count m) 2) (string? (last m)))
+            (butlast m)
+            m))
+        tail))
+
+(defn protocol-method-param-parts
+  "Split a protocol method parameter vector into its names and their value
+  types. `[this chunk :bytes n]` -> names [this chunk n], types [nil :bytes nil].
+
+  A parameter may be followed by ONE type (a keyword or a structured type
+  vector); an untyped non-receiver parameter is :i64, as it always was. The
+  receiver (first parameter) takes no type: it is the record the method is
+  dispatched on. Returns nil for a vector that is not names-with-optional-types
+  so the callers' existing `bounded (method [this ...])` refusal fires."
+  [params]
+  (when (vector? params)
+    (loop [remaining (seq params) names [] types []]
+      (if (empty? remaining)
+        {:names names :types types}
+        (let [param (first remaining)
+              more (next remaining)]
+          (if (symbol? param)
+            (if (and more (or (keyword? (first more)) (vector? (first more))))
+              (recur (next more) (conj names param) (conj types (first more)))
+              (recur more (conj names param) (conj types nil)))
+            nil))))))
+
+(defn protocol-form->info [form]
+  (let [[head protocol-name & tail0] form
+        [protocol-doc tail] (if (string? (first tail0))
+                              [(first tail0) (rest tail0)]
+                              [nil tail0])
+        method-docs (keep (fn [m] (when (and (seq? m) (> (count m) 2) (string? (last m)))
+                                    (last m)))
+                          tail)
+        methods (protocol-documentation-stripped tail)]
+    ;; Bounded like every other docstring in the profile. An unbounded one
+    ;; would be the one place a program could carry arbitrary bytes into a
+    ;; declaration, and the limit is the same one `defn` applies.
+    (doseq [doc (cons protocol-doc method-docs)]
+      (when (and doc (> (count doc) max-function-docstring-chars))
+        (reject! (str head " docstring exceeds admission limit")
+                 form :kotoba.error/protocol-declaration)))
+    (when-not (and (valid-name? protocol-name)
+                   (seq methods)
+                   (every? #(and (seq? %)
+                                 (= 2 (count %))
+                                 (valid-name? (first %))
+                                 (vector? (second %))
+                                 (seq (second %))
+                                 (let [{:keys [names types]}
+                                       (protocol-method-param-parts (second %))]
+                                   (and names
+                                        (<= (count names) max-parameters)
+                                        (every? valid-name? names)
+                                        (nil? (first types)))))
+                           methods)
+                   (= (count methods) (count (distinct (map first methods)))))
+      (reject! (str head " requires unique bounded (method [this ...]) signatures")
+               form :kotoba.error/protocol-declaration))
+    (let [parts (into {} (map (fn [[method-name params]]
+                                [method-name (protocol-method-param-parts params)]))
+                      methods)]
+      (doseq [{:keys [types]} (vals parts)
+              type types
+              :when type]
+        (validate-value-type! type))
+      {:name protocol-name
+       :methods (into {} (map (fn [[method-name _]]
+                                [method-name (:names (get parts method-name))]))
+                      methods)
+       :param-types (into {} (map (fn [[method-name _]]
+                                    [method-name (:types (get parts method-name))]))
+                          methods)})))
+
+#?(:kotoba
+   (defn record-descriptor-fields [parts [:ref :form/r] i :i64
+                                    acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of parts))
+       acc
+       (let [part (form/nth-of parts i)
+             field-name (form/form-get part (form/keyword-form :name))
+             field-type (form/form-get part (form/keyword-form :type))]
+         (record-descriptor-fields
+          parts (+ i 1)
+          (form/append-form
+           acc
+           (form/form-vec
+            (form/two-forms
+             (form/keyword-form (keyword-from-string (form/symbol-value field-name)))
+             field-type)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn record-descriptor [namespace-symbol [:ref :form/r] record-name [:ref :form/r]
+                             field-parts [:ref :form/r]] [:ref :form/r]
+     (form/form-vec
+      (form/three-forms
+       (form/keyword-form :record)
+       (form/keyword-form
+        (keyword-from-string
+         (string-concat (form/symbol-value namespace-symbol)
+                        (string-concat "/" (form/symbol-value record-name)))))
+       (form/form-vec (record-descriptor-fields field-parts 0 (form/no-forms))))))
+   :default
+(defn record-descriptor [namespace-symbol record-name field-parts]
+  [:record (keyword (str namespace-symbol) (name record-name))
+   (mapv (fn [{field-name :name field-type :type}]
+           [(keyword (name field-name)) field-type])
+         field-parts)]))
+
+(defn record-field-parts [fields form]
+  (let [typed? (or (first-truthy keyword? fields)
+                   (and (even? (count fields))
+                        (first-truthy structured-type? (map second (partition 2 fields)))))]
+    (if typed?
+      (do
+        (when-not (even? (count fields))
+          (reject! "typed defrecord fields require alternating name/type pairs"
+                   form :kotoba.error/record-declaration))
+        (mapv (fn [[field type]]
+                (when-not (valid-name? field)
+                  (reject! "defrecord field names must be unique unqualified symbols"
+                           field :kotoba.error/record-declaration))
+                (validate-value-type! type)
+                {:name field :type type})
+              (partition 2 fields)))
+      (mapv (fn [field]
+              (when-not (valid-name? field)
+                (reject! "defrecord field names must be unique unqualified symbols"
+                         field :kotoba.error/record-declaration))
+              {:name field :type :i64})
+            fields))))
+
+(defn extension-implementations
+  [protocols records protocol-name record-name method-forms whole-form]
+  (let [protocol (get protocols protocol-name)
+        record (get records record-name)
+        declared-methods (set (keys (:methods protocol)))
+        implemented-methods (mapv first method-forms)]
+    (when-not (and protocol record (seq method-forms))
+      (reject! "protocol extension requires a declared protocol, record, and methods"
+               whole-form :kotoba.error/protocol-extension))
+    (when-not (and (= (count implemented-methods)
+                      (count (distinct implemented-methods)))
+                   (= declared-methods (set implemented-methods)))
+      (reject! "protocol extension must implement every declared method exactly once"
+               whole-form :kotoba.error/protocol-extension))
+    (mapv
+     (fn [[method-name params & body :as method-form]]
+       (let [declared-params (get-in protocol [:methods method-name])]
+         ;; One code, four sentences. This was a single `and` of five
+         ;; conditions behind `protocol method does not match its
+         ;; declaration`, and that sentence was wrong for the one cause that
+         ;; occurs in the Q9 corpus. Measured 2026-09-11 at 9b153c7:
+         ;;
+         ;;   (area [this] (+ 1 1) (:side this))       refused, "does not match its declaration"
+         ;;   (area [this] (do (+ 1 1) (:side this)))  admitted
+         ;;
+         ;; The declaration matched perfectly; the body had two expressions.
+         ;; `defn` refuses the same shape as `function must contain one
+         ;; result expression`. A reader handed the protocol sentence
+         ;; compares parameter vectors and finds nothing (real instance:
+         ;; `datom.source/CountingSource`, `(-scan [_ pattern] (swap! calls
+         ;; inc) (let ...))`).
+         ;;
+         ;; What is admitted does not move: the single-expression rule is
+         ;; the profile's, `defn` has it too, and explicit `do` is the
+         ;; spelling. The order is `defn`'s -- parameters before body -- so
+         ;; a method wrong in both places is told about its parameters
+         ;; first, as a function would be. `vector?` is checked before
+         ;; anything counts PARAMS, because `(count 'this)` is a host error.
+         (when-not (vector? params)
+           (reject! "protocol method parameters must be a vector"
+                    method-form :kotoba.error/protocol-method))
+         ;; `[this chunk :bytes]`: a non-receiver parameter may carry its type
+         ;; (see `protocol-method-param-parts`); the declaration's type is the
+         ;; default, an untyped parameter is :i64.
+         (let [{:keys [names types] :as parts} (protocol-method-param-parts params)]
+           (when-not (and declared-params
+                          (= (count (or names params)) (count declared-params)))
+             (reject! "protocol method does not match its declaration"
+                      method-form :kotoba.error/protocol-method))
+           (when-not (and parts
+                          (every? valid-name? names)
+                          (= (count names) (count (distinct names)))
+                          (nil? (first types)))
+             (reject! "protocol method parameters must be unique unqualified symbols"
+                      method-form :kotoba.error/protocol-method))
+           (doseq [type (rest types)
+                   :when type]
+             (validate-value-type! type)))
+         (when-not (= 1 (count body))
+           (reject! "protocol method must contain one result expression"
+                    method-form :kotoba.error/protocol-method))
+         {:protocol protocol-name
+          :method method-name
+          :record record-name
+          :record-type (:descriptor record)
+          :params (:names (protocol-method-param-parts params))
+          :param-types (mapv (fn [declared given]
+                               (or given declared :i64))
+                             (get-in protocol [:param-types method-name])
+                             (:types (protocol-method-param-parts params)))
+          :body (first body)}))
+     method-forms)))
+
+(defn protocol-extension-groups [extra whole-form]
+  (loop [remaining extra out []]
+    (if (empty? remaining)
+      out
+      (let [protocol-name (first remaining)
+            [methods tail] (split-with seq? (rest remaining))]
+        (when-not (and (symbol? protocol-name) (seq methods))
+          (reject! "protocol extension section requires a protocol name and methods"
+                   whole-form :kotoba.error/protocol-extension))
+        (recur tail (conj out [protocol-name methods]))))))
+
+(defn extend-type-form->implementations
+  "Read one `(extend-type Record Protocol (method [this ...] body) ...)`.
+
+  The mirror of `extend-protocol-form->info` below, and it exists for the same
+  reason that one does: to say up front what the form NEEDS, instead of
+  letting an empty section list mean `nothing to check`.
+
+  Measured 2026-09-03 at 5917518b, `extend-type` was the only member of this
+  family that ADMITTED a malformed declaration. `(extend-type)`,
+  `(extend-type nil)` and `(extend-type 42)` all exited 0. The arm destructured
+  `record-name` and `extra`, handed `extra` to `protocol-extension-groups` --
+  whose loop returns `[]` on the first iteration when the remainder is empty --
+  and `mapcat` over no groups called nothing. Nothing else in the arm ever
+  looked at `record-name`. The whole-source pass then removed the form along
+  with the well-formed declarations, so the program compiled with the
+  extension the caller wrote silently absent: the HIR was byte-identical to
+  the same program with the line deleted, even next to a declared record and a
+  declared protocol.
+
+  The sentence is `extend-protocol`'s with its two nouns swapped, because the
+  two forms differ only in which side is named first and a second phrasing
+  would mean the compiler knew two things where there is one. It is raised on
+  the FORM, so the span points somewhere the reader can act -- `nil`, `42` and
+  `{}` carry no reader metadata of their own.
+
+  Eager on purpose. The caller used to build these with a lazy `mapcat`, which
+  is survivable while every refusal inside is reached during realisation, but
+  a guard whose `reject!` fires outside the sequence that forced it is a guard
+  that looks like it works."
+  [protocols records form]
+  (let [[_ record-name & extra] form]
+    (when-not (and (get records record-name) (seq extra))
+      (reject! "extend-type requires one declared record and bounded protocol sections"
+               form :kotoba.error/protocol-extension))
+    (into [] (mapcat (fn [[protocol-name methods]]
+                       (extension-implementations protocols records protocol-name
+                                                  record-name methods form)))
+          (protocol-extension-groups extra form))))
+
+(defn extend-protocol-form->info [protocols records form]
+  (let [[_ protocol-name & sections] form]
+    (when-not (and (get protocols protocol-name) (seq sections))
+      (reject! "extend-protocol requires one declared protocol and bounded type sections"
+               form :kotoba.error/protocol-extension))
+    (loop [remaining sections implementations [] default-methods nil]
+      (if (empty? remaining)
+        {:protocol protocol-name
+         :implementations implementations
+         :default-methods default-methods
+         :form form}
+        (let [record-name (first remaining)
+              [methods tail] (split-with seq? (rest remaining))]
+          (when-not (and (symbol? record-name) (seq methods))
+            (reject! "extend-protocol type section requires a record name and methods"
+                     form :kotoba.error/protocol-extension))
+          (if (= 'default record-name)
+            (do
+              (when default-methods
+                (reject! "extend-protocol permits at most one default section"
+                         form :kotoba.error/protocol-extension))
+              (recur tail implementations methods))
+            (recur tail
+                   (into implementations
+                         (extension-implementations protocols records protocol-name
+                                                    record-name methods form))
+                   default-methods)))))))
+
+(defn record-form->info [namespace-symbol protocols form]
+  (let [[_ record-name fields & extra] form]
+    (when-not (and (valid-name? record-name)
+                   (vector? fields))
+      (reject! "defrecord requires a bounded name and field vector"
+               form :kotoba.error/record-declaration))
+    (let [field-parts (record-field-parts fields form)
+          field-names (mapv :name field-parts)
+          typed? (not= fields field-names)
+          _ (when-not (and (<= (count field-parts) max-record-fields)
+                           (= (count field-names) (count (distinct field-names))))
+              (reject! (str "defrecord requires at most " max-record-fields
+                            " unique fields")
+                       form :kotoba.error/record-declaration))
+          descriptor (record-descriptor namespace-symbol record-name field-parts)
+          groups (protocol-extension-groups extra form)
+          record {:name record-name
+                  :fields field-names
+                  :field-parts field-parts
+                  :typed? typed?
+                  :descriptor descriptor}
+          implementations
+          (mapcat (fn [[protocol-name methods]]
+                    (extension-implementations protocols {record-name record}
+                                               protocol-name record-name methods form))
+                  groups)]
+      (assoc record :implementations implementations))))
+
+(defn rewrite-record-map-expression
+  "Lower a computed, but statically closed, map expression to one nominal
+  record value.
+
+  Record context propagates only through result positions. Binding values,
+  tests, and non-final `do` expressions keep their ordinary meaning. Every
+  reachable leaf must still be a literal map with exactly the declared fields;
+  this admits heterogeneous records without introducing a dynamically typed
+  map representation or runtime field guessing."
+  [form {:keys [fields descriptor]}
+   records-by-map-constructor records-by-wide-positional-constructor]
+  (let [field-keys (mapv (comp keyword name) fields)
+        rewrite #(rewrite-record-constructors
+                  % records-by-map-constructor
+                  records-by-wide-positional-constructor)
+        recur-result #(rewrite-record-map-expression
+                       % {:fields fields :descriptor descriptor}
+                       records-by-map-constructor
+                       records-by-wide-positional-constructor)]
+    (cond
+      (map? form)
+      (do
+        (when-not (= (set field-keys) (set (keys form)))
+          (reject! "map-> record construction requires exactly the declared fields"
+                   form :kotoba.error/record-map-constructor))
+        (list* 'record-new descriptor
+               (map (fn [field-key] (rewrite (get form field-key))) field-keys)))
+
+      (and (seq? form) (contains? '#{if if-not} (first form)))
+      (let [[op test then else :as parts] form]
+        (when-not (= 4 (count parts))
+          (reject! "computed map-> if requires both record-valued branches"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list op (rewrite test) (recur-result then) (recur-result else))))
+
+      (and (seq? form) (contains? '#{if-let if-some} (first form)))
+      (let [[op binding then else :as parts] form]
+        (when-not (and (= 4 (count parts))
+                       (vector? binding) (= 2 (count binding)))
+          (reject! "computed map-> binding conditional requires one binding and both record-valued branches"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list op [(first binding) (rewrite (second binding))]
+               (recur-result then) (recur-result else))))
+
+      (and (seq? form) (= 'cond (first form)))
+      (let [clauses (vec (rest form))]
+        (when-not (and (even? (count clauses))
+                       (= :else (nth clauses (- (count clauses) 2) nil)))
+          (reject! "computed map-> cond requires a final :else record value"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list* 'cond
+                (map-indexed (fn [index item]
+                               (if (odd? index) (recur-result item) (rewrite item)))
+                             clauses))))
+
+      (and (seq? form) (= 'case (first form)))
+      (let [[_ dispatch & clauses] form]
+        (when-not (odd? (count clauses))
+          (reject! "computed map-> case requires a default record value"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list* 'case (rewrite dispatch)
+                (concat
+                 (mapcat (fn [[test result]] [test (recur-result result)])
+                         (partition 2 (butlast clauses)))
+                 [(recur-result (last clauses))]))))
+
+      (and (seq? form) (= 'condp (first form)))
+      (let [[_ predicate dispatch & clauses] form]
+        (when-not (and predicate dispatch (odd? (count clauses)))
+          (reject! "computed map-> condp requires a predicate, dispatch, and default record value"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list* 'condp (rewrite predicate) (rewrite dispatch)
+                (concat
+                 (mapcat (fn [[test result]] [test (recur-result result)])
+                         (partition 2 (butlast clauses)))
+                 [(recur-result (last clauses))]))))
+
+      (and (seq? form) (= 'let (first form)))
+      (let [[_ bindings & body] form]
+        (when-not (and (vector? bindings) (even? (count bindings)) (seq body))
+          (reject! "computed map-> let requires bindings and a result expression"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list* 'let
+                (mapv (fn [index item]
+                        (if (odd? index) (rewrite item) item))
+                      (range) bindings)
+                (concat (map rewrite (butlast body))
+                        [(recur-result (last body))]))))
+
+      (and (seq? form) (= 'do (first form)))
+      (let [body (rest form)]
+        (when-not (seq body)
+          (reject! "computed map-> do requires a result expression"
+                   form :kotoba.error/record-map-constructor))
+        (preserve-form-meta
+         form
+         (list* 'do (concat (map rewrite (butlast body))
+                            [(recur-result (last body))]))))
+
+      :else
+      (reject! (str "map-> record construction requires an exact map or a closed "
+                    "control expression of exact maps")
+               form :kotoba.error/record-map-constructor))))
+
+(defn rewrite-record-constructors
+  [form records-by-map-constructor records-by-wide-positional-constructor]
+  (cond
+    (seq? form)
+    (let [[op & args] form]
+      (preserve-form-meta
+       form
+       (cond
+        (= 'quote op) form
+
+        (contains? records-by-map-constructor op)
+        (let [record (get records-by-map-constructor op)]
+          (when-not (= 1 (count args))
+            (reject! "map-> record construction requires one map expression"
+                     form :kotoba.error/record-map-constructor))
+          (rewrite-record-map-expression
+           (first args) record
+           records-by-map-constructor records-by-wide-positional-constructor))
+
+        (contains? records-by-wide-positional-constructor op)
+        (let [{:keys [fields descriptor]} (get records-by-wide-positional-constructor op)]
+          (when-not (= (count fields) (count args))
+            (reject! "positional record construction must exactly match the declared fields"
+                     form :kotoba.error/record-positional-constructor))
+          (list* 'record-new descriptor
+                 (mapv #(rewrite-record-constructors
+                         % records-by-map-constructor
+                         records-by-wide-positional-constructor)
+                       args)))
+
+        :else
+        (list* op (mapv #(rewrite-record-constructors
+                         % records-by-map-constructor
+                         records-by-wide-positional-constructor)
+                       args)))))
+    (vector? form) (mapv #(rewrite-record-constructors
+                          % records-by-map-constructor
+                          records-by-wide-positional-constructor)
+                         form)
+    (map? form) (into (empty form)
+                      (map (fn [[k v]]
+                             [(rewrite-record-constructors
+                               k records-by-map-constructor
+                               records-by-wide-positional-constructor)
+                              (rewrite-record-constructors
+                               v records-by-map-constructor
+                               records-by-wide-positional-constructor)]))
+                      form)
+    (set? form) (set (map #(rewrite-record-constructors
+                            % records-by-map-constructor
+                            records-by-wide-positional-constructor)
+                          form))
+    :else form))
+
+(defn rewrite-record-bindings
+  "Rewrite sequential binding values while tracking whether PATTERN shadows the
+  record receiver.  A binding is not visible in its own initializer, but is
+  visible to every initializer and body expression that follows it."
+  [bindings receiver descriptor active?]
+  (loop [remaining (partition 2 bindings)
+         active? active?
+         rewritten []]
+    (if-let [[pattern value] (first remaining)]
+      (recur (next remaining)
+             (and active? (not (contains? (binding-symbols pattern) receiver)))
+             (conj rewritten pattern
+                   (rewrite-record-member-access* value receiver descriptor active?)))
+      [(vec rewritten) active?])))
+
+(defn rewrite-record-fn-clause
+  [clause receiver descriptor active? named-receiver?]
+  (let [[params & body] clause
+        body-active? (and active?
+                          (not named-receiver?)
+                          (vector? params)
+                          (not (contains? (binding-symbols params) receiver)))]
+    (if (vector? params)
+      (preserve-form-meta
+       clause
+       (list* params
+              (mapv #(rewrite-record-member-access* % receiver descriptor body-active?)
+                    body)))
+      clause)))
+
+(defn rewrite-record-member-access*
+  [form receiver descriptor active?]
+  (if-not active?
+    form
+    (cond
+      (seq? form)
+      (let [[op & args] form]
+        (preserve-form-meta
+         form
+         (cond
+           (= 'quote op) form
+
+           (and (= 'get op)
+                (<= 2 (count args) 3)
+                (= receiver (first args))
+                (keyword? (second args)))
+           (list 'record-get descriptor receiver (second args))
+
+           (= 'let op)
+           (let [[bindings & body] args]
+             (if (and (vector? bindings) (even? (count bindings)))
+               (let [[bindings' body-active?]
+                     (rewrite-record-bindings bindings receiver descriptor active?)]
+                 (list* op bindings'
+                        (mapv #(rewrite-record-member-access* % receiver descriptor body-active?)
+                              body)))
+               (list* op (mapv #(rewrite-record-member-access* % receiver descriptor active?)
+                               args))))
+
+           (= 'loop op)
+           (let [[bindings & body] args]
+             (if (and (vector? bindings) (even? (count bindings)))
+               (let [pairs (partition 2 bindings)
+                     bindings' (vec (mapcat
+                                     (fn [[pattern value]]
+                                       [pattern
+                                        (rewrite-record-member-access*
+                                         value receiver descriptor active?)])
+                                     pairs))
+                     body-active? (and active?
+                                       (not-any? #(contains? (binding-symbols %) receiver)
+                                                 (map first pairs)))]
+                 (list* 'loop bindings'
+                        (mapv #(rewrite-record-member-access* % receiver descriptor body-active?)
+                              body)))
+               (list* 'loop
+                      (mapv #(rewrite-record-member-access* % receiver descriptor active?)
+                            args))))
+
+           (= 'fn op)
+           (let [named? (symbol? (first args))
+                 fn-name (when named? (first args))
+                 clauses (if named? (rest args) args)
+                 named-receiver? (= receiver fn-name)]
+             (if (vector? (first clauses))
+               (let [[params & body] clauses
+                     clause (list* params body)
+                     rewritten (rewrite-record-fn-clause clause receiver descriptor
+                                                         active? named-receiver?)]
+                 (list* 'fn (concat (when named? [fn-name]) rewritten)))
+               (list* 'fn
+                      (concat (when named? [fn-name])
+                              (mapv #(rewrite-record-fn-clause % receiver descriptor
+                                                               active? named-receiver?)
+                                    clauses)))))
+
+           :else
+           (list* op (mapv #(rewrite-record-member-access* % receiver descriptor active?)
+                           args)))))
+      (vector? form) (mapv #(rewrite-record-member-access* % receiver descriptor active?) form)
+      (map? form) (into (empty form)
+                        (map (fn [[k v]] [(rewrite-record-member-access* k receiver descriptor active?)
+                                         (rewrite-record-member-access* v receiver descriptor active?)]))
+                        form)
+      (set? form) (set (map #(rewrite-record-member-access* % receiver descriptor active?) form))
+      :else form)))
+
+(defn rewrite-record-member-access [form receiver descriptor]
+  (rewrite-record-member-access* form receiver descriptor true))
+
+(defn expand-record-protocol-forms [forms]
+  (let [namespace-symbol (or (first-truthy (fn [form]
+                                     (when (and (seq? form) (= 'ns (first form)))
+                                       (second form)))
+                                   forms)
+                             (symbol "kotoba.user"))
+        protocol-forms (filter #(and (seq? %)
+                                     (contains? protocol-declaration-heads (first %)))
+                               forms)
+        protocol-infos (mapv protocol-form->info protocol-forms)
+        protocols (into {} (map (juxt :name identity)) protocol-infos)
+        _ (when-not (= (count protocols) (count protocol-infos))
+            (reject! "duplicate protocol name" protocol-forms
+                     :kotoba.error/protocol-declaration))
+        method-names (mapcat (comp keys :methods) protocol-infos)
+        _ (when-not (= (count method-names) (count (distinct method-names)))
+            (reject! "protocol method names must be unique within a namespace"
+                     protocol-forms :kotoba.error/protocol-declaration))
+        declared-function-names
+        (into #{} (keep (fn [form]
+                          (when (and (seq? form)
+                                     (contains? '#{defn defn-} (first form)))
+                            (second form)))) forms)
+        _ (when (seq (set/intersection (set method-names) declared-function-names))
+            (reject! "protocol method names must not collide with declared functions"
+                     protocol-forms :kotoba.error/protocol-declaration))
+        record-forms (filter #(and (seq? %) (= 'defrecord (first %))) forms)
+        record-infos (mapv #(record-form->info namespace-symbol protocols %) record-forms)
+        records (into {} (map (juxt :name identity)) record-infos)
+        _ (when-not (= (count records) (count record-infos))
+            (reject! "duplicate record name" record-forms :kotoba.error/record-declaration))
+        extend-type-forms (filter #(and (seq? %) (= 'extend-type (first %))) forms)
+        extend-type-impls
+        (into [] (mapcat #(extend-type-form->implementations protocols records %))
+              extend-type-forms)
+        extend-protocol-forms
+        (filter #(and (seq? %) (= 'extend-protocol (first %))) forms)
+        extend-protocol-infos
+        (mapv #(extend-protocol-form->info protocols records %) extend-protocol-forms)
+        default-infos (filter :default-methods extend-protocol-infos)
+        default-protocols (map :protocol default-infos)
+        _ (when-not (= (count default-protocols) (count (distinct default-protocols)))
+            (reject! "extend-protocol permits one default section per protocol"
+                     extend-protocol-forms :kotoba.error/protocol-extension))
+        explicit-implementations
+        (vec (concat (mapcat :implementations record-infos)
+                     extend-type-impls
+                     (mapcat :implementations extend-protocol-infos)))
+        explicit-identities (map (juxt :protocol :method :record)
+                                 explicit-implementations)
+        _ (when-not (= (count explicit-identities)
+                       (count (distinct explicit-identities)))
+            (reject! "duplicate protocol method implementation" explicit-implementations
+                     :kotoba.error/protocol-extension))
+        default-implementations
+        (mapcat
+         (fn [{:keys [protocol default-methods form]}]
+           (when-not (seq record-infos)
+             (reject! "extend-protocol default has no declared record specialization targets"
+                      form :kotoba.error/protocol-extension))
+           ;; Validate the section even when every record has an explicit
+           ;; implementation and the default therefore emits no function.
+           (extension-implementations protocols records protocol
+                                      (:name (first record-infos))
+                                      default-methods form)
+           (let [implemented-records
+                 (into #{}
+                       (keep (fn [{implemented-protocol :protocol record :record}]
+                               (when (= protocol implemented-protocol) record)))
+                       explicit-implementations)]
+             (mapcat (fn [{:keys [name]}]
+                       (when-not (contains? implemented-records name)
+                         (extension-implementations protocols records protocol name
+                                                    default-methods form)))
+                     record-infos)))
+         default-infos)
+        implementations (vec (concat explicit-implementations
+                                     default-implementations))
+        identities (map (juxt :protocol :method :record) implementations)
+        _ (when-not (= (count identities) (count (distinct identities)))
+            (reject! "duplicate protocol method implementation" implementations
+                     :kotoba.error/protocol-extension))
+        named-impls (mapv #(assoc %1 :impl-name
+                                  (symbol (str "__kotoba_protocol_impl_" %2)))
+                          implementations (range))
+        constructors
+        (into []
+              (keep (fn [{:keys [name fields field-parts typed? descriptor]}]
+                      ;; A positional constructor with more than max-parameters
+                      ;; is still valid as direct record syntax, but it cannot
+                      ;; become a first-class function without lying about the
+                      ;; bounded callable ABI. Wide direct calls are rewritten
+                      ;; below; map->Type remains available at every width.
+                      (when (<= (count fields) max-parameters)
+                        (let [params (if typed?
+                                       (vec (mapcat (juxt :name :type) field-parts))
+                                       fields)]
+                          (list 'defn (symbol (str "->" name)) params descriptor
+                                (list* 'record-new descriptor fields)))))
+                    record-infos))
+        impl-defs
+        (mapv (fn [{:keys [impl-name params param-types record-type body]}]
+                (let [typed-params
+                      (vec (mapcat (fn [index param param-type]
+                                     [param (if (zero? index) record-type param-type)])
+                                   (range) params param-types))]
+                  (list 'defn- impl-name typed-params
+                        (rewrite-record-member-access body (first params) record-type))))
+              named-impls)
+        dispatch
+        {:methods (into {}
+                        (map (fn [[method-name params]]
+                               [method-name {:arity (count params)
+                                             :implementations
+                                             (into {}
+                                                   (keep (fn [{:keys [method record-type impl-name]}]
+                                                           (when (= method method-name)
+                                                             [(second record-type) impl-name])))
+                                                   named-impls)}]))
+                        (mapcat :methods protocol-infos))}
+        map-constructors
+        (into {} (map (fn [{:keys [name] :as record}]
+                        [(symbol (str "map->" name)) record]))
+              record-infos)
+        wide-positional-constructors
+        (into {} (keep (fn [{:keys [name fields] :as record}]
+                         (when (> (count fields) max-parameters)
+                           [(symbol (str "->" name)) record])))
+              record-infos)
+        record-schemas
+        ;; A defrecord whose fields already use closed schema edges can expose
+        ;; its nominal identity as [:ref :ns/Type]. Keep legacy declarations
+        ;; with nested inline nominal descriptors source-compatible: those
+        ;; descriptors are valid record values, but are intentionally not
+        ;; inserted into the stricter closed schema graph.
+        (into {} (keep (fn [{:keys [descriptor]}]
+                         (let [field-types (map second (nth descriptor 2))
+                               inline-nominal?
+                               (first-truthy (fn [field-type]
+                                       (first-truthy #(or (record-type? %)
+                                                  (variant-type? %))
+                                             (tree-seq coll? seq field-type)))
+                                     field-types)]
+                           (when-not inline-nominal?
+                             [(second descriptor) descriptor]))))
+              record-infos)
+        declarations '#{defrecord defprotocol definterface extend-type extend-protocol}
+        ordinary (remove #(and (seq? %) (contains? declarations (first %))) forms)
+        rewritten (mapv #(rewrite-record-constructors
+                          % map-constructors wide-positional-constructors)
+                        ordinary)]
+    {:forms (into rewritten (concat constructors impl-defs))
+     :dispatch dispatch
+     :record-schemas record-schemas}))

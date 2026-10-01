@@ -16,6 +16,8 @@
             [kotoba.io :as io]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
+            ;; the dynamic var is owned by the infer pass module; the facade holds a snapshot
+            [kotoba.compiler.frontend.infer :as fe-infer]
             [kotoba.sema :as sema]))
 
 (defn- analyze [source] (sema/analyze source))
@@ -181,7 +183,7 @@
   (let [call #(#'frontend/infer-call-type '+ '[a b] {'a :f64 'b :f64} {})]
     (is (= :f64 (call)) "before the final check the float reading types")
     (is (= :kotoba.error/numeric-resolution-unresolved
-           (try (binding [frontend/*numeric-resolution-final* true] (call) ::no-rejection)
+           (try (binding [fe-infer/*numeric-resolution-final* true] (call) ::no-rejection)
                 (catch kerror/ExceptionInfo e (:kotoba.error/code (ex-data e))))))))
 
 ;; ---------------------------------------------------------------------------

@@ -1,0 +1,3603 @@
+(ns kotoba.compiler.frontend.infer
+  "Module `infer` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (97 forms, 3398 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs."
+  (:require [kotoba.lang.coll :as set]
+            [kotoba.lang.text :as str]
+            [kotoba.compiler.frontend-tables :as tables]
+            [kotoba.kir.value :as value]
+            #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
+            [kotoba.compiler.frontend.base :refer [*synthetic-counter* abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id first-truthy if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts]]
+            [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [] :default [kernel-memory-operations])]]
+            [kotoba.compiler.frontend.closure-types :refer [*schemas* callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type?]]
+            [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
+            [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids])]])
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
+                                 ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]]]]
+                                 :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+
+;; forward references inside this module (the cut keeps the original form order)
+(declare same-expression-type? infer-expression-type use-site-text infer-call-type-impl infer-expression-type-impl)
+
+
+#?(:kotoba nil :default (def named-operation-default-results tables/named-operation-default-results))
+#?(:kotoba nil :default (def float-arithmetic-resolution tables/float-arithmetic-resolution))
+#?(:kotoba nil :default (def explicit-numeric-conversions tables/explicit-numeric-conversions))
+
+(def ^:dynamic *state-handlers*
+  "The module's state handlers, `{handler-keyword {:name :state-type
+  :clauses}}`, in a volatile bound per analysis. Read by inference to type the
+  resolved state heads.")
+
+;; A synthesized loop-helper carries no param-type annotations (its captured
+;; outer variables have types only knowable at its call site). During the
+;; param-type resolution pass (resolve-loop-helper-param-types) these two are
+;; bound so that infer-call-type, on reaching a still-unresolved loop-helper
+;; call, RECORDS the argument types instead of type-checking the arguments
+;; against the (placeholder) declared param-types. Both nil in the normal
+;; check-value-types! pass, so ordinary type-checking is unchanged.
+(def ^:dynamic *loop-helper-names* nil)
+(def ^:dynamic *loop-helper-recorder* nil)
+
+;; Bound to a volatile vector by whatever wants the types of the `throw`s a
+;; form can reach WITHOUT crossing a try body. `infer-expression-type`'s `try`
+;; case rebinds it around the body, so a throw inside a try is collected by
+;; that try and never reaches the outer collector; a throw in the handler is
+;; outside the body and does reach it. Unbound (nil) everywhere else, where a
+;; throw is typed and not recorded.
+(def ^:dynamic *abort-throw-types* nil)
+
+;; Function name -> the error type it aborts with, for the functions that do.
+;; Bound while the abort passes and their inference run; empty elsewhere.
+(def ^:dynamic *abort-error-types* {})
+
+;; The static type of `(throw e)`: it has no value, so it unifies with either
+;; branch of an `if`. It never reaches HIR -- an aborting function is lowered
+;; to `[:result T E]` before any pass that writes HIR sees it.
+(def abort-bottom :kotoba.abort/bottom)
+
+;; The catch binder's provisional type while a callee's error type is not yet
+;; known (the abort passes iterate to a fixed point). Nothing unifies with it,
+;; so a handler that reads the binder before its type is known refuses -- and
+;; the fixed point retries -- rather than reading it as anything.
+(def abort-unknown-error :kotoba.abort/unknown-error)
+
+(defn abort-callee-sites
+  "`[[callee error-type] ...]`, in source order, for the aborting functions
+  FORM calls with no try body in between. A try's handler is walked -- what it
+  throws leaves the try -- and its body is not: that body's aborts are the
+  try's own to catch. A `fn` literal's body is NOT walked: an aborting call
+  there belongs to the lambda that body becomes, not to the function the
+  literal appears in. (Lambda lifting has already run by the time the abort
+  passes do, so that clause is a backstop rather than the usual route.)"
+  [form]
+  (let [known *abort-error-types* out (volatile! [])]
+    (letfn [(walk [x]
+              (cond
+                (seq? x)
+                (let [[op & args] x]
+                  (cond
+                    (= op 'fn) nil
+                    (= op 'try) (walk (last (second args)))
+                    :else
+                    (do (when-let [error-type (get known op)]
+                          (vswap! out conj [op error-type]))
+                        (doseq [arg args] (walk arg)))))
+                (coll? x) (doseq [item x] (walk item))))]
+      (walk form)
+      (distinct @out))))
+
+(defn abort-callee-error-types
+  "The error types of `abort-callee-sites`, deduplicated in source order."
+  [form]
+  (distinct (map second (abort-callee-sites form))))
+
+(defn bounded-vector-source-binding?
+  "True for the synthetic collection binding T4.5 map/filter/reduce emit.
+
+  Inference must require the INIT to be `:vector-i64` (form = the author's
+  collection) rather than inferring the binding from a provisional `:i64`
+  and then refusing the binding name inside the loop helper. Packed
+  `map_sources` is a heterogeneous vector and is deliberately excluded."
+  [name]
+  (let [s (str name)]
+    (or (and (str/starts-with? s "__kotoba_map_source_")
+             (not (str/starts-with? s "__kotoba_map_sources_")))
+        (str/starts-with? s "__kotoba_filter_v_")
+        (str/starts-with? s "__kotoba_reduce_v_")
+        (str/starts-with? s "__kotoba_mapindexed_v_"))))
+
+;; Absence markers (gap 1 of the selfhost foundation): see `absence-type`.
+(def absent-kind :kotoba.absence/absent)
+(def none-kind :kotoba.absence/none)
+(def nil-kind :kotoba.absence/nil)
+
+(defn absence-kind-mode [kind]
+  (get {absent-kind :legacy none-kind :none nil-kind :nil} kind))
+
+(defn absence-kind? [type] (contains? #{absent-kind none-kind nil-kind} type))
+
+(defn absence-in-tail?
+  "A marker in a tail position of FORM (through `if`, `let`, `do`)."
+  [form]
+  (cond
+    (absence-marker? form) true
+    (not (seq? form)) false
+    (and (= 'if (first form)) (= 4 (count form)))
+    (or (absence-in-tail? (nth form 2)) (absence-in-tail? (nth form 3)))
+    (and (= 'let (first form)) (<= 3 (count form))) (absence-in-tail? (last form))
+    (and (= 'do (first form)) (<= 2 (count form))) (absence-in-tail? (last form))
+    :else false))
+
+(defn legacy-absence
+  "What the desugar wrote before markers existed."
+  [marker]
+  (if (= :nil (second marker)) '(option-none) 0))
+
+;; the vector's first element is the keyword NAME
+#?(:kotoba
+   (defn kw-head? [t [:ref :form/r] name :string] :bool
+     (and (form/is-vec? t) (> (form/count-of t) 0)
+          (form/is-keyword? (form/nth-of t 0))
+          (string=? (document-edn-print (document-keyword (form/keyword-value (form/nth-of t 0))))
+                    (string-concat ":" name))))
+   :default nil)
+
+;; the type of FIELD in a fields vector [[:f T] ...], from index I; nil when absent
+#?(:kotoba
+   (defn record-field-lookup [fields [:ref :form/r] field [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (form/count-of fields))
+       (form/nil-form)
+       (let [pair (form/nth-of fields i)]
+         (if (form/eq (form/nth-of pair 0) field)
+           (form/nth-of pair 1)
+           (record-field-lookup fields field (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+   (defn resolve-ref-type [type [:ref :form/r] schemas [:ref :form/r]] [:ref :form/r]
+     ;; `*schemas*` is an explicit argument on this route (the :fe/env schemas field)
+     (if (and (form/is-vec? type) (= 2 (form/count-of type))
+              (kw-head? type "ref") (form/is-map? schemas))
+       (let [resolved (form/form-get schemas (form/nth-of type 1))]
+         (if (form/is-nil? resolved) type resolved))
+       type))
+   :default
+(defn resolve-ref-type
+  "Expand `[:ref :schema/name]` through `*schemas*` when available."
+  [type]
+  (if (and (vector? type)
+           (= 2 (count type))
+           (= :ref (first type))
+           (map? *schemas*))
+    (or (get *schemas* (second type)) type)
+    type)))
+
+#?(:kotoba
+   (defn record-field-type [rec-type [:ref :form/r] field [:ref :form/r]
+                             schemas [:ref :form/r]] [:ref :form/r]
+     (let [rec (resolve-ref-type rec-type schemas)]
+       (if (and (record-type? rec) (form/is-keyword? field))
+         (record-field-lookup (form/nth-of rec 2) field 0)
+         (form/nil-form))))
+   :default
+(defn record-field-type
+  "Field type from a record descriptor or `[:ref …]` schema name, else nil."
+  [rec-type field]
+  (let [rec (resolve-ref-type rec-type)]
+    (when (and (record-type? rec) (keyword? field))
+      (first-truthy (fn [[k t]] (when (= k field) t))
+            (nth rec 2))))))
+
+#?(:kotoba
+   (defn option-vector-type? [type [:ref :form/r]] :bool
+     (vt/option-type? type))
+   :default
+(defn option-vector-type?
+  "Parametric option `[:option T]`, not the legacy monomorphic `:option-i64`."
+  [type]
+  (and (vector? type)
+       (= 2 (count type))
+       (= :option (first type)))))
+
+;; ── expression-level absence (gap 1 of the selfhost foundation) ─────────────
+;;
+;; superproject adr-2609242330, amu ladder floor :expression-absence. A `when`
+;; (or an `if` / `if-not` / `when-not` / `when-let` / `if-let` / `when-some` /
+;; `if-some` / `cond`) with no else, and a literal `nil` in a branch, answer
+;; nothing on that path. Until 2026-09-26 the desugar wrote the i64 `0` there
+;; (and `nil` was `(option-none)`, the i64 option), so every such form whose
+;; present value was not an i64 was refused -- "if branches must have the same
+;; value type", or "loop exits with two different value types: bool ... and
+;; i64 from 0", the second selfhost wall (first-truthy).
+;;
+;; The desugar now writes a MARKER and the type of the present branch decides:
+;;
+;;   present :i64, no else   -> 0, exactly as before (CID-stable; pinned by
+;;                              the :absence gate `(+ (when o 100) ...)`)
+;;   present :bool           -> false (nil and false are both logical false)
+;;   present [:option T]     -> that option's none (flattened, as Clojure's
+;;                              nil-punning reads it)
+;;   present T, anything else-> [:option T]: the present value is wrapped
+;;                              `(option-some-of [:option T] v)` and the absent
+;;                              path is `(option-none-of [:option T])`
+;;   a literal nil beside :i64 -> [:option :i64]; beside :option-i64 or
+;;                              [:option :i64] -> `(option-none)`, as before
+;;
+;; When nothing can type the present branch the marker becomes exactly what
+;; the desugar used to write (0, or `(option-none)` for a literal nil), so a
+;; program this change cannot type means what it meant before.
+(defn absence-type
+  "The type of an `if` whose one path is absent and whose other path has type
+  PRESENT. MODE is the marker's: :legacy, :none or :nil (`absence-marker`)."
+  [present mode]
+  (cond
+    (or (nil? present) (absence-kind? present) (= abort-bottom present))
+    (if (or (= :nil mode) (= nil-kind present)) :option-i64
+        (if (or (= :none mode) (= none-kind present)) [:option :i64] :i64))
+    (= :i64 present) (if (= :legacy mode) :i64 [:option :i64])
+    (= :bool present) :bool
+    (or (option-vector-type? present) (= :option-i64 present)) present
+    :else [:option present]))
+
+(defn lenient-branch-join
+  "Inside the present branch of an absence, `(if c v (recur ...))` joins a
+  value of type T with the loop's [:option T] answer: the value is the
+  present answer, wrapped when the marker is resolved. Nil when the two do
+  not meet that way."
+  [a b]
+  (cond
+    (and (option-vector-type? b) (= a (second b))) b
+    (and (option-vector-type? a) (= b (second a))) a
+    :else nil))
+
+(defn local-state-cell-parts
+  "`[cell-id source-name]` for a cell binding symbol, else nil."
+  [value]
+  (when (simple-symbol? value)
+    (let [text (name value)]
+      (when (str/starts-with? text "__kotoba_cell_")
+        (let [m (re-matches #"(\d+)_(\d+)_(.+)" (subs text (count "__kotoba_cell_")))]
+          (when m [(nth m 1) (nth m 3)]))))))
+
+(defn local-state-type-text [type]
+  (if (keyword? type) (name type) (pr-str type)))
+
+(defn local-state-check-cell-type!
+  "Tie every rebinding of one cell to the type its `(atom init)` gave it.
+
+  The cell's identity survives desugaring in the binding NAME, so this runs
+  where let bindings are typed rather than in the elaboration, which has no
+  types yet. The recorded type rides in `locals` under a key no source symbol
+  can spell, so it is threaded exactly as far as the bindings are."
+  [name type locals form]
+  (if-let [[id cell-name] (local-state-cell-parts name)]
+    (let [key (symbol (str "__kotoba_cellty_" id))
+          known (get locals key)]
+      (when (and known (not (same-expression-type? known type)))
+        (reject! (str "atom `" cell-name "` is " (local-state-type-text known)
+                      "; this rebinding is " (local-state-type-text type)
+                      " (atom slice 1 requires one type per cell)")
+                 form :kotoba.error/local-state-cell-type))
+      (assoc locals key (or known type)))
+    locals))
+
+(defn nominal-type-identity [type]
+  (cond
+    (schema-ref-type? type) (second type)
+    (or (record-type? type) (variant-type? type)) (second type)
+    :else nil))
+
+(defn same-expression-type?
+  "Exact structural equality remains the default. A closed-schema reference
+  and its fully declared nominal descriptor are interchangeable only by the
+  same qualified identity; analyze verifies every inline descriptor carrying
+  a declared identity against the namespace's authoritative schema first."
+  [actual expected]
+  (or (= actual expected)
+      (and (or (schema-ref-type? actual) (schema-ref-type? expected))
+           (= (nominal-type-identity actual)
+              (nominal-type-identity expected))
+           (some? (nominal-type-identity actual)))))
+
+(defn require-expression-type! [actual expected form]
+  ;; Bottom is only ever the type of a `throw`, and a throw whose value is
+  ;; REQUIRED to be something is a throw in a position slice 1 does not
+  ;; admit (an operand, a test, a loop init). Say that, rather than
+  ;; "expected i64, got bottom".
+  (when (= actual abort-bottom)
+    (reject! (str "abort slice 1 admits throw and calls to aborting functions "
+                  "only in tail position or as a let binding value; the throw is in neither")
+             form :kotoba.error/abort-position))
+  ;; The legacy pair-map against a canonical typed map. This is a DECISION,
+  ;; not a defect, and the generic sentence below reads like a defect.
+  ;; ADR 0012 decision 1: a keyword-keyed literal keeps the legacy untagged
+  ;; pair-map byte for byte, because that is the representation `map-get`,
+  ;; `map-assoc` and every `match` map pattern are written against; `:i64` and
+  ;; `:string` literals are the ones that were RETYPED to `typed-map-new`.
+  ;; `{}` is legacy for the same reason -- it has no key type of its own.
+  ;;
+  ;; So `(let [m {:a 1}] (typed-map-count [:map :keyword :i64] m))` is refused
+  ;; correctly and `(let [m {1 10}] (typed-map-count [:map :i64 :i64] m))` is
+  ;; admitted correctly, and until now the two answers looked like the same
+  ;; kind of fact about the same kind of program. Name the decision instead.
+  (when (and (= :map actual) (canonical-typed-map-type? expected))
+    (reject! (str "this value is the legacy pair-map, whose type is `map` and not "
+                  (pr-str expected)
+                  ". A map literal keeps the legacy representation when its keys are "
+                  "keywords and when it is empty; only :i64 and :string literals are "
+                  "retyped. Read and write it through get / assoc / contains? / dissoc, "
+                  "or build the typed map with (typed-map-new " (pr-str expected) " ...)")
+             form :kotoba.error/subset-reject
+             {:kotoba.error/expected expected :kotoba.error/actual actual}))
+  (when-not (same-expression-type? actual expected)
+    (let [type-text #(if (keyword? %) (name %) (pr-str %))]
+      ;; The types travel as DATA as well as prose. `infer-absent-parameter-types`
+      ;; reads them from here rather than parsing the message, so refining a
+      ;; parameter cannot drift from what the checker actually requires -- there
+      ;; is no second table of operand types to keep in step, because there is
+      ;; no second table.
+      (reject! (str "expression type mismatch: expected " (type-text expected)
+                    ", got " (type-text actual))
+               form :kotoba.error/subset-reject
+               {:kotoba.error/expected expected :kotoba.error/actual actual}))))
+
+(defn closure-literal-form?
+  "The shape a lifted `fn` lowers to, `(pair <lambda-id> <captures>)`. Only
+  the shape: `infer-closure-refinements`, which knows the module's lambda
+  ids, refuses a `[:fn ...]` field given anything that is not a closure."
+  [form]
+  (and (seq? form) (= 'pair (first form)) (= 3 (count form))
+       (kotoba-integer? (second form))))
+
+(defn require-field-value-type!
+  "A record field's value against the field's declared type. A `[:fn ...]`
+  field takes a fn literal, whose word is the i64 closure handle (ADR 0353
+  floor :function-values)."
+  [actual expected item form]
+  (when-not (and (callable-type? expected) (= :i64 actual) (closure-literal-form? item))
+    (require-expression-type! actual expected form)))
+
+(def ^:dynamic *numeric-resolution-final*
+  "True only inside `check-value-types!`. Before that pass, a plain numeric
+  operator on float operands TYPES as the float (that is what lets an
+  unannotated parameter be refined to `:f64` from `(+ p 1.5)`, and a result be
+  inferred), and `rewrite-record-projection` then rewrites it to the typed
+  operation. At the final check the rewrite has already run, so a plain
+  operator that still has float operands is one the rewrite could not see the
+  types of in time; typing it as f64 there would let KIR execute i64 `+` on a
+  double. Fail closed instead."
+  false)
+
+(defn numeric-conversion-spelling [from to]
+  (str/join " or " (map #(str "(" % " x)") (get explicit-numeric-conversions [from to]))))
+
+(defn mixed-numeric-message [op dominant other]
+  (str op " operands must share one numeric type; got " (name dominant) " and "
+       (name other) " -- there is no implicit conversion: write "
+       (numeric-conversion-spelling other dominant) " to convert the "
+       (name other) " into " (name dominant) ", or "
+       (numeric-conversion-spelling dominant other) " to convert the "
+       (name dominant) " into " (name other)))
+
+(defn numeric-operand-type!
+  "The one numeric type every operand of the plain operator OP shares.
+
+  No float operand: the i64 reading, exactly as before this resolution
+  existed. Otherwise the FIRST float operand type is the dominant one and every
+  other operand must already be that type; a numeric operand of another type
+  is rejected with the message that names both types and the explicit
+  conversions, carrying `:kotoba.error/expected`/`:actual` so
+  `infer-absent-parameter-types` can refine a provisional-i64 parameter to the
+  float its sibling operand demands."
+  [op args types]
+  (let [float-type (first-truthy #{:f64 :f32} types)]
+    (if (nil? float-type)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+      (do (doseq [[arg type] (map vector args types)]
+            (when-not (= type float-type)
+              (if (contains? #{:i64 :f32 :f64} type)
+                (reject! (mixed-numeric-message op float-type type) arg
+                         :kotoba.error/numeric-type-mismatch
+                         {:kotoba.error/expected float-type
+                          :kotoba.error/actual type})
+                (require-expression-type! type float-type arg))))
+          (when *numeric-resolution-final*
+            (reject! (str op " on " (name float-type) " operands was not resolved to "
+                          (get-in float-arithmetic-resolution [float-type op])
+                          " before the final type check -- the operand types were"
+                          " not statically known when the type-directed rewrite"
+                          " ran; bind the operands with let, or write the typed"
+                          " operation directly")
+                     (cons op args) :kotoba.error/numeric-resolution-unresolved))
+          float-type))))
+
+(defn require-set-item-type!
+  "Require `item` to be the item type of set type `type`, and say which set
+  when it is not.
+
+  A `#{...}` literal always lowers to `[:set :keyword]` -- the desugar
+  hard-codes the descriptor -- so `#{:a (+ 1 1)}`, `#{1 2}` and
+  `(conj #{:a} 2)` were all refused `expression type mismatch: expected
+  keyword, got i64`, which names neither the set nor the rule. That message was
+  the whole report on the language authority's own set conformance fixture,
+  which is written with a heterogeneous literal and therefore cannot be
+  admitted at all; a reader had no way to learn that from it.
+
+  `:kotoba.error/expected`/`:actual` are carried through unchanged and with the
+  same `form`: `infer-absent-parameter-types` reads a refused operand's
+  required type out of this ex-data rather than out of the prose, so narrowing
+  the prose must not narrow the data."
+  [type item locals signatures]
+  (let [expected (second type)
+        actual (infer-expression-type item locals signatures)]
+    (if (or (= actual abort-bottom) (same-expression-type? actual expected))
+      (require-expression-type! actual expected item)
+      (reject! (str "set item type mismatch: this set is " (pr-str type)
+                    ", so every item must be " (pr-str expected)
+                    "; this one is " (pr-str actual)
+                    ". A `#{...}` literal is [:set :keyword], [:set :string] or "
+                    "[:set :i64] by its items; one mixing item types is outside "
+                    "the bounded profile. Write "
+                    "(typed-set-new [:set item-type] item ...) for any other "
+                    "item type.")
+               item :kotoba.error/subset-reject
+               {:kotoba.error/expected expected
+                :kotoba.error/actual actual}))))
+
+;; --- row operations (ADR 0353 floor :row-operations) ----------------------
+;;
+;; assoc / dissoc / merge / select-keys on a RECORD are row operations: the
+;; result is a record type read off the receiver's fields and the operation,
+;; never the keyword->i64 pair map. A field assoc'ed that the record has keeps
+;; the record's type, and the value must be that field's type (no coercion);
+;; a field it does not have EXTENDS the record; dissoc and select-keys SHRINK
+;; it and name only fields it has; merge assoc's every field of each right
+;; operand (a record, or a keyword-keyed map literal), and a field both sides
+;; have is one type. A result whose fields differ from the receiver's is the
+;; anonymous closed record a map literal with those fields lowers to
+;; (`map-literal-record-type`, fields in key order), so `(assoc {:a "x"} :b 1)`
+;; and `{:a "x" :b 1}` are one type. `rewrite-record-projection` elaborates
+;; each to record-new / record-get / record-assoc: nothing new reaches KIR or
+;; a backend.
+
+#?(:kotoba nil :default (def row-operation-heads tables/row-operation-heads))
+
+(def ^:dynamic *row-op-schemas*
+  "The module's schemas for the whole analysis: `*schemas*` is bound only
+  around some passes, and a row operation is typed and elaborated in others."
+  nil)
+
+(defn row-op-record
+  "The record descriptor TYPE is (a declared `[:ref ..]` resolved), or nil."
+  [type]
+  (let [record (if (and (schema-ref-type? type) (not (get *schemas* (second type))))
+                 (get (some-> *row-op-schemas* deref) (second type) type)
+                 (resolve-ref-type type))]
+    (when (record-type? record) record)))
+
+(defn row-op-name [type]
+  (second (row-op-record type)))
+
+(defn row-op-field-type [fields field]
+  (first-truthy (fn [[k t]] (when (= k field) t)) fields))
+
+(defn row-op-key! [op type key form]
+  (when-not (keyword? key)
+    (reject! (str op " on record " (row-op-name type) " needs keyword literal fields: "
+                  "a record's fields are static; " (use-site-text key) " is not a keyword literal")
+             form :kotoba.error/row-operation-shape)))
+
+(defn row-op-field! [op type fields key form]
+  (row-op-key! op type key form)
+  (when-not (row-op-field-type fields key)
+    (reject! (str op " names field " key ", which record " (row-op-name type)
+                  " does not have: a row shrinks only by fields it has")
+             form :kotoba.error/row-field-missing
+             {:kotoba.error/field key :kotoba.error/actual type})))
+
+(defn row-op-assoc-fields
+  "FIELDS with every `[key type form]` of ENTRIES assoc'ed: an existing field
+  keeps its type and the value must be it; a new one is appended."
+  [fields entries]
+  (reduce (fn [fields [key type form]]
+            (if-let [existing (row-op-field-type fields key)]
+              (do (require-expression-type! type existing form) fields)
+              (conj fields [key type])))
+          fields entries))
+
+(defn row-op-literal-entries
+  "`[[key value] ...]` of a keyword-keyed map literal as desugared
+  (`(map-new :k v ...)`), or nil."
+  [form]
+  (when (and (seq? form) (= 'map-new (first form))
+             (every? keyword? (take-nth 2 (rest form))))
+    (mapv vec (partition 2 (rest form)))))
+
+(defn row-op-fields
+  "The fields of the record OP makes from ARGS, whose types are TYPES; the
+  first is a record."
+  [op args types locals signatures form]
+  (let [receiver-type (first types)
+        fields (vec (nth (row-op-record receiver-type) 2))]
+    (case op
+      map-assoc
+      (row-op-assoc-fields
+       fields
+       (map (fn [[key value] [_ value-type]]
+              (row-op-key! "assoc" receiver-type key form)
+              [key value-type value])
+            (partition 2 (rest args)) (partition 2 (rest types))))
+      (dissoc select-keys)
+      (let [keys (rest args)]
+        (doseq [key keys] (row-op-field! op receiver-type fields key form))
+        (let [kept (if (= op 'dissoc)
+                     (remove (fn [[k _]] (first-truthy #{k} keys)) fields)
+                     (filter (fn [[k _]] (first-truthy #{k} keys)) fields))]
+          (when (empty? kept)
+            (reject! (str op " leaves record " (row-op-name receiver-type)
+                          " with no field, and a record has at least one")
+                     form :kotoba.error/row-operation-shape))
+          (vec kept)))
+      merge
+      (reduce (fn [fields [arg type]]
+                (if-let [entries (row-op-literal-entries arg)]
+                  (row-op-assoc-fields
+                   fields (map (fn [[k v]] [k (infer-expression-type v locals signatures) v])
+                               entries))
+                  (if-let [record (row-op-record type)]
+                    (row-op-assoc-fields fields (map (fn [[k t]] [k t arg]) (nth record 2)))
+                    (reject! (str "merge onto record " (row-op-name receiver-type)
+                                  " takes records and keyword-keyed map literals; "
+                                  (use-site-text arg) " is "
+                                  (if (keyword? type) (name type) (pr-str type)))
+                             form :kotoba.error/row-operation-shape
+                             {:kotoba.error/actual type}))))
+              fields (map vector (rest args) (rest types))))))
+
+(defn row-op-result-type
+  "RECEIVER-TYPE itself when FIELDS are its fields, else the anonymous closed
+  record of FIELDS."
+  [receiver-type fields]
+  (if (= (set (nth (row-op-record receiver-type) 2)) (set fields))
+    receiver-type
+    (map-literal-record-type (vec (sort-by first (map-literal-key-order :keyword) fields)))))
+
+(defn row-op-not-record! [op receiver type form]
+  (reject! (str op " is a row operation on a record; " (use-site-text receiver) " is "
+                (if (keyword? type) (name type) (pr-str type)))
+           form :kotoba.error/row-operation-receiver
+           {:kotoba.error/actual type}))
+
+(defn infer-call-type
+  "`infer-call-type-impl`, with the call named on any refusal it raises about
+  one of its own arguments: a rejection whose `:form` is one of ARGS and that
+  no inner call has already claimed gets `:kotoba.error/use-site (op ...)`.
+  The innermost call wins, so the site is the operation that actually
+  required the type. `infer-absent-parameter-types` reads it to name both
+  disagreeing uses of a parameter; nothing else changes -- same message,
+  same code, same span."
+  [op args locals signatures]
+  (try (infer-call-type-impl op args locals signatures)
+       (catch #?(:clj Throwable :cljs :default) error
+         (let [data (ex-data error)]
+           (if (and (:phase data)
+                    (not (contains? data :kotoba.error/use-site))
+                    (first-truthy #(= % (:form data)) args))
+             (throw (ex-info (ex-message error)
+                             (assoc data :kotoba.error/use-site (cons op args))))
+             (throw error))))))
+
+#?(:kotoba nil :default (def library-predicate-heads tables/library-predicate-heads))
+
+(defn library-predicate-static-answer
+  "What `(op x)` is for a value of the static, non-document TYPE: :operand
+  (the bool itself), :negated, true or false."
+  [op type]
+  (let [map-type? (or (record-type? type) (canonical-typed-map-type? type) (= :map type))
+        vector-type? (or (heterogeneous-vector-type? type)
+                         (contains? #{:vector-i64 :vector-f64} type))
+        set-type? (typed-set-type? type)
+        list-type? (canonical-list-type? type)]
+    (case op
+      true? (if (= :bool type) :operand false)
+      false? (if (= :bool type) :negated false)
+      boolean? (= :bool type)
+      integer? (= :i64 type)
+      string? (= :string type)
+      keyword? (= :keyword type)
+      symbol? (= :symbol type)
+      map? map-type?
+      vector? vector-type?
+      set? set-type?
+      (list? seq?) list-type?
+      coll? (or map-type? vector-type? set-type? list-type?))))
+
+#?(:kotoba nil :default (def document-of-constructors tables/document-of-constructors))
+
+(defn document-of-constructor!
+  "The constructor that makes a value of TYPE a document, `:identity` for a
+  document, or a refusal naming the type."
+  [type operand]
+  (cond (= :document type) :identity
+        (contains? document-of-constructors type) (get document-of-constructors type)
+        :else (reject! (str "ex-info data value " (pr-str operand) " has type " (pr-str type)
+                            ", which has no document form here: a data map value must be an "
+                            "i64, string, keyword, bool, f64 or document")
+                       operand :kotoba.error/library-head-document)))
+
+(defn library-predicate-answer!
+  "What `(op x)` is for an operand of TYPE: :operand, :negated, true, false,
+  :document (ask its kind) or :present (ask an option's presence)."
+  [op type operand]
+  (cond
+    (= :document type) :document
+    (and (schema-ref-type? type) (contains? '#{map? coll?} op))
+    (reject! (str op " on " (pr-str type) " is not decided here: a schema reference "
+                  "names a record or a variant, and only a record is a map; project "
+                  "the value through its declared type")
+             (list op operand) :kotoba.error/library-head-document)
+    (or (option-vector-type? type) (= :option-i64 type))
+    (let [payload (if (= :option-i64 type) :i64 (second type))]
+      (if (or (= :document payload) (= :bool payload))
+        (reject! (str op " on " (pr-str type) " depends on the value, not the type: "
+                      "bind the payload first (when-let / if-let) and ask the payload")
+                 (list op operand) :kotoba.error/library-head-document)
+        (if (true? (library-predicate-static-answer op payload)) :present false)))
+    :else (library-predicate-static-answer op type)))
+
+(defn infer-call-type-impl [op args locals signatures]
+  (let [types (mapv #(infer-expression-type % locals signatures) args)]
+    (cond
+      (contains? arithmetic op)
+      (if (contains? '#{+ - *} op)
+        (numeric-operand-type! op args types)
+        (do (doseq [[arg type] (map vector args types)]
+              (require-expression-type! type :i64 arg))
+            :i64))
+
+      (contains? float-division-heads op)
+      (let [type (numeric-operand-type! op args types)]
+        (when (= :i64 type)
+          (reject! "/ has no i64 reading -- integer division is quot; / resolves to f64-div or f32-div by operand type"
+                   (cons op args) :kotoba.error/numeric-type-mismatch))
+        type)
+
+      (contains? i64-operations op)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+
+      (contains? i32-operations op)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+
+      (= op '=)
+      (if (first-truthy #{:f64 :f32} types)
+        ;; Float equality resolves to `f64-eq`/`f32-eq` (IEEE: NaN is never
+        ;; equal); a float next to an i64 or the other float width is the
+        ;; mixed-type rejection, not "outside the safe value profile".
+        (do (numeric-operand-type! op args types) :bool)
+        (do (when-not (= (first types) (second types))
+              (reject! "equality operands must have the same value type" args))
+            ;; `:string` joined 2026-09-25 (superproject adr-2609242330): two
+            ;; `:string` operands are `string=?` -- byte equality, the head
+            ;; that already lowers everywhere -- and `rewrite-record-projection`
+            ;; writes it so before any backend sees `=`.
+            (when-not (or (contains? #{:i64 :keyword :bool :option-i64 :result-i64 :vector-i64 :string} (first types))
+                          (parametric-result-type? (first types)))
+              (reject! (str "equality type is outside the safe value profile"
+                            (condp = (first types)
+                              :string " -- use string=? for string equality"
+                              ""))
+                       args))
+            :bool))
+
+      (= op 'bool-not)
+      (do (require-expression-type! (first types) :bool (first args)) :bool)
+
+      (= op 'option-some)
+      (do (require-expression-type! (first types) :i64 (first args)) :option-i64)
+
+      (= op 'option-none) :option-i64
+
+      (= op 'option-some?)
+      (do (require-expression-type! (first types) :option-i64 (first args)) :bool)
+
+      (= op 'option-value)
+      (do (require-expression-type! (first types) :option-i64 (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          :i64)
+
+      (contains? '#{result-ok result-err} op)
+      (do (require-expression-type! (first types) :i64 (first args)) :result-i64)
+
+      (= op 'result-ok?)
+      (do (require-expression-type! (first types) :result-i64 (first args)) :bool)
+
+      (contains? '#{result-value result-error} op)
+      (do (require-expression-type! (first types) :result-i64 (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          :i64)
+
+      ;; `(vector-alloc n)` -- n zeros.
+      ;;
+      ;; `vector-new` is variadic, so a million-slot struct of arrays
+      ;; would need a million arguments, and the literal limit refuses
+      ;; that long before the item limit does. Correct -- nobody writes a
+      ;; book as a literal -- and it left no way to allocate one at all.
+      ;; This is the shape `torihiki.slab/alloc` has.
+      (= op 'vector-alloc)
+      (do (require-expression-type! (nth types 0) :i64 (nth args 0))
+          :vector-i64)
+
+      (= op 'vector-new)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :vector-i64)
+
+      (= op 'vector-count)
+      (do
+        (when-not (or (= :vector-i64 (first types))
+                      (canonical-list-type? (first types)))
+          (require-expression-type! (first types) :vector-i64 (first args)))
+        :i64)
+
+      (= op 'vector-get)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2)) :i64)
+
+      (= op 'vector-at)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :i64)
+
+      (= op 'vector-drop)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
+
+      ;; `vector-drop`'s mirror, and typed identically: both take a bounded
+      ;; vector and a count and answer a bounded vector. Which END they keep
+      ;; is not a type-level difference, which is why one arm is a copy of the
+      ;; other and not a variation on it.
+      (= op 'vector-take)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
+
+      ;; `vector-assoc!` types identically, because it IS the same
+      ;; operation: the bang only tells a backend it may lower the update
+      ;; to a store, and `check-affine-writes!` is what earns that. A
+      ;; different type here would make the bang a different operation,
+      ;; which is exactly what the KIR interpreter refuses to let it
+      ;; become.
+      (contains? '#{vector-assoc vector-assoc!} op)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2)) :vector-i64)
+
+      (= op 'vector-conj)
+      (do (require-expression-type! (nth types 0) :vector-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-i64)
+
+      (= op 'vector-f64-new)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :f64 arg))
+          :vector-f64)
+
+      (= op 'vector-f64-count)
+      (do (require-expression-type! (first types) :vector-f64 (first args)) :i64)
+
+      (= op 'vector-f64-get)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :f64 (nth args 2)) :f64)
+
+      (= op 'vector-f64-at)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :f64)
+
+      (= op 'vector-f64-drop)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
+
+      (= op 'vector-f64-take)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :vector-f64)
+
+      (= op 'vector-f64-assoc)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :f64 (nth args 2)) :vector-f64)
+
+      (= op 'vector-f64-conj)
+      (do (require-expression-type! (nth types 0) :vector-f64 (nth args 0))
+          (require-expression-type! (nth types 1) :f64 (nth args 1)) :vector-f64)
+
+      (= op 'string-index-new) :string-index
+      (= op 'string-index-count)
+      (do (require-expression-type! (first types) :string-index (first args)) :i64)
+      (= op 'string-index-contains)
+      (do (require-expression-type! (nth types 0) :string-index (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1)) :bool)
+      (= op 'string-index-get)
+      (do (require-expression-type! (nth types 0) :string-index (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1)) [:option :i64])
+      (= op 'string-index-assoc)
+      (do (require-expression-type! (nth types 0) :string-index (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2)) :string-index)
+      (= op 'disjoint-set-i64-new)
+      (do (require-expression-type! (first types) :i64 (first args)) :disjoint-set-i64)
+      (= op 'disjoint-set-i64-count)
+      (do (require-expression-type! (first types) :disjoint-set-i64 (first args)) :i64)
+      (= op 'disjoint-set-i64-union)
+      (do (require-expression-type! (nth types 0) :disjoint-set-i64 (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          [:option :disjoint-set-i64])
+
+      (= op 'document-null) :document
+      (= op 'document-bool)
+      (do (require-expression-type! (first types) :bool (first args)) :document)
+      (= op 'document-i64)
+      (do (require-expression-type! (first types) :i64 (first args)) :document)
+      (= op 'document-f64)
+      (do (require-expression-type! (first types) :f64 (first args)) :document)
+      (= op 'document-string)
+      (do (require-expression-type! (first types) :string (first args)) :document)
+      (= op 'document-keyword)
+      (do (require-expression-type! (first types) :keyword (first args)) :document)
+      (= op 'document-symbol)
+      (do (require-expression-type! (first types) :symbol (first args)) :document)
+      (= op 'document-vector)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :document arg)) :document)
+      (= op 'document-list)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :document arg)) :document)
+      (= op 'document-set)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :document arg)) :document)
+      (= op 'document-map)
+      (do (doseq [[[key-form item-form] [key-type item-type]]
+                  (map vector (partition 2 args) (partition 2 types))]
+            (when-not (contains? #{:keyword :document} key-type)
+              (reject! "document-map key must be keyword or document" key-form))
+            (require-expression-type! item-type :document item-form)) :document)
+      (= op 'document-count)
+      (do (require-expression-type! (first types) :document (first args)) :i64)
+      (= op 'document-kind)
+      (do (require-expression-type! (first types) :document (first args)) :keyword)
+      (= op 'document-sha256)
+      (do (require-expression-type! (first types) :document (first args)) :string)
+      (= op 'document-print)
+      (do (require-expression-type! (first types) :document (first args)) :string)
+      (= op 'document-read)
+      (do (require-expression-type! (first types) :string (first args)) :document)
+      (= op 'document-edn-print)
+      (do (require-expression-type! (first types) :document (first args)) :string)
+      (= op 'document-edn-read)
+      (do (require-expression-type! (first types) :string (first args)) :document)
+      (= op 'document-vector-at)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) [:option :document])
+      (= op 'document-list-at)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) [:option :document])
+      (= op 'document-map-entry-at)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) [:option :document])
+      (= op 'document-vector-assoc)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1))
+          (require-expression-type! (nth types 2) :document (nth args 2)) :document)
+      (= op 'document-vector-conj)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :document (nth args 1)) :document)
+      (= op 'document-vector-drop)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :document)
+      (= op 'document-vector-remove)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :i64 (nth args 1)) :document)
+      (= op 'document-vector-sort)
+      (do (require-expression-type! (nth types 0) :document (nth args 0)) :document)
+      (= op 'document-contains)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (when-not (contains? #{:keyword :document} (nth types 1))
+            (reject! "document map key must be keyword or document" (nth args 1))) :bool)
+      (= op 'document-equal?)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :document (nth args 1)) :bool)
+      (= op 'document-set-contains?)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (require-expression-type! (nth types 1) :document (nth args 1)) :bool)
+      (= op 'document-get)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (when-not (contains? #{:keyword :document} (nth types 1))
+            (reject! "document map key must be keyword or document" (nth args 1))) [:option :document])
+      (= op 'document-assoc)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (when-not (contains? #{:keyword :document} (nth types 1))
+            (reject! "document map key must be keyword or document" (nth args 1)))
+          (require-expression-type! (nth types 2) :document (nth args 2)) :document)
+      (= op 'document-dissoc)
+      (do (require-expression-type! (nth types 0) :document (nth args 0))
+          (when-not (contains? #{:keyword :document} (nth types 1))
+            (reject! "document map key must be keyword or document" (nth args 1))) :document)
+      (= op 'document-merge)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :document arg)) :document)
+      (= op 'document-string-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :string])
+      (= op 'document-keyword-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :keyword])
+      (= op 'document-symbol-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :symbol])
+      (= op 'document-bool-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :bool])
+      (= op 'document-i64-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :i64])
+      (= op 'document-f64-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :f64])
+
+      (contains? (disj comparisons '=) op)
+      (do (numeric-operand-type! op args types) :bool)
+
+      (contains? heap-operations op)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+
+      (contains? kgraph-operations op)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+
+      (or (contains? kernel-memory-operations op)
+          (contains? kernel-privileged-operations op))
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :i64 arg))
+          :i64)
+
+      ;; boot-lit: the argument is a `:string` and the result is an address or
+      ;; a count, which are both i64. This clause has to sit BEFORE the
+      ;; privileged one would have matched -- it does, because these heads are
+      ;; not in that map -- and it requires `:string` rather than `:i64`, which
+      ;; is the whole reason they are a separate family.
+      (contains? rodata-literal-operations op)
+      (do (require-expression-type! (first types) :string (first args))
+          :i64)
+
+      (= op 'cap-call)
+      (do (require-expression-type! (second types) :i64 (second args)) :i64)
+
+      (= op 'string-byte-length)
+      (do (require-expression-type! (first types) :string (first args)) :i64)
+
+      ;; Product Value ABI v1: alias of string-byte-length (UTF-8 byte count;
+      ;; same unit as string-substring indices). Prefer this name in pure-product.
+      (= op 'string-length)
+      (do (require-expression-type! (first types) :string (first args)) :i64)
+
+      (= op 'string-from-i64)
+      (do (require-expression-type! (first types) :i64 (first args)) :string)
+
+      ;; T4.2: desugars away; defensive typing if seen pre-desugar.
+      (= op 'string-join)
+      (do (when (zero? (count args))
+            (reject! "string-join requires a separator string" args))
+          (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :string)
+
+      (= op 'bytes-task-byte-count)
+      (do (require-expression-type! (first types) [:task [:stream :bytes]] (first args))
+          :i64)
+
+      (= op 'task-ready?)
+      (do (require-expression-type! (first types) [:task [:stream :bytes]] (first args))
+          :i64)
+
+      (= op 'object-cas-won)
+      (let [descriptor (first types)
+            fields (when (and (vector? descriptor)
+                              (= :record (first descriptor)))
+                     (nth descriptor 2 nil))]
+        (when-not (and (seq fields)
+                       (= :bool (second (first fields))))
+          (reject! "object-cas-won requires a record whose first field is bool"
+                   (first args)))
+        :i64)
+
+      (contains? '#{bytes-response-byte-count log-read-byte-count} op)
+      (let [descriptor (first types)
+            fields (when (and (vector? descriptor) (= :record (first descriptor)))
+                     (nth descriptor 2 nil))
+            field (if (= op 'bytes-response-byte-count) (first fields) (second fields))]
+        (when-not (= :string (second field))
+          (reject! (str op " requires a record bytes field") (first args)))
+        :i64)
+
+      (= op 'bool-result)
+      (do (require-expression-type! (first types) :bool (first args)) :i64)
+
+      (= op 'http-response-status)
+      (let [descriptor (first types)
+            fields (when (and (vector? descriptor) (= :record (first descriptor)))
+                     (nth descriptor 2 nil))]
+        (when-not (= :i64 (second (first fields)))
+          (reject! "http-response-status requires a record status field" (first args)))
+        :i64)
+
+      ;; `:bool`, not `:i64`. Profile 5 (compiler ADR 0191) moved comparisons
+      ;; and predicates to `:bool` so `and`/`or`/`not` compose and a predicate
+      ;; can be written the way Clojure writes one. It carried
+      ;; `= < > <= >= not not= zero? pos? neg? empty? some?` and left the two
+      ;; string predicates behind — in this same file, where the later
+      ;; `string-index-contains` returns `:bool`. So one file typed two
+      ;; spellings of the same question differently, a `:bool`-declared
+      ;; function could not return a string predicate, and
+      ;; `(and (string=? a b) (string=? a c))` was rejected.
+      ;;
+      ;; The cost of the omission was paid at every call site: authors wrapped
+      ;; predicates in `(if p true false)` — ADR 0191's own mechanical
+      ;; migration, run backwards.
+      (= op 'string=?)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :bool)
+
+      (= op 'string-concat)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :string)
+
+      (= op 'string-substring)
+      (do (require-expression-type! (first types) :string (first args))
+          (doseq [[arg type] (map vector (rest args) (rest types))]
+            (require-expression-type! type :i64 arg))
+          :string)
+
+      (= op 'string-replace-all)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :string)
+
+      (= op 'string-contains?)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :bool)
+
+      (= op 'string-index-of)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          :i64)
+
+      (= op 'string-split-count)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :i64)
+
+      ;; ABI v7 text heads.
+      (= op 'string-compare)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          :i64)
+
+      (= op 'string-fold-ascii)
+      (do (require-expression-type! (first types) :string (first args))
+          :string)
+
+      (contains? '#{string-find-blank string-skip-blank} op)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          :i64)
+
+      ;; ABI v8 line heads.
+      (= op 'string-index-of-from)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          :i64)
+
+      (= op 'string-compare-lines)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          (require-expression-type! (nth types 2) :string (nth args 2))
+          (require-expression-type! (nth types 3) :i64 (nth args 3))
+          :i64)
+
+      ;; ABI v10 range heads.
+      (= op 'string-find-byte)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          :i64)
+
+      (= op 'string-append-range)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :string (second args))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          (require-expression-type! (nth types 3) :i64 (nth args 3))
+          :string)
+
+      ;; The region's whole safety argument is this one clause: a scalar
+      ;; cannot carry a handle out of the region, and every mutable structure
+      ;; the body could reach holds numbers. So the body's type is the
+      ;; scope's type, and only a scalar is admitted -- by name, so that a
+      ;; string body is refused for the reason it is dangerous rather than
+      ;; falling out of a type mismatch somewhere downstream.
+      (= op 'arena-scope)
+      (let [type (first types)]
+        (when-not (contains? #{:i64 :bool :f64} type)
+          (reject! (str "arena-scope body must be :i64, :bool or :f64, got "
+                        (pr-str type)
+                        ": a handle would escape the region it is released with")
+                   (cons op args) :kotoba.error/arena-scope-body-not-scalar))
+        type)
+
+      (= op 'string-code-point-at)
+      (do (require-expression-type! (first types) :string (first args))
+          (require-expression-type! (second types) :i64 (second args))
+          :i64)
+
+      (= op 'string-fold-case)
+      (do (require-expression-type! (first types) :string (first args)) :string)
+
+      (= op 'string-upper)
+      (do (require-expression-type! (first types) :string (first args)) :string)
+
+      (= op 'keyword-from-string)
+      (do (require-expression-type! (first types) :string (first args)) :keyword)
+
+      (= op 'keyword-name)
+      (do (require-expression-type! (first types) :keyword (first args)) :string)
+
+      (= op 'symbol)
+      (do (require-expression-type! (first types) :string (first args)) :symbol)
+
+      (= op 'xml-path-count)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :i64)
+
+      (= op 'xml-name-count)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :string arg))
+          :i64)
+
+      (= op 'xml-name-text)
+      (do (require-expression-type! (nth types 0) :string (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          [:option :string])
+
+      (= op 'xml-path-text)
+      (do (require-expression-type! (nth types 0) :string (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          [:option :string])
+
+      (= op 'xml-path-attr)
+      (do (require-expression-type! (nth types 0) :string (nth args 0))
+          (require-expression-type! (nth types 1) :string (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          (require-expression-type! (nth types 3) :string (nth args 3))
+          [:option :string])
+
+      (= op 'decimal-f64-parse)
+      (do (require-expression-type! (first types) :string (first args))
+          [:option :f64])
+
+      (= op 'decimal-f64x3-parse)
+      (do (require-expression-type! (first types) :string (first args))
+          [:option [:vector [:f64 :f64 :f64]]])
+
+      (= op 'f64-to-bits)
+      (do (require-expression-type! (first types) :f64 (first args)) :i64)
+
+      (= op 'f64-from-bits)
+      (do (require-expression-type! (first types) :i64 (first args)) :f64)
+
+      (contains? '#{i64-to-f64-checked i64-to-f64-rounded} op)
+      (do (require-expression-type! (first types) :i64 (first args)) :f64)
+
+      (contains? '#{f64-to-i64-checked f64-to-i64-truncating} op)
+      (do (require-expression-type! (first types) :f64 (first args)) :i64)
+
+      (contains? '#{f64-add f64-sub f64-mul f64-div f64-min f64-max} op)
+      (do (doseq [[type arg] (map vector types args)]
+            (require-expression-type! type :f64 arg))
+          :f64)
+
+      (contains? '#{f64-neg f64-abs f64-sqrt f64-sin-quarter-turn f64-cos-quarter-turn
+                    f64-sin-bounded f64-cos-bounded f64-exp-near-zero f64-log-near-one} op)
+      (do (require-expression-type! (first types) :f64 (first args)) :f64)
+
+      (= op 'f64-atan2-bounded)
+      (do (doseq [[type arg] (map vector types args)]
+            (require-expression-type! type :f64 arg))
+          :f64)
+
+      (contains? '#{f64-exp-bounded f64-log-bounded} op)
+      (do (require-expression-type! (first types) :f64 (first args)) :f64)
+
+      (contains? '#{f64-eq f64-lt f64-le f64-gt f64-ge f64-unordered} op)
+      (do (doseq [[type arg] (map vector types args)]
+            (require-expression-type! type :f64 arg))
+          :bool)
+
+      (= op 'f32-to-bits)
+      (do (require-expression-type! (first types) :f32 (first args)) :i64)
+
+      (= op 'f32-from-bits)
+      (do (require-expression-type! (first types) :i64 (first args)) :f32)
+
+      (= op 'f64-to-f32-rounded)
+      (do (require-expression-type! (first types) :f64 (first args)) :f32)
+
+      (= op 'f32-to-f64-exact)
+      (do (require-expression-type! (first types) :f32 (first args)) :f64)
+
+      (contains? '#{i64-to-f32-checked i64-to-f32-rounded} op)
+      (do (require-expression-type! (first types) :i64 (first args)) :f32)
+
+      (contains? '#{f32-to-i64-checked f32-to-i64-truncating} op)
+      (do (require-expression-type! (first types) :f32 (first args)) :i64)
+
+      (contains? '#{f32-add f32-sub f32-mul f32-div f32-min f32-max} op)
+      (do (doseq [[type arg] (map vector types args)]
+            (require-expression-type! type :f32 arg))
+          :f32)
+
+      (contains? '#{f32-neg f32-abs f32-sqrt} op)
+      (do (require-expression-type! (first types) :f32 (first args)) :f32)
+
+      (contains? '#{f32-eq f32-lt f32-le f32-gt f32-ge f32-unordered} op)
+      (do (doseq [[type arg] (map vector types args)]
+            (require-expression-type! type :f32 arg))
+          :bool)
+
+      (= op 'map-new)
+      (do (doseq [[key-form value-form key-type value-type]
+                  (map (fn [[key-form value-form] [key-type value-type]]
+                         [key-form value-form key-type value-type])
+                       (partition 2 args) (partition 2 types))]
+            (require-expression-type! key-type :keyword key-form)
+            (require-expression-type! value-type :i64 value-form))
+          :map)
+
+      (= op 'map-get)
+      (do (require-expression-type! (nth types 0) :map (nth args 0))
+          (require-expression-type! (nth types 1) :keyword (nth args 1))
+          (require-expression-type! (nth types 2) :i64 (nth args 2))
+          :i64)
+
+      ;; ADR 0353 floor :row-operations: on a record receiver these are row
+      ;; operations, typed here because a function's result is inferred
+      ;; before `rewrite-record-projection` elaborates them.
+      (and (contains? row-operation-heads op) (row-op-record (first types)))
+      (row-op-result-type (first types)
+                          (row-op-fields op args types locals signatures (cons op args)))
+
+      (contains? '#{select-keys merge} op)
+      (row-op-not-record! op (first args) (first types) (cons op args))
+
+      ;; `assoc` on a document is a document (the rewrite lowers it to
+      ;; document-assoc); typed here so a loop over the result knows its type
+      (and (= op 'map-assoc) (= :document (first types)))
+      :document
+
+      (= op 'map-assoc)
+      (do (require-expression-type! (first types) :map (first args))
+          (doseq [[key-form value-form key-type value-type]
+                  (map (fn [[key-form value-form] [key-type value-type]]
+                         [key-form value-form key-type value-type])
+                       (partition 2 (rest args)) (partition 2 (rest types)))]
+            (require-expression-type! key-type :keyword key-form)
+            (require-expression-type! value-type :i64 value-form))
+          :map)
+
+      (contains? signatures op)
+      (let [{expected :param-types result :result} (get signatures op)]
+        (if (and *loop-helper-recorder* (contains? *loop-helper-names* op))
+          ;; Resolution pass: this loop-helper's param-types are not yet known.
+          ;; Record the call-site argument types AS its param-types rather than
+          ;; checking against the placeholder signature. The (non-recursive)
+          ;; enclosing call site is inferred before the helper's own body, so
+          ;; the recorded types are the enclosing-scope types of the loop
+          ;; bindings' inits and the captured outer variables.
+          (vswap! *loop-helper-recorder* assoc op (vec types))
+          (doseq [[arg actual wanted] (map vector args types expected)]
+            (require-expression-type! actual wanted arg)))
+        result)
+
+      ;; `conj` onto a bounded vector is that vector (`rewrite-record-projection`
+      ;; writes `vector-conj` / `vector-f64-conj`), and onto a typed set that
+      ;; set. Typed HERE because a loop exit is typed before that rewrite runs:
+      ;; without this arm `(conj v x)` as a loop exit fell to
+      ;; `unknown-operation!`, the exit typing swallowed it, and the helper kept
+      ;; its `:i64` placeholder -- `expected vector-i64, got i64` at the loop
+      ;; (measured 2026-09-25, adr-2609242330 S5).
+      (and (contains? set-operations op) (seq (rest args))
+           (or (and (= op 'conj) (contains? #{:vector-i64 :vector-f64} (first types)))
+               (typed-set-type? (first types))))
+      (first types)
+
+      (= op '__kotoba_document_of)
+      (do (document-of-constructor! (first types) (first args)) :document)
+
+      (contains? library-predicate-heads op)
+      (do (when-not (= 1 (count args))
+            (reject! (str op " requires exactly one operand") (cons op args)
+                     :kotoba.error/library-head-shape))
+          (library-predicate-answer! op (first types) (first args))
+          :bool)
+
+      ;; A friendly capability operation whose result is the same wherever it
+      ;; is written (the app-data reads/writes answer text or bytes by NAME).
+      ;; It is typed here so the abort passes, which run before named-ability
+      ;; elaboration, can see a `try` body that makes one.
+      (contains? named-operation-default-results op)
+      (get named-operation-default-results op)
+
+      :else (unknown-operation! op op signatures))))
+
+(def ^:dynamic *absence-tail*
+  "True while inferring a tail of the present branch of an absence (see
+  `absence-type`): only there does `lenient-branch-join` apply."
+  false)
+
+(defn infer-expression-type [form locals signatures]
+  (try (if (and *absence-tail*
+                (not (and (seq? form) (contains? '#{if let do} (first form)))))
+         ;; Leniency reaches only the tail positions `if` / `let` / `do`
+         ;; thread; every other form is typed as before.
+         (binding [*absence-tail* false] (infer-expression-type-impl form locals signatures))
+         (infer-expression-type-impl form locals signatures))
+       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
+
+(defn record-get-default-type
+  "`(get r :k d)` / `(:k r d)` on a record (ADR 0353 floor :literal-typing).
+  A record is closed, so whether it has :k is known here: a field it lacks
+  answers the default (lowered `(do r d)`), a field it has answers the field
+  and the default must be the field's type -- no coercion. The default of a
+  field that is present is never evaluated, so it must be a literal or a
+  local: anything else is refused by name rather than silently dropped."
+  [descriptor key default form locals signatures]
+  (let [default-type (infer-expression-type default locals signatures)]
+    (if-let [field-type (record-field-type descriptor key)]
+      (do (require-expression-type! default-type field-type default)
+          (when-not (or (symbol? default) (keyword? default) (string? default)
+                        (boolean? default) (kotoba-integer? default)
+                        (value/f64-value? default))
+            (reject! (str "the default of " (pr-str key) " on record " (second descriptor)
+                          " is never evaluated, because the record has that field:"
+                          " write the default as a literal or a local")
+                     form :kotoba.error/record-projection-unresolved))
+          field-type)
+      default-type)))
+
+(defn infer-expression-type-impl [form locals signatures]
+  (cond
+    (kotoba-integer? form) :i64
+    (value/f64-value? form) :f64
+    (string? form) :string
+    (keyword? form) :keyword
+    (boolean? form) :bool
+    (symbol? form) (or (get locals form)
+                       (unbound-symbol! "unbound symbol has no value type"
+                                        form locals signatures))
+    (seq? form)
+    (let [[op & args] form]
+      (case op
+        let (let [bindings (first args) body (let-body args form)]
+              (loop [pairs (partition 2 bindings) current locals]
+                (if-let [[name value] (first pairs)]
+                  (let [type (binding [*absence-tail* false]
+                               (infer-expression-type value current signatures))
+                        type (cond
+                               ;; a `reduce` over a `[:list T]` parameter binds
+                               ;; the list itself, not a vector-i64
+                               (and (bounded-vector-source-binding? name)
+                                    (or (canonical-list-type? type) (= :document type)))
+                               type
+
+                               (bounded-vector-source-binding? name)
+                               (do (require-expression-type! type :vector-i64 value)
+                                   :vector-i64)
+
+                               :else type)]
+                    (recur (next pairs)
+                           ;; local-state slice 1: a cell binding carries the
+                           ;; cell's identity in its name, so every rebinding
+                           ;; is checked against the type `(atom init)` gave it.
+                           (local-state-check-cell-type!
+                            name type (assoc current name type) form)))
+                  (infer-expression-type body current signatures))))
+        __kotoba_absent (case (first args) :nil nil-kind :none none-kind absent-kind)
+        ;; `if-let` / `when-let`'s binding before `rewrite-record-projection`
+        ;; resolves it (`option-present-value`): an option's payload, or the
+        ;; value itself. Typed here so a function whose result passes through
+        ;; one has a result before the rewrite (gap 1: `(when-let [x o] v)`).
+        __kotoba_present (let [t (infer-expression-type (first args) locals signatures)]
+                           (cond (option-vector-type? t) (second t)
+                                 (= :option-i64 t) :i64
+                                 :else t))
+        if (let [[test then else] args
+                 tail? *absence-tail*
+                 absent-then? (absence-in-tail? then)
+                 absent-else? (absence-in-tail? else)
+                 test-type (binding [*absence-tail* false]
+                             (infer-expression-type test locals signatures))
+                 ;; The present branch of an absence is read leniently: an
+                 ;; inner `(if c v (recur ...))` meets v's T with the loop's
+                 ;; [:option T] (`lenient-branch-join`).
+                 then-type (binding [*absence-tail* (or tail? absent-else?)]
+                             (infer-expression-type then locals signatures))
+                 else-type (binding [*absence-tail* (or tail? absent-then?)]
+                             (infer-expression-type else locals signatures))
+                 ;; ADR 0353 floor :absence: an option test is presence.
+                 ;; `rewrite-record-projection` turns it into the :bool
+                 ;; presence test (`option-presence-test`); until then it is
+                 ;; typed as the :bool it becomes, so a function whose result
+                 ;; passes through `if-let` / `when-let` has a result before
+                 ;; the rewrite and its callers can be typed against it.
+                 test-type (if (or (option-vector-type? test-type) (= :option-i64 test-type))
+                             :bool test-type)]
+             ;; ADR 0353 floor :bool-predicates: numbers are never truthy.
+             ;; An option test never reaches here (it is presence, rewritten
+             ;; by `option-presence-test`), and no predicate answers a number
+             ;; (`i64-answer-predicates`), so the only test is `:bool`.
+             (when (= :i64 test-type)
+               (reject! (str "if test is :i64, and a number is never truthy: "
+                             "compare it (for example (not= x 0)) or answer :bool")
+                        test))
+             (when-not (= :bool test-type)
+               (reject! "if test must be bool or an option" test))
+             ;; A branch that aborts has no value, so the other branch's type is
+             ;; the `if`'s. Two aborting branches make the `if` itself bottom.
+             (cond
+               (absence-kind? else-type) (absence-type then-type (absence-kind-mode else-type))
+               (absence-kind? then-type) (absence-type else-type (absence-kind-mode then-type))
+               (= then-type abort-bottom) else-type
+               (= else-type abort-bottom) then-type
+               (= then-type else-type) then-type
+               (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
+               (lenient-branch-join then-type else-type)
+               :else (reject! "if branches must have the same value type" form)))
+        do (let [tail? *absence-tail*]
+             (last (map-indexed (fn [index arg]
+                                  (binding [*absence-tail* (and tail? (= index (dec (count args))))]
+                                    (infer-expression-type arg locals signatures)))
+                                args)))
+        ;; State ability, slice 1: an operation resolved to its handler has
+        ;; that handler's state type; `put` takes one. A handle has its body's
+        ;; type, and its initial state must be the handler's.
+        __kotoba_state_op
+        (let [[handler-key op & values] args
+              state-type (:state-type (get (some-> *state-handlers* deref) handler-key))]
+          (when-not state-type
+            (reject! (str "state operation names no handler: " handler-key) form
+                     :kotoba.error/state-shape))
+          (when (= :put op)
+            (require-expression-type! (infer-expression-type (first values) locals signatures)
+                                      state-type (first values)))
+          state-type)
+        __kotoba_state_with
+        (let [[handler-key init body] args
+              state-type (:state-type (get (some-> *state-handlers* deref) handler-key))]
+          (when-not state-type
+            (reject! (str "handle names no handler: " handler-key) form :kotoba.error/state-shape))
+          (require-expression-type! (infer-expression-type init locals signatures) state-type init)
+          (infer-expression-type body locals signatures))
+        throw
+        (let [[value] args]
+          (when-not (= 1 (count args))
+            (reject! "throw requires exactly one error value" form :kotoba.error/abort-shape))
+          (let [error-type (infer-expression-type value locals signatures)]
+            (when (= error-type abort-bottom)
+              (reject! "throw of a value that itself always aborts" form :kotoba.error/abort-shape))
+            (when *abort-throw-types*
+              (vswap! *abort-throw-types* conj error-type))
+            abort-bottom))
+        try
+        (let [[body clause] args
+              [explicit binder handler] (try-clause-parts clause form)
+              thrown (volatile! [])
+              body-type (binding [*abort-throw-types* thrown]
+                          (infer-expression-type body locals signatures))
+              candidates (distinct (into @thrown (abort-callee-error-types body)))
+              type-text #(if (keyword? %) (name %) (pr-str %))
+              error-type (cond
+                           (some? explicit) explicit
+                           (> (count candidates) 1)
+                           (reject! (str "try body aborts with two different error types: "
+                                         (type-text (first candidates)) " and "
+                                         (type-text (second candidates)))
+                                    form :kotoba.error/abort-error-type)
+                           (= 1 (count candidates)) (first candidates)
+                           :else abort-unknown-error)
+              handler-type (infer-expression-type handler (assoc locals binder error-type) signatures)]
+          (cond
+            (= body-type abort-bottom) handler-type
+            (= handler-type abort-bottom) body-type
+            (same-expression-type? body-type handler-type) body-type
+            :else (reject! (str "try body and catch handler must have the same value type: "
+                                (type-text body-type) " and " (type-text handler-type))
+                           form :kotoba.error/abort-value-type)))
+        typed-cap-call
+        (let [[_ request-type result-type request] args]
+          (validate-value-type! request-type)
+          (validate-value-type! result-type)
+          (require-expression-type! (infer-expression-type request locals signatures)
+                                    request-type request)
+          result-type)
+        result-ok-of
+        (let [[type payload] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type payload locals signatures)
+                                    (second type) payload)
+          type)
+        result-err-of
+        (let [[type payload] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type payload locals signatures)
+                                    (nth type 2) payload)
+          type)
+        result-ok?-of
+        (let [[type result] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type result locals signatures) type result)
+          :bool)
+        result-value-of
+        (let [[type result fallback] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type result locals signatures) type result)
+          (require-expression-type! (infer-expression-type fallback locals signatures)
+                                    (second type) fallback)
+          (second type))
+        result-error-of
+        (let [[type result fallback] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type result locals signatures) type result)
+          (require-expression-type! (infer-expression-type fallback locals signatures)
+                                    (nth type 2) fallback)
+          (nth type 2))
+        result-match-of
+        (let [[type result ok-name ok-body err-name err-body] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type result locals signatures) type result)
+          (let [ok-type (infer-expression-type ok-body (assoc locals ok-name (second type)) signatures)
+                err-type (infer-expression-type err-body (assoc locals err-name (nth type 2)) signatures)]
+            (when-not (= ok-type err-type)
+              (reject! "result match branches must have the same value type" form))
+            ok-type))
+        variant-new
+        (let [[type tag payload] args
+              type (canonical-closure-result-type type)
+              payload-type (first-truthy (fn [[case-tag case-type]]
+                                   (when (= case-tag tag) case-type))
+                                 (nth type 2))]
+          (validate-value-type! type)
+          (when-not payload-type (reject! "variant constructor tag is not declared" form))
+          (require-expression-type! (infer-expression-type payload locals signatures)
+                                    payload-type payload)
+          type)
+        variant-match
+        (let [[type value branches] args
+              type (canonical-closure-result-type type)
+              cases (nth type 2)]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (let [branch-types
+                (mapv (fn [[[tag payload-type] [_ binder body]]]
+                        (infer-expression-type body (assoc locals binder payload-type) signatures))
+                      (map vector cases branches))]
+            (when-not (apply = branch-types)
+              (reject! "variant match branches must have the same value type" form))
+            (first branch-types)))
+        option-some-of
+        (let [[type payload] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type payload locals signatures)
+                                    (second type) payload)
+          type)
+        option-none-of
+        (let [[type] args] (validate-value-type! type) type)
+        option-some?-of
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          :bool)
+        option-value-of
+        (let [[type value fallback] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type fallback locals signatures)
+                                    (second type) fallback)
+          (second type))
+        option-match
+        (let [[type value none-body some-name some-body] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (let [none-type (infer-expression-type none-body locals signatures)
+                some-type (infer-expression-type some-body
+                                                 (assoc locals some-name (second type)) signatures)]
+            (when-not (= none-type some-type)
+              (reject! "option match branches must have the same value type" form))
+            none-type))
+        typed-list-new
+        (let [[type & items] args]
+          (validate-value-type! type)
+          (doseq [item items]
+            (require-expression-type! (infer-expression-type item locals signatures)
+                                      (second type) item))
+          type)
+        typed-list-nth
+        (let [[type value index] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
+          (second type))
+        typed-list-conj
+        (let [[type value item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type item locals signatures)
+                                    (second type) item)
+          type)
+        bytes-empty :bytes
+        bytes-count
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :i64)
+        bytes-at
+        ;; The result is the *unsigned* byte, so it widens into i64 rather than
+        ;; carrying a narrower byte type the rest of the language does not have.
+        ;; Whether the index is in range is a run-time fact, not a typing one:
+        ;; backends must bounds-check and trap, never read past the operand.
+        (let [[value index] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          (require-expression-type! (infer-expression-type index locals signatures)
+                                    :i64 index)
+          :i64)
+        bytes-slice
+        ;; Half-open [start, end): the result length is `end - start`, so an
+        ;; empty slice is `start = end` and no offset is ever one past a byte
+        ;; that has to exist. As with bytes-at, `0 <= start <= end <= count` is
+        ;; a run-time fact rather than a typing one, and backends must enforce
+        ;; it against the *operand's* length -- not against whatever buffer the
+        ;; operand happens to live in -- and trap otherwise. A backend that
+        ;; returns the subrange as a view rather than a copy must also say so:
+        ;; the result then aliases the operand and cannot outlive it.
+        (let [[value start end] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          (require-expression-type! (infer-expression-type start locals signatures)
+                                    :i64 start)
+          (require-expression-type! (infer-expression-type end locals signatures)
+                                    :i64 end)
+          :bytes)
+        bytes-concat
+        ;; The first bytes operation that cannot be answered by pointing into
+        ;; an operand: the result is longer than either input, so somewhere to
+        ;; put it has to exist. Backends therefore owe three things typing
+        ;; cannot check -- that the destination does not overlap either
+        ;; operand, that the combined length neither overflows nor exceeds the
+        ;; space actually available, and that the cost charged for the join
+        ;; grows with the bytes moved rather than with the instruction count.
+        ;; A backend whose copy is one bulk instruction satisfies the first two
+        ;; and quietly fails the third.
+        (let [[left right] args]
+          (require-expression-type! (infer-expression-type left locals signatures)
+                                    :bytes left)
+          (require-expression-type! (infer-expression-type right locals signatures)
+                                    :bytes right)
+          :bytes)
+        bytes-from-vector-i64
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :vector-i64 value)
+          :bytes)
+        vector-i64-from-bytes
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :vector-i64)
+        string-from-utf8
+        (let [[value] args]
+          (require-expression-type! (infer-expression-type value locals signatures)
+                                    :bytes value)
+          :string)
+        hetero-vector-new
+        (let [[type & items] args
+              item-types (second type)]
+          (validate-value-type! type)
+          (doseq [[item item-type] (map vector items item-types)]
+            (require-expression-type! (infer-expression-type item locals signatures)
+                                      item-type item))
+          type)
+        hetero-vector-count
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          :i64)
+        hetero-vector-at
+        (let [[type value index] args
+              item-types (second type)
+              host-index (heterogeneous-vector-index! index item-types form)]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (nth item-types host-index))
+        __kotoba_destructure_get
+        (let [[value key default] args
+              value-type (infer-expression-type value locals signatures)
+              descriptor (resolve-ref-type value-type)]
+          (cond
+            (canonical-typed-map-type? value-type)
+            (do
+              (when-not (= 3 (count args))
+                (reject! "typed-map destructuring requires an :or default"
+                         form :kotoba.error/destructure-default))
+              (require-expression-type! (infer-expression-type key locals signatures)
+                                        (second value-type) key)
+              (require-expression-type! (infer-expression-type default locals signatures)
+                                        (nth value-type 2) default)
+              (nth value-type 2))
+
+            (record-type? descriptor)
+            (or (record-field-type descriptor key)
+                (reject! "record field is not declared"
+                         form :kotoba.error/record-field))
+
+            :else
+            (infer-call-type 'map-get
+                             [value key (if (= 3 (count args)) default 0)]
+                             locals signatures)))
+        get
+        (let [[value key default] args
+              value-type (infer-expression-type value locals signatures)
+              descriptor (resolve-ref-type value-type)]
+          (cond
+            ;; `get` on a document: an option of the entry, or the entry or the
+            ;; default when one is given
+            (= :document value-type)
+            (if (= 3 (count args)) :document [:option :document])
+
+            (canonical-typed-map-type? value-type)
+            (do
+              (require-expression-type! (infer-expression-type key locals signatures)
+                                        (second value-type) key)
+              (if (= 3 (count args))
+                (do
+                  (require-expression-type!
+                   (infer-expression-type default locals signatures)
+                   (nth value-type 2) default)
+                  (nth value-type 2))
+                [:option (nth value-type 2)]))
+
+            (and (record-type? descriptor) (= 3 (count args)) (keyword? key))
+            (record-get-default-type descriptor key default form locals signatures)
+
+            (record-type? descriptor)
+            (do
+              (when-not (= 2 (count args))
+                (reject! "record get requires a value and one keyword field"
+                         form :kotoba.error/record-projection-unresolved))
+              (or (record-field-type descriptor key)
+                  (reject! "record field is not declared"
+                           form :kotoba.error/record-field)))
+
+            :else
+            (infer-call-type 'map-get
+                             [value key (if (= 3 (count args)) default 0)]
+                             locals signatures)))
+        ;; `count` and the pair accessors need a TYPE here as well as a
+        ;; lowering below, for the reason `nth` has one: parameter inference
+        ;; runs before `rewrite-record-projections`, and it reads a refused
+        ;; operand's required type out of the refusal's ex-data. A head that
+        ;; only gained a rewrite would still be REFUSED during that earlier
+        ;; pass, and the `:kotoba.error/expected :i64` of that refusal was
+        ;; then attributed to an unrelated synthesized parameter. Measured
+        ;; 2026-09-03: with the rewrite alone,
+        ;;   (+ (pair-first [1 4 2]) (reduce add 4 [1 2 3]))
+        ;; produced a `reduce` loop helper whose collection parameter was
+        ;; typed `:i64` instead of `:vector-i64`, and the program was refused
+        ;; naming `__kotoba_reduce_v_1` -- a binding the author never wrote.
+        ;; With this arm the helper is typed `:vector-i64` and the program
+        ;; runs. `(vector-at [1 4 2] 0)` written by hand always worked, which
+        ;; is how the difference was isolated: identical bodies, different
+        ;; `:param-types`.
+        count
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (if (or (= :vector-i64 value-type) (= :vector-f64 value-type)
+                  (heterogeneous-vector-type? value-type)
+                  (typed-set-type? value-type)
+                  (canonical-typed-map-type? value-type)
+                  (canonical-list-type? value-type))
+            :i64
+            (infer-call-type op args locals signatures)))
+        ;; `peek`/`pop`/`keys`/`vals` need a type here for the same reason
+        ;; `count` and `nth` do: `infer-absent-parameter-types` runs BEFORE
+        ;; `rewrite-record-projections` and reads a refused operand's required
+        ;; type out of the refusal's ex-data, so a head with only a rewrite is
+        ;; still refused during that earlier pass and its expected type is
+        ;; attributed to an unrelated synthesized parameter.
+        (peek pop)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [peek :vector-i64] :i64
+            [peek :vector-f64] :f64
+            [pop :vector-i64] :vector-i64
+            [pop :vector-f64] :vector-f64
+            (infer-call-type op args locals signatures)))
+        (keys vals)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (cond
+            (canonical-typed-map-type? value-type)
+            [:list (if (= op 'keys) (second value-type) (nth value-type 2))]
+            ;; a document map's keys / values are a document vector
+            (= :document value-type) :document
+            :else (infer-call-type op args locals signatures)))
+        (pair-first pair-second)
+        (let [value-type (when (= 1 (count args))
+                           (infer-expression-type (first args) locals signatures))]
+          (case [op value-type]
+            [pair-first :vector-i64] :i64
+            [pair-first :vector-f64] :f64
+            [pair-second :vector-i64] :vector-i64
+            [pair-second :vector-f64] :vector-f64
+            ;; first / rest of a document are documents
+            [pair-first :document] :document
+            [pair-second :document] :document
+            (infer-call-type op args locals signatures)))
+        nth
+        (let [[value index & defaults] args
+              value-type (infer-expression-type value locals signatures)]
+          (cond
+            (and (= :document value-type) (= 2 (count args))) :document
+
+            (heterogeneous-vector-type? value-type)
+            (do
+              (when-not (<= 2 (count args) 3)
+                (reject! "heterogeneous vector nth requires a value, one literal index, and an optional default"
+                         form :kotoba.error/hetero-vector-index))
+              (let [host-index
+                    (heterogeneous-vector-index! index (second value-type) form)
+                    item-type (nth (second value-type) host-index)]
+                (when (= 3 (count args))
+                  (let [default (first defaults)]
+                    (require-expression-type!
+                     (infer-expression-type default locals signatures)
+                     item-type default)))
+                item-type))
+
+            (= :vector-i64 value-type)
+            (do
+              (when-not (<= 2 (count args) 3)
+                (reject! "vector nth requires value, index, and optional default" form))
+              (infer-call-type (if (= 3 (count args)) 'vector-get 'vector-at)
+                               args locals signatures))
+
+            (= :vector-f64 value-type)
+            (do
+              (when-not (<= 2 (count args) 3)
+                (reject! "vector nth requires value, index, and optional default" form))
+              (infer-call-type (if (= 3 (count args)) 'vector-f64-get 'vector-f64-at)
+                               args locals signatures))
+
+            ;; A `[:list T]` indexes through `typed-list-nth`, which has no
+            ;; defaulting form -- there is no list `vector-get` -- so the
+            ;; two-argument shape is the only one, and the three-argument one
+            ;; is refused by the rewrite rather than silently dropping the
+            ;; default.
+            (canonical-list-type? value-type)
+            (if (= 2 (count args)) (second value-type)
+                (infer-call-type op args locals signatures))
+
+            :else (infer-call-type op args locals signatures)))
+        hetero-vector-assoc
+        (let [[type value index item] args
+              item-types (second type)
+              host-index (heterogeneous-vector-index! index item-types form)]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type item locals signatures)
+                                    (nth item-types host-index) item)
+          type)
+        hetero-vector-equal
+        (let [[type left right] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type left locals signatures) type left)
+          (require-expression-type! (infer-expression-type right locals signatures) type right)
+          :i64)
+        typed-set-new
+        (let [[type & items] args]
+          (validate-value-type! type)
+          (doseq [item items]
+            (require-set-item-type! type item locals signatures))
+          type)
+        typed-set-count
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          :i64)
+        typed-set-contains
+        (let [[type value item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-set-item-type! type item locals signatures)
+          :bool)
+        typed-set-conj
+        (let [[type value item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-set-item-type! type item locals signatures)
+          type)
+        typed-set-disj
+        (let [[type value item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-set-item-type! type item locals signatures)
+          type)
+        typed-set-equal
+        (let [[type left right] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type left locals signatures) type left)
+          (require-expression-type! (infer-expression-type right locals signatures) type right)
+          :i64)
+        typed-set-nth
+        (let [[type value index] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
+          (second type))
+        typed-map-new
+        (let [[type & entries] args
+              [key-type value-type] (rest type)]
+          (validate-value-type! type)
+          (doseq [[key item] (partition 2 entries)]
+            (require-expression-type! (infer-expression-type key locals signatures)
+                                      key-type key)
+            (require-expression-type! (infer-expression-type item locals signatures)
+                                      value-type item))
+          type)
+        typed-map-count
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          :i64)
+        typed-map-contains
+        (let [[type value key] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type key locals signatures)
+                                    (second type) key)
+          :bool)
+        typed-map-get
+        (let [[type value key] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type key locals signatures)
+                                    (second type) key)
+          [:option (nth type 2)])
+        typed-map-entry-at
+        (let [[type value index] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
+          [:option [:vector [(second type) (nth type 2)]]])
+        ;; `[:list K]` / `[:list V]`. Not `[:set K]` even for the keys, whose
+        ;; distinctness a set would carry faithfully: the VALUES are not
+        ;; distinct, so the same carrier for `vals` would silently drop every
+        ;; repeated value, and one projection typed as a set while the other
+        ;; is a list would make `(nth (keys m) i)` and `(nth (vals m) i)` two
+        ;; different kinds of index over what is meant to be one entry.
+        (typed-map-keys typed-map-vals)
+        (let [[type value] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          [:list (if (= op 'typed-map-keys) (second type) (nth type 2))])
+        typed-map-assoc
+        (let [[type value key item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type key locals signatures)
+                                    (second type) key)
+          (require-expression-type! (infer-expression-type item locals signatures)
+                                    (nth type 2) item)
+          type)
+        typed-map-dissoc
+        (let [[type value key] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type key locals signatures)
+                                    (second type) key)
+          type)
+        typed-map-equal
+        (let [[type left right] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type left locals signatures) type left)
+          (require-expression-type! (infer-expression-type right locals signatures) type right)
+          :i64)
+        record-new
+        (let [[type & values] args
+              fields (nth type 2)]
+          (validate-value-type! type)
+          (doseq [[[field field-type] item] (map vector fields values)]
+            (require-field-value-type! (infer-expression-type item locals signatures)
+                                       field-type item field))
+          type)
+        record-get
+        (let [[type value field] (if (= 2 (count args))
+                                   ;; The descriptor-less spelling reaches the
+                                   ;; abort passes (they run before
+                                   ;; `rewrite-record-projections`); the value's
+                                   ;; own type is the descriptor.
+                                   (let [value-type (infer-expression-type (first args) locals signatures)]
+                                     (when-not (record-type? value-type)
+                                       (reject! (str "record-get without a type descriptor requires a record "
+                                                     "value; got " (pr-str value-type))
+                                                form))
+                                     [value-type (first args) (second args)])
+                                   args)
+              field-type (first-truthy (fn [[declared-field declared-type]]
+                                 (when (= declared-field field) declared-type))
+                               (nth type 2))]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          ;; a `[:fn ...]` field is read as the closure handle it holds; the
+          ;; closure analysis (`infer-closure-refinements`) knows it is one
+          (if (callable-type? field-type) :i64 field-type))
+        record-assoc
+        (let [[type value field replacement] args
+              field-type (first-truthy (fn [[declared-field declared-type]]
+                                 (when (= declared-field field) declared-type))
+                               (nth type 2))]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-field-value-type! (infer-expression-type replacement locals signatures)
+                                     field-type replacement replacement)
+          type)
+        record-equal
+        (let [[type left right] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type left locals signatures) type left)
+          (require-expression-type! (infer-expression-type right locals signatures) type right)
+          :i64)
+        ;; boot-scratch: an address is an i64, and its argument is a function
+        ;; NAME. Intercepted here rather than in `infer-call-type`, which
+        ;; types every argument before it looks at the head -- a symbol there
+        ;; is a local reference, so a correct program would be rejected as
+        ;; "unbound symbol has no value type" naming the callee.
+        kernel-function-address :i64
+        (infer-call-type op args locals signatures)))
+    :else (reject! "value has no admitted type" form)))
+
+(defn elaborate-named-ability
+  "Lower a friendly qualified operation such as `(http/post request)` after
+  parameter and result types are known. Request type comes from the lexical
+  expression and result type from the typed context; neither is repeated in
+  application source. A call without result context fails closed until the
+  semantic catalog owns a context-independent result schema."
+  [form expected locals signatures used]
+  (if-not (seq? form)
+    form
+    (let [[op & args] form]
+      (cond
+        (contains? source-operation-registry op)
+        (do
+          (when-not (= 1 (count args))
+            (reject! "named capability operation requires exactly one request" form))
+          (when-not (or expected (contains? named-operation-default-results op))
+            (reject! "named capability operation requires a typed result context" form))
+          (let [expected (or expected (get named-operation-default-results op))
+                request (elaborate-named-ability
+                         (first args) nil locals signatures used)
+                request-type (infer-expression-type request locals signatures)
+                capability (get source-operation-registry op)
+                id (effect-capability-id
+                    (capability-wire-id capability form))]
+            (vswap! used conj capability)
+            (preserve-form-meta
+             form
+             (list 'typed-cap-call id request-type expected request))))
+
+        (= op 'let)
+        (let [bindings (first args) body (let-body args form)]
+          (loop [pairs (partition 2 bindings)
+                 current locals
+                 out []]
+            (if-let [[name value] (first pairs)]
+              (let [elaborated
+                    (elaborate-named-ability value nil current signatures used)
+                    value-type
+                    (infer-expression-type elaborated current signatures)]
+                (recur (next pairs)
+                       (assoc current name value-type)
+                       (conj out name elaborated)))
+              (preserve-form-meta
+               form
+               (list 'let (vec out)
+                     (elaborate-named-ability
+                      body expected current signatures used))))))
+
+        (= op 'if)
+        (let [[test then else] (if-parts args form)]
+          (preserve-form-meta
+           form
+           (list 'if
+                 (elaborate-named-ability test nil locals signatures used)
+                 (elaborate-named-ability then expected locals signatures used)
+                 (elaborate-named-ability else expected locals signatures used))))
+
+        (= op 'do)
+        (let [last-index (dec (count args))]
+          (preserve-form-meta
+           form
+           (list* 'do
+                  (map-indexed
+                   (fn [index expression]
+                     (elaborate-named-ability
+                      expression (when (= index last-index) expected)
+                      locals signatures used))
+                   args))))
+
+        ;; Lowered pattern forms bind payload names in only their branch
+        ;; bodies. Preserve those lexical types while elaborating named
+        ;; abilities; generic recursion would otherwise treat the binder as
+        ;; unbound when a branch contains any expression whose expected type
+        ;; must be inferred (including the `option-value-of` produced from
+        ;; `option-or`).
+        (= op 'option-match)
+        (let [[type value none-body some-name some-body] args]
+          (preserve-form-meta
+           form
+           (list 'option-match type
+                 (elaborate-named-ability value type locals signatures used)
+                 (elaborate-named-ability none-body expected locals signatures used)
+                 some-name
+                 (elaborate-named-ability some-body expected
+                                          (assoc locals some-name (second type))
+                                          signatures used))))
+
+        (= op 'result-match-of)
+        (let [[type value ok-name ok-body err-name err-body] args]
+          (preserve-form-meta
+           form
+           (list 'result-match-of type
+                 (elaborate-named-ability value type locals signatures used)
+                 ok-name
+                 (elaborate-named-ability ok-body expected
+                                          (assoc locals ok-name (second type))
+                                          signatures used)
+                 err-name
+                 (elaborate-named-ability err-body expected
+                                          (assoc locals err-name (nth type 2))
+                                          signatures used))))
+
+        (= op 'variant-match)
+        (let [[type value branches] args
+              payloads (into {} (nth type 2))]
+          (preserve-form-meta
+           form
+           (list 'variant-match type
+                 (elaborate-named-ability value type locals signatures used)
+                 (mapv (fn [[tag binder body]]
+                         [tag binder
+                          (elaborate-named-ability body expected
+                                                   (assoc locals binder (get payloads tag))
+                                                   signatures used)])
+                       branches))))
+
+        (= op 'typed-cap-call)
+        (let [[id request-type result-type request] args]
+          (preserve-form-meta
+           form
+           (list 'typed-cap-call id request-type result-type
+                 (elaborate-named-ability
+                  request request-type locals signatures used))))
+
+        ;; The measured hole (2026-09-02). This walked arguments with
+        ;; `(map f args expected-arg-types)`, and two-collection `map` stops at
+        ;; the SHORTER collection: a call carrying more arguments than the
+        ;; callee has parameters came out of this branch SHORTER than it went
+        ;; in, and `validate-expr`'s own arity check -- which is correct --
+        ;; then measured the shortened form and passed it. `(two 1 2 3)`
+        ;; against `(defn- two [a b] ...)` compiled with :ok true and answered
+        ;; 3. Same shape as the `let` body and `if` truncations closed the same
+        ;; day: a pass rebuilds a form from a destructuring that cannot express
+        ;; the surplus, so nothing downstream can see what was dropped.
+        ;;
+        ;; The count is now checked here, where the fact is known, and the walk
+        ;; is indexed rather than zipped so no future disagreement between
+        ;; `:params` and `:param-types` can shorten a form again.
+        (contains? signatures op)
+        (let [{:keys [params param-types]} (get signatures op)
+              expected (count params)]
+          (when-not (= (count args) expected)
+            (reject-call-arity! op expected (count args) form))
+          (preserve-form-meta
+           form
+           (list* op
+                  (map-indexed
+                   (fn [index argument]
+                     (elaborate-named-ability
+                      argument (nth param-types index nil) locals signatures used))
+                   args))))
+
+        :else
+        (preserve-form-meta
+         form
+         (list* op
+                (map #(elaborate-named-ability
+                       % nil locals signatures used)
+                     args)))))))
+
+(defn elaborate-named-abilities [functions]
+  (let [signatures
+        (into {} (map (fn [{:keys [name params param-types result]}]
+                        [name {:params params
+                               :param-types param-types
+                               :result result}]))
+              functions)
+        used (volatile! #{})]
+    {:functions
+     (mapv (fn [{:keys [params param-types result] :as function}]
+             (update function :body
+                     #(elaborate-named-ability
+                       % result (zipmap params param-types) signatures used)))
+           functions)
+     :used @used}))
+
+;; ── loop/recur accumulator types (ADR 0027) ─────────────────────────────────
+;;
+;; A synthesized loop-helper's RESULT was a constant with exactly two possible
+;; values: `:i64`, or `:vector-i64` when the T4.5 map/filter desugarings bound
+;; `*loop-result-type*`. Nothing read the loop body. So an ordinary
+;; Clojure-shaped loop over anything but an integer was refused --
+;;
+;;   (loop [i 0 acc 0.0] (if (< i 3) (recur (+ i 1) (f64-add acc x)) acc))
+;;
+;; -- with "expression type mismatch: expected f64, got i64" pointing at the
+;; loop's own call site, even though the accumulator's type WAS known:
+;; `resolve-loop-helper-param-types` above recovers it from the loop's inits.
+;; Only the result type did not read it.
+;;
+;; It is read here. A loop leaves through its non-`recur` tail exits, so the
+;; helper's result is the type those exits agree on. After `replace-recur` a
+;; `recur` is a self-call, so "not a recur" is "not a call to this helper".
+
+(def loop-recur-marker
+  "The symbol a self-call stands in as while a loop-helper's exits are typed.
+  A self-call in TAIL position is a `recur` and is not an exit, so the walker
+  drops it; one anywhere else (inside a `variant-match` branch, say) is typed
+  from this symbol's binding in `locals`, which is the result type the fixed
+  point currently believes -- so such a loop keeps exactly the meaning it had
+  before this pass existed."
+  '__kotoba_recur_position__)
+
+(defn replace-loop-self-calls
+  "BODY with every call to HELPER-NAME replaced by `loop-recur-marker`."
+  [form helper-name]
+  (cond
+    (and (seq? form) (= helper-name (first form))) loop-recur-marker
+    (seq? form) (with-meta (apply list (map #(replace-loop-self-calls % helper-name) form))
+                  (meta form))
+    (vector? form) (mapv #(replace-loop-self-calls % helper-name) form)
+    :else form))
+
+(defn loop-exit-forms
+  "The tail exits of a marked loop-helper body, as `[form locals]` pairs.
+
+  `if`, `do` and `let` are tail-transparent -- `let` is the only binding form
+  that survives desugaring, so threading it is threading all of them -- and a
+  marker in tail position is a `recur`, which leaves the loop's next iteration
+  rather than the loop. Everything else is a leaf and is typed whole."
+  [form locals signatures]
+  (cond
+    (= form loop-recur-marker) []
+
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (and (= op 'if) (= 3 (count args)))
+        (into (loop-exit-forms (second args) locals signatures)
+              (loop-exit-forms (nth args 2) locals signatures))
+
+        (and (= op 'do) (seq args))
+        (loop-exit-forms (last args) locals signatures)
+
+        (and (= op 'let) (vector? (first args)) (= 2 (count args))
+             (even? (count (first args))))
+        (loop-exit-forms (second args)
+                         (reduce (fn [current [name value]]
+                                   (assoc current name
+                                          (infer-expression-type value current signatures)))
+                                 locals
+                                 (partition 2 (first args)))
+                         signatures)
+
+        :else [[form locals]]))
+
+    :else [[form locals]]))
+
+(defn loop-type-text [type] (if (keyword? type) (name type) (pr-str type)))
+
+(defn loop-exit-text
+  "A tail exit named short enough to read in a one-line refusal."
+  [form]
+  (let [text (pr-str form)]
+    (if (> (count text) 48) (str (subs text 0 45) "...") text)))
+
+(defn loop-helper-exit-type
+  "The type a loop-helper leaves through, or nil when nothing here can say.
+
+  Iterated to a fixed point over the marker's own binding, so a loop whose only
+  self-call is in tail position (every loop this pass is for) settles in one
+  round, and one with a self-call in a non-tail position starts from the result
+  it had before and stays there."
+  [{:keys [name params param-types body]} signatures]
+  (let [marked (replace-loop-self-calls body name)
+        environment (zipmap params param-types)]
+    (loop [provisional :i64 rounds 0]
+      (let [locals (assoc environment loop-recur-marker provisional)
+            typed (into []
+                        (comp (map (fn [[form form-locals]]
+                                     [form (infer-expression-type form form-locals signatures)]))
+                              (remove #(= abort-bottom (second %))))
+                        (loop-exit-forms marked locals signatures))
+            ;; Gap 1 (`absence-type`): an exit that answers nothing -- a
+            ;; `when` with no else, a literal nil -- is not a value to agree
+            ;; with. The others agree among themselves (a value of T beside
+            ;; the loop's own [:option T] is its present answer), and the
+            ;; absence decides the loop's type from theirs.
+            absent (filter #(absence-kind? (second %)) typed)
+            typed (if (seq absent) (vec (remove #(absence-kind? (second %)) typed)) typed)
+            present-type (when (seq absent)
+                           (reduce (fn [joined [_ type]]
+                                     (cond (nil? joined) type
+                                           (same-expression-type? type joined) joined
+                                           :else (or (lenient-branch-join joined type) joined)))
+                                   nil typed))
+            first-type (if (seq absent)
+                         (absence-type present-type
+                                       (let [kinds (set (map second absent))]
+                                         (cond (contains? kinds nil-kind) :nil
+                                               (contains? kinds none-kind) :none
+                                               :else :legacy)))
+                         (second (first typed)))
+            disagreeing (first (remove #(or (same-expression-type? (second %) first-type)
+                                            (and (seq absent)
+                                                 (or (= [:option (second %)] first-type)
+                                                     (and (option-vector-type? first-type)
+                                                          (= (second first-type) (second %))))))
+                                       typed))]
+        (cond
+          ;; Every tail is a `recur`: the loop has no exit to read a type from.
+          (and (empty? typed) (empty? absent)) nil
+
+          disagreeing
+          (reject! (str "loop exits with two different value types: "
+                        (loop-type-text first-type) " from " (loop-exit-text (first (first typed)))
+                        " and " (loop-type-text (second disagreeing))
+                        " from " (loop-exit-text (first disagreeing)))
+                   (first disagreeing)
+                   :kotoba.error/loop-exit-type
+                   {:kotoba.error/expected first-type
+                    :kotoba.error/actual (second disagreeing)})
+
+          (or (= first-type provisional) (>= rounds 4)) first-type
+          :else (recur first-type (inc rounds)))))))
+
+(defn loop-helper-result
+  "The result type for one loop-helper, refusing a type that cannot be one.
+
+  Every rejection this raises other than its own two is swallowed: a loop body
+  with an independent type error must fail where every other body does, in
+  `check-value-types!`, with that error's own message -- not as an unreadable
+  consequence of typing its exits."
+  [helper declared-result signatures]
+  (let [own-codes #{:kotoba.error/loop-exit-type :kotoba.error/loop-result-type}
+        inferred (try (loop-helper-exit-type helper signatures)
+                      (catch #?(:clj Exception :cljs :default) e
+                        (if (contains? own-codes (:kotoba.error/code (ex-data e)))
+                          (throw e)
+                          ::unknown)))]
+    (cond
+      (= ::unknown inferred) (:result helper)
+      (nil? inferred) (:result helper)
+      :else
+      (do
+        ;; A loop is lowered to a real function, so its accumulator has to be a
+        ;; value that can be a function RESULT. Name the type and say so rather
+        ;; than quietly handing back :i64 -- a silent fallback here is the
+        ;; defect this pass exists to remove.
+        (try (validate-value-type! inferred)
+             (catch #?(:clj Exception :cljs :default) _
+               (reject! (str "a loop is lowered to a function and its exits have the type "
+                             (loop-type-text inferred)
+                             ", which cannot cross a function boundary in this profile")
+                        (:body helper) :kotoba.error/loop-result-type
+                        {:kotoba.error/actual inferred})))
+        (when (and (some? declared-result)
+                   (not (same-expression-type? inferred declared-result)))
+          (reject! (str "loop result was declared " (loop-type-text declared-result)
+                        " and its exits have the type " (loop-type-text inferred))
+                   (:body helper) :kotoba.error/loop-result-type
+                   {:kotoba.error/expected declared-result
+                    :kotoba.error/actual inferred}))
+        inferred))))
+
+(defn loop-helper-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result (or result :i64)}]))
+        functions))
+
+(defn infer-loop-helper-results
+  "Give every synthesized loop-helper the result type its exits have.
+
+  Runs AFTER `resolve-loop-helper-param-types` (the exits are typed in the
+  helper's own parameter environment) and to a fixed point, because a nested
+  loop's helper is called from the enclosing loop's body: the inner result has
+  to settle before the outer body can be read. The rounds up to the last are
+  permissive -- an intermediate disagreement is usually a placeholder that has
+  not settled yet -- and the last one refuses."
+  [functions shapes]
+  (if-not (first-truthy :loop-helper? functions)
+    functions
+    (letfn [(result-of [f fs]
+              (loop-helper-result f (:declared-result (get shapes (:name f)))
+                                  (loop-helper-signatures fs)))
+            (round [fs strict?]
+              (mapv (fn [f]
+                      (if (:loop-helper? f)
+                        (assoc f :result
+                               (if strict?
+                                 (result-of f fs)
+                                 (try (result-of f fs)
+                                      (catch #?(:clj Exception :cljs :default) _ (:result f)))))
+                        f))
+                    fs))]
+      (loop [fs functions rounds 0]
+        (let [next-fs (round fs false)]
+          (if (or (= (mapv :result next-fs) (mapv :result fs)) (>= rounds 4))
+            (round next-fs true)
+            (recur next-fs (inc rounds))))))))
+
+(defn check-loop-recur-argument-types!
+  "A `recur` argument must have the type of the binding it rebinds.
+
+  `check-value-types!` would catch this too -- a `recur` is a self-call and its
+  arguments are checked against the helper's parameter types -- but it would
+  report it as a mismatch in a call to `__kotoba_loop_3`, a function the author
+  never wrote, at a parameter index they cannot map back to a name. Say which
+  loop binding, at which `recur` argument position, instead.
+
+  Every inference here is best-effort: an argument whose type cannot be read
+  (because the body has an independent error) is left for `check-value-types!`
+  rather than guessed at."
+  [functions shapes]
+  (let [signatures (loop-helper-signatures functions)]
+    (letfn [(infer [form locals]
+              (try (infer-expression-type form locals signatures)
+                   (catch #?(:clj Exception :cljs :default) _ ::unknown)))
+            (walk [helper-name binding-names param-types form locals]
+              (when (seq? form)
+                (let [[op & args] form]
+                  (cond
+                    (= op helper-name)
+                    (do (doseq [[index argument] (map-indexed vector
+                                                              (take (count binding-names) args))]
+                          (let [expected (nth param-types index)
+                                actual (infer argument locals)]
+                            (when-not (or (= ::unknown actual)
+                                          (= abort-bottom actual)
+                                          (same-expression-type? actual expected))
+                              (reject! (str "recur argument " (inc index) " rebinds the loop binding `"
+                                            (nth binding-names index) "`, which is "
+                                            (loop-type-text expected) ", with an expression of type "
+                                            (loop-type-text actual))
+                                       argument :kotoba.error/loop-recur-type
+                                       {:kotoba.error/expected expected
+                                        :kotoba.error/actual actual
+                                        :kotoba.error/loop-binding (nth binding-names index)
+                                        :kotoba.error/loop-recur-argument (inc index)}))))
+                        (doseq [argument args]
+                          (walk helper-name binding-names param-types argument locals)))
+
+                    (and (= op 'let) (vector? (first args)) (= 2 (count args))
+                         (even? (count (first args))))
+                    (let [pairs (partition 2 (first args))]
+                      (doseq [[_ value] pairs]
+                        (walk helper-name binding-names param-types value locals))
+                      (walk helper-name binding-names param-types (second args)
+                            (reduce (fn [current [name value]]
+                                      (assoc current name (infer value current)))
+                                    locals pairs)))
+
+                    :else (doseq [argument args]
+                            (walk helper-name binding-names param-types argument locals))))))]
+      (doseq [{:keys [name params param-types body loop-helper?]} functions
+              :let [bindings (:bindings (get shapes name))]
+              :when (and loop-helper? (pos? (or bindings 0)))]
+        (walk name (vec (take bindings params)) (vec param-types) body
+              (zipmap params param-types)))))
+  functions)
+
+;; ── resolving absence markers (gap 1; see `absence-type`) ────────────────────
+
+(defn absence-none
+  "What an absent path is once the `if` is known to have TYPE."
+  [marker type]
+  (cond
+    (= :i64 type) 0
+    (= :bool type) false
+    (= :option-i64 type) '(option-none)
+    (option-vector-type? type) (list 'option-none-of type)
+    :else (legacy-absence marker)))
+
+(defn absence-leaves
+  "FORM with each tail leaf made a value of TYPE: a marker is TYPE's none, a
+  value of T is wrapped when TYPE is [:option T], anything else is left for
+  the type check that follows."
+  [form type locals signatures]
+  (cond
+    (absence-marker? form) (absence-none form type)
+
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (nth form 1)
+                     (absence-leaves (nth form 2) type locals signatures)
+                     (absence-leaves (nth form 3) type locals signatures))
+      (meta form))
+
+    (and (seq? form) (= 'let (first form)) (= 3 (count form)) (vector? (second form)))
+    (let [locals' (reduce (fn [current [name value]]
+                            (assoc current name
+                                   (try (infer-expression-type value current signatures)
+                                          (catch #?(:clj Exception :cljs :default) _ nil))))
+                          locals (partition 2 (second form)))]
+      (with-meta (list 'let (second form) (absence-leaves (nth form 2) type locals' signatures))
+        (meta form)))
+
+    (and (seq? form) (= 'do (first form)) (<= 2 (count form)))
+    (with-meta (concat (butlast form) [(absence-leaves (last form) type locals signatures)])
+      (meta form))
+
+    (and (option-vector-type? type) (not (option-vector-type? (second type))))
+    (let [leaf-type (try (infer-expression-type form locals signatures)
+                           (catch #?(:clj Exception :cljs :default) _ nil))]
+      (if (and (some? leaf-type) (same-expression-type? leaf-type (second type)))
+        (list 'option-some-of type form)
+        form))
+
+    :else form))
+
+(defn absence-tails-legacy
+  "FORM with each tail marker what the desugar used to write."
+  [form]
+  (cond
+    (absence-marker? form) (legacy-absence form)
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (nth form 1) (absence-tails-legacy (nth form 2))
+                     (absence-tails-legacy (nth form 3)))
+      (meta form))
+    (and (seq? form) (contains? '#{let do} (first form)) (<= 2 (count form)))
+    (with-meta (concat (butlast form) [(absence-tails-legacy (last form))]) (meta form))
+    :else form))
+
+(defn resolve-absence-if
+  "An `if` whose children are already resolved: when one of its tails is an
+  absence marker, the `if`'s type decides every tail (`absence-type`). Left
+  as it is when nothing here can type it. STATEMENT? is true when the value is
+  dropped (a non-final `do` form): an :i64 absence there is written as it
+  always was, so a statement's code does not change."
+  ([form locals signatures] (resolve-absence-if form locals signatures false))
+  ([form locals signatures statement?]
+   (if-not (and (seq? form) (= 'if (first form)) (= 4 (count form))
+                (or (absence-in-tail? (nth form 2)) (absence-in-tail? (nth form 3))))
+     form
+     (let [type (try (infer-expression-type form locals signatures)
+                       (catch #?(:clj Exception :cljs :default) _ nil))]
+       (cond
+         (or (nil? type) (absence-kind? type) (= abort-bottom type)) form
+         (and statement? (contains? #{:i64 [:option :i64]} type)) (absence-tails-legacy form)
+         :else (absence-leaves form type locals signatures))))))
+
+(defn refinable-value-type? [type]
+  (and (some? type)
+       (not= type :i64)
+       (try (do (validate-value-type! type) true)
+            (catch #?(:clj Exception :cljs :default) _ false))))
+
+(defn use-site-text
+  "FORM as a diagnostic shows it: the head the source wrote when the lowering
+  table renamed it (`:kotoba.diag/source-head`, see `desugar-expr`), integers
+  through `str` so a ClojureScript BigInt prints as its digits, everything
+  else as `pr-str` would."
+  [form]
+  (cond
+    (seq? form)
+    (let [head (first form)
+          shown (or (:kotoba.diag/source-head (meta head)) head)]
+      (str "(" (str/join " " (map use-site-text (cons shown (rest form)))) ")"))
+    (vector? form) (str "[" (str/join " " (map use-site-text form)) "]")
+    (kotoba-integer? form) (str form)
+    (symbol? form) (str form)
+    :else (pr-str form)))
+
+(defn parameter-use-conflict!
+  "Refuse FUNCTION's unannotated PARAMETER whose uses disagree, naming both.
+
+  FIRST-USE is the refusal the provisional `:i64` met (its `:expected` is what
+  the pass tried to refine to, its `:form`/`:span` the site the ordinary
+  checker would have reported); SECOND-USE is the refusal the refined type
+  met on the same parameter. Each carries the `:use-site` `infer-call-type`
+  attached, or nil when the requirement came from something other than a call
+  (then that use is described, not shown). The message keeps the old head --
+  same site, same expected/actual -- so the report lands where it did before
+  this pass could say why (lang-h5)."
+  [function parameter first-use second-use]
+  (let [type-text #(if (keyword? %) (name %) (pr-str %))
+        use-text (fn [{:keys [expected use-site span]}]
+                   (str (if use-site (use-site-text use-site) "another use")
+                        " requires " (type-text expected)
+                        (when (and (:line span) (:column span))
+                          (str " [" parameter " at " (:line span) ":" (:column span) "]"))))
+        use-data (fn [{:keys [expected use-site span]}]
+                   (cond-> {:expected expected}
+                     use-site (assoc :operation
+                                     (let [head (first use-site)]
+                                       (or (:kotoba.diag/source-head (meta head)) head))
+                                     :site (use-site-text use-site))
+                     span (assoc :span span)))]
+    (reject! (str "expression type mismatch: expected " (type-text (:expected first-use))
+                  ", got " (type-text (:actual first-use))
+                  " -- parameter " parameter " of " function
+                  " is unannotated and its uses disagree: "
+                  (use-text first-use) ", " (use-text second-use)
+                  "; annotate " parameter)
+             (:form first-use) :kotoba.error/parameter-use-conflict
+             (cond-> {:kotoba.error/expected (:expected first-use)
+                      :kotoba.error/actual (:actual first-use)
+                      :kotoba.error/function function
+                      :kotoba.error/parameter parameter
+                      :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
+               (:span first-use) (assoc :span (:span first-use))))))
+
+(defn infer-absent-parameter-types
+  "Give every unannotated parameter the type its body actually requires.
+
+  An absent annotation meant `:i64`, so any function touching a string had to
+  annotate EVERY parameter that was not one -- and after per-parameter
+  annotation landed, still had to annotate the string ones. `(defn digit [line i]
+  (string-substring line i (+ i 1)))` was rejected with `expected string, got
+  i64`, naming a constraint the frontend already knew and would not apply.
+
+  The constraint is read from the checker's own refusal rather than from a
+  table of operand types. `require-expression-type!` carries the expected and
+  actual types in its ex-data and the rejected form is the bare parameter
+  symbol, so what a parameter must be is whatever the type checker says it must
+  be. A second table would be a second thing to keep in step; there is none.
+
+  Conservative by construction, in three ways, so that no program admitted
+  before this means anything different after it:
+
+    - only parameters marked `:param-types-inferred` are touched, never a
+      written annotation;
+    - a refinement is applied only when the parameter is still provisional
+      `:i64` and the checker asked for something else, so a parameter used as
+      an i64 stays one;
+    - a parameter whose uses disagree is refused here, at the site the
+      ordinary checker would have reported (same form, same expected/actual
+      head), with both uses named -- `parameter-use-conflict!`. The program
+      fails where it failed before this pass existed; what changed is that
+      the refusal says why (lang-h5).
+
+  Iterated to a fixed point because one function's refined parameter changes
+  what its callers' arguments must be. The budget bounds it at parameters plus
+  functions; hitting it leaves the types as they are and the ordinary checker
+  reports."
+  [functions]
+  (let [signature-table
+        (fn [fs]
+          (into {} (map (fn [{:keys [name params param-types result]}]
+                          [name {:params params :param-types param-types :result result}]))
+                fs))
+        total-params (reduce + 0 (map #(count (:params %)) functions))]
+    (loop [fs functions
+           budget (+ 1 (count functions) total-params)]
+      (if (or (zero? budget) (not-any? :param-types-inferred fs))
+        fs
+        (let [table (signature-table fs)
+              refinement
+              (first-truthy (fn [{:keys [name params param-types body param-types-inferred]}]
+                      (when (seq param-types-inferred)
+                        (try
+                          (do (infer-expression-type body (zipmap params param-types) table)
+                              nil)
+                          (catch #?(:clj Exception :cljs :default) error
+                            (let [{:keys [form span]
+                                   expected :kotoba.error/expected
+                                   actual :kotoba.error/actual
+                                   use-site :kotoba.error/use-site} (ex-data error)
+                                  index (when (simple-symbol? form)
+                                          (first (keep-indexed
+                                                  (fn [index parameter]
+                                                    (when (= parameter form) index))
+                                                  params)))]
+                              (when (and index
+                                         (contains? param-types-inferred index)
+                                         (= :i64 (nth param-types index))
+                                         (= :i64 actual)
+                                         (refinable-value-type? expected))
+                                {:function name :index index :type expected
+                                 :first-use {:expected expected :actual actual
+                                             :form form :span span
+                                             :use-site use-site}}))))))
+                    fs)]
+          (if-not refinement
+            fs
+            (let [{:keys [function index type first-use]} refinement
+                  applied (mapv (fn [f]
+                                  (if (= function (:name f))
+                                    (assoc f :param-types
+                                           (assoc (:param-types f) index type))
+                                    f))
+                                fs)
+                  ;; Did refining it move the disagreement onto the same
+                  ;; parameter? Then its uses do not agree, and no single type
+                  ;; satisfies both: refuse now, at the site the ordinary
+                  ;; checker would have reported, naming both uses.
+                  refined (first (filter #(= function (:name %)) applied))
+                  second-use
+                  (let [t (signature-table applied)]
+                    (try (do (infer-expression-type (:body refined)
+                                                    (zipmap (:params refined) (:param-types refined))
+                                                    t)
+                             nil)
+                         (catch #?(:clj Exception :cljs :default) error
+                           (let [{:keys [form]
+                                  actual :kotoba.error/actual
+                                  expected :kotoba.error/expected
+                                  use-site :kotoba.error/use-site} (ex-data error)]
+                             (when (and (simple-symbol? form)
+                                        (= form (nth (:params refined) index))
+                                        (= type actual))
+                               {:expected expected :use-site use-site
+                                :span (:span (ex-data error))})))))]
+              (if second-use
+                (parameter-use-conflict! function (nth (:params refined) index)
+                                         first-use second-use)
+                (recur applied (dec budget))))))))))
+
+(defn infer-absent-results
+  "Give every unannotated `defn` the result type its body actually has.
+
+  An absent annotation used to mean `:i64`, so an unannotated function could not
+  return a predicate once comparisons became `:bool`-typed -- which is most of
+  the stdlib, the examples and the test fixtures. Inferring instead is both the
+  Clojure reading (no annotation means no constraint) and what keeps a single
+  dialect: annotations are for boundaries, not for every function.
+
+  Two passes, because one function's inferred result feeds the next one's
+  inference. A body whose type cannot be resolved keeps the `:i64` provisional
+  and `check-value-types!` reports the real error."
+  [functions]
+  (letfn [(sigs [fs]
+            (into {} (map (fn [{:keys [name params param-types result]}]
+                            [name {:params params :param-types param-types
+                                   :result result}]))
+                  fs))
+          (pass [fs]
+            (let [table (sigs fs)]
+              (mapv (fn [{:keys [params param-types body result-inferred?] :as f}]
+                      (if result-inferred?
+                        (if-let [inferred (try (infer-expression-type
+                                                body (zipmap params param-types) table)
+                                               (catch #?(:clj Exception :cljs :default) _ nil))]
+                          (assoc f :result inferred)
+                          f)
+                        f))
+                    fs)))]
+    (-> functions pass pass)))
+
+(defn first-aborting-call
+  "The name of the first aborting function FORM calls, for a refusal."
+  [form abort-error-types]
+  (first-truthy (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
+        (tree-seq coll? seq form)))
+
+(defn abort-synthesized-context
+  "The lexical context a SYNTHESIZED function came from -- the description the
+  precondition refusal names -- or nil when the author wrote the function.
+
+  A function with no `:source-name` was made by desugaring: a loop / doseq /
+  dotimes body becomes `__kotoba_loop_N` (`:loop-helper?`), a lazy thunk and a
+  fn literal both become `__kotoba_lambda_N_arityK`, told apart by
+  `:lazy-thunk?`. `throw` inside one of those is refused while it is still
+  syntax (`abort-lexical-context`, bound during desugaring). An aborting CALL
+  cannot be refused there -- which functions abort is not known until the
+  fixed point below -- so it is refused when that is known, by the same
+  precondition and in the same words."
+  [{:keys [source-name loop-helper? lazy-thunk?]}]
+  (when-not source-name
+    (cond loop-helper? nil
+          lazy-thunk? "a lazy thunk"
+          :else "a fn literal")))
+
+(defn abort-type-text [type]
+  (if (keyword? type) (name type) (pr-str type)))
+
+(defn abort-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result result}]))
+        functions))
+
+(defn infer-abort-error-types
+  "Result inference and abort-error-type inference, together, to a fixed point.
+
+  A function's error type E is the type of its own escaping throws -- the ones
+  no try body between them and the function boundary catches -- AND, since
+  slice 2, the error type of every aborting function it calls with no try body
+  in between. Propagation is what makes an ordinary caller aborting without
+  writing `throw`, and it is why E is now an interprocedural fact: `parse`
+  throws, `read` calls `parse`, `main` catches, and only `main` had to say so.
+
+  Everything that can abort a function must agree on ONE E. Three ways to
+  disagree, each refused by name:
+
+    own throws disagree        function f throws two different error types
+    own throw vs a callee      function f throws X but calls aborting function
+                               `g`, which aborts with Y
+    two callees               function f calls aborting functions with two
+                               different error types
+
+  A SYNTHESIZED function may not acquire E this way. A loop / doseq / dotimes
+  body, a lazy thunk and a fn literal all become functions of their own, and
+  an abort leaving one of them unwinds a context whose obligations nothing
+  checks yet. `throw` there is refused while it is still syntax; an aborting
+  call is refused here, citing the same precondition in the same words --
+  otherwise slice 2's propagation would quietly admit exactly what slice 1's
+  guard was written to stop.
+
+  The two inferences feed each other: a throw's operand may be a call whose
+  result is inferred, and a try's binder type is a callee's error type. So
+  each round infers absent results with the error types known so far, then
+  reads every function's escaping error types with those results; the loop
+  ends when a round adds nothing. Propagation therefore advances one call
+  edge per round, which terminates because the call graph is finite.
+
+  Returns `{:functions fs :abort-error-types {name E}}`. A module with no
+  `throw`/`try` returns exactly `(infer-absent-results functions)` and `{}`."
+  [functions]
+  (if-not (first-truthy #(abort-form-mentions? (:body %)) functions)
+    {:functions (infer-absent-results functions) :abort-error-types {}}
+    (loop [known {} fs functions]
+      (let [fs (binding [*abort-error-types* known]
+                 (infer-absent-results fs))
+            sigs (abort-signatures fs)
+            next-known
+            (reduce
+             (fn [acc {:keys [name source-name params param-types body] :as function}]
+               ;; Deliberately NOT short-circuiting on a name already in ACC.
+               ;; A function that throws gets its E in round one, when nothing
+               ;; is known about its callees; the disagreement between its own
+               ;; throw and a callee it also calls is only visible in a LATER
+               ;; round, and skipping the function once it has an E would have
+               ;; meant never looking. Measured 2026-09-02: with the skip in
+               ;; place, `(defn- g [x] (if (= x 1) (throw 9) (f x)))` where `f`
+               ;; aborts with a string was admitted here and refused much
+               ;; later by elaboration, naming a scope rather than the two
+               ;; functions. Recomputing is idempotent -- `own` does not move.
+               (if (not (abort-escapes? body known))
+                 acc
+                 (let [thrown (volatile! [])
+                       inferred? (binding [*abort-error-types* known
+                                           *abort-throw-types* thrown]
+                                   (try (do (infer-expression-type body (zipmap params param-types) sigs)
+                                            true)
+                                        (catch #?(:clj Exception :cljs :default) _ false)))
+                       own (distinct @thrown)
+                       sites (binding [*abort-error-types* known] (abort-callee-sites body))
+                       propagated (distinct (map second sites))
+                       label (or source-name name)]
+                   (cond
+                     (not inferred?) acc
+
+                     (> (count own) 1)
+                     (reject! (str "function " label
+                                   " throws two different error types: "
+                                   (abort-type-text (first own)) " and "
+                                   (abort-type-text (second own)))
+                              name :kotoba.error/abort-error-type)
+
+                     (and (= 1 (count own))
+                          (first-truthy (fn [[_ e]] (not (same-expression-type? e (first own)))) sites))
+                     (let [[callee callee-error]
+                           (first (remove (fn [[_ e]] (same-expression-type? e (first own))) sites))]
+                       (reject! (str "function " label " throws " (abort-type-text (first own))
+                                     " but calls aborting function `" callee
+                                     "`, which aborts with " (abort-type-text callee-error))
+                                name :kotoba.error/abort-error-type))
+
+                     (and (empty? own) (> (count propagated) 1))
+                     (let [[[a ae] [b be]] (->> sites
+                                                (reduce (fn [seen [callee e]]
+                                                          (if (first-truthy (fn [[_ s]] (same-expression-type? s e)) seen)
+                                                            seen
+                                                            (conj seen [callee e])))
+                                                        [])
+                                                (take 2))]
+                       (reject! (str "function " label
+                                     " calls aborting functions with two different error types: "
+                                     (abort-type-text ae) " (`" a "`) and "
+                                     (abort-type-text be) " (`" b "`)")
+                                name :kotoba.error/abort-error-type))
+
+                     (seq own) (assoc acc name (first own))
+
+                     (seq propagated)
+                     (if-let [context (abort-synthesized-context function)]
+                       (reject! (str "call to aborting function `" (ffirst sites)
+                                     "` inside " context
+                                     " is not admitted in abort slice 1: precondition "
+                                     ":checked-lexical-facet-unwind is not met")
+                                name :kotoba.error/abort-precondition)
+                       (assoc acc name (first propagated)))
+
+                     :else acc))))
+             known fs)]
+        (if (= next-known known)
+          {:functions fs :abort-error-types known}
+          (recur next-known fs))))))
+
+(defn elaborate-aborts
+  "Lower every `throw`/`try` to result values, and every aborting function to
+  one that returns `[:result T E]`.
+
+  In a RESULT SCOPE R = `[:result T E]` (an aborting function's body, or a try
+  body), a tail expression is produced as an R value: `(throw e)` is
+  `(result-err-of R e)`, a plain value is `(result-ok-of R v)`, a call to an
+  aborting function with the same E is itself already an R value, and `if`,
+  `do` and `let` push the scope into their tail. A `let` whose binding value
+  aborts binds it through `result-match-of`: the ok arm continues, the err arm
+  re-raises into R. A `try` is one `result-match-of` over its body's R value,
+  ok arm the value, err arm the handler with the binder bound to E.
+
+  Anywhere else an aborting form is refused: in a scope that is not a result
+  scope with `call to aborting function ... must be inside try or in a
+  function that aborts with the same error type`; in a result scope but not
+  in tail or let-binding position, with the slice-1 position refusal.
+
+  Every sub-walk is forced (`mapv`, never `map`) inside the `binding` that
+  makes the error types visible: a lazy seq realized after it unwinds would
+  read `*abort-error-types*` as empty and call a catchable body uncatchable.
+
+  Types are read from the ORIGINAL forms with `infer-expression-type` (which
+  types `throw` as bottom and `try` as its join) against the pre-elaboration
+  signatures, never from lowered forms, so the two views never disagree."
+  [functions abort-error-types]
+  (if-not (or (seq abort-error-types)
+              (first-truthy #(abort-form-mentions? (:body %)) functions))
+    functions
+    (let [sigs (abort-signatures functions)]
+      (binding [*abort-error-types* abort-error-types
+                *synthetic-counter* (volatile! 0)]
+        (letfn [(type-of [form env] (infer-expression-type form env sigs))
+                (thrown-types [form env]
+                  (let [thrown (volatile! [])]
+                    (binding [*abort-throw-types* thrown] (type-of form env))
+                    @thrown))
+                (keep-meta [form result]
+                  (if (seq (meta form)) (with-meta result (meta form)) result))
+                (scope-error-type [scope] (nth scope 2))
+                ;; BACKSTOPS. `a-normalize-aborts` has already moved every
+                ;; aborting form it can reach into tail or let-binding
+                ;; position, and `infer-abort-error-types` has already given
+                ;; every function that calls one an error type of its own. So
+                ;; both of these fire only where the normalizer does not
+                ;; descend -- a map or set literal holding an aborting call --
+                ;; and they say that rather than naming a rule slice 2 lifted.
+                (refuse-position! [form scope]
+                  (if scope
+                    (reject! (str "abort slice 2 could not A-normalize "
+                                  (if-let [callee (first-aborting-call form abort-error-types)]
+                                    (str "the call to `" callee "`")
+                                    "the throw")
+                                  " into tail or let binding position")
+                             form :kotoba.error/abort-position)
+                    (let [callee (first-aborting-call form abort-error-types)]
+                      (reject! (str "call to aborting function `" callee
+                                    "` in a function that neither catches it nor aborts "
+                                    "with the same error type")
+                               form :kotoba.error/abort-unhandled-call))))
+                (lower-try [form env scope tail?]
+                  (let [[body clause] (rest form)
+                        [explicit binder handler] (try-clause-parts clause form)
+                        candidates (distinct (into (vec (thrown-types body env))
+                                                   (abort-callee-error-types body)))
+                        disagreeing (when (some? explicit)
+                                      (first (remove #(same-expression-type? % explicit) candidates)))
+                        error-type (cond
+                                     disagreeing
+                                     (reject! (str "try catches " (abort-type-text explicit)
+                                                   " but its body aborts with "
+                                                   (abort-type-text disagreeing))
+                                              form :kotoba.error/abort-error-type)
+                                     (some? explicit) explicit
+                                     (empty? candidates)
+                                     (reject! "try body cannot abort; there is nothing to catch"
+                                              form :kotoba.error/abort-nothing-to-catch)
+                                     (> (count candidates) 1)
+                                     (reject! (str "try body aborts with two different error types: "
+                                                   (abort-type-text (first candidates)) " and "
+                                                   (abort-type-text (second candidates)))
+                                              form :kotoba.error/abort-error-type)
+                                     :else (first candidates))
+                        value-type (type-of form env)
+                        _ (when (= value-type abort-bottom)
+                            (reject! "try body and catch handler both always abort; the try has no value"
+                                     form :kotoba.error/abort-value-type))
+                        try-scope [:result value-type error-type]
+                        body* (walk body env try-scope true)
+                        handler-env (assoc env binder error-type)
+                        ok (synthetic "abort_ok")]
+                    (keep-meta
+                     form
+                     (if (and tail? scope)
+                       (list 'result-match-of try-scope body*
+                             ok (list 'result-ok-of scope ok)
+                             binder (walk handler handler-env scope true))
+                       (list 'result-match-of try-scope body*
+                             ok ok
+                             binder (walk-plain handler handler-env scope))))))
+                (walk-plain [form env scope]
+                  ;; Value position: FORM must not abort past itself.
+                  (cond
+                    (not (seq? form)) form
+                    (abort-escapes? form abort-error-types) (refuse-position! form scope)
+                    (not (abort-form-mentions? form)) form
+                    :else
+                    (let [[op & args] form]
+                      (keep-meta
+                       form
+                       (case op
+                         try (lower-try form env scope false)
+                         let (let [bindings (first args) body (let-body args form)]
+                               (loop [pairs (partition 2 bindings) env env out []]
+                                 (if-let [[name value] (first pairs)]
+                                   (recur (rest pairs)
+                                          (assoc env name (type-of value env))
+                                          (conj out name (walk-plain value env scope)))
+                                   (list 'let out (walk-plain body env scope)))))
+                         result-match-of
+                         (let [[type value ok-name ok-body err-name err-body] args]
+                           (list 'result-match-of type (walk-plain value env scope)
+                                 ok-name (walk-plain ok-body (assoc env ok-name (second type)) scope)
+                                 err-name (walk-plain err-body (assoc env err-name (nth type 2)) scope)))
+                         option-match
+                         (let [[type value none-body some-name some-body] args]
+                           (list 'option-match type (walk-plain value env scope)
+                                 (walk-plain none-body env scope)
+                                 some-name (walk-plain some-body (assoc env some-name (second type)) scope)))
+                         variant-match
+                         (let [[type value branches] args
+                               cases (nth (canonical-closure-result-type type) 2)
+                               lowered (mapv (fn [[[_tag payload-type] [tag binder body :as branch]]]
+                                              (let [body* (walk-plain body (assoc env binder payload-type) scope)]
+                                                (if (vector? branch) [tag binder body*] (list tag binder body*))))
+                                            (mapv vector cases branches))]
+                           (list 'variant-match type (walk-plain value env scope)
+                                 (if (vector? branches) (vec lowered) (apply list lowered))))
+                         (cons op (mapv #(walk-plain % env scope) args)))))))
+                (walk [form env scope tail?]
+                  ;; Tail position of SCOPE (when both are given): produce an R value.
+                  (cond
+                    (not (and tail? scope)) (walk-plain form env scope)
+                    (not (abort-escapes? form abort-error-types))
+                    (list 'result-ok-of scope (walk-plain form env scope))
+                    :else
+                    (let [[op & args] form]
+                      (keep-meta
+                       form
+                       (case op
+                         throw
+                         (let [[value] args
+                               thrown-type (type-of value env)
+                               wanted (scope-error-type scope)]
+                           (when-not (same-expression-type? thrown-type wanted)
+                             (reject! (str "throw of " (abort-type-text thrown-type)
+                                           " inside a scope whose error type is "
+                                           (abort-type-text wanted))
+                                      form :kotoba.error/abort-error-type))
+                           (list 'result-err-of scope (walk-plain value env scope)))
+                         if
+                         (let [[test then else] (if-parts args form)]
+                           (list 'if (walk-plain test env scope)
+                                 (walk then env scope true)
+                                 (walk else env scope true)))
+                         do
+                         (list* 'do (concat (mapv #(walk-plain % env scope) (butlast args))
+                                            [(walk (last args) env scope true)]))
+                         let
+                         (let [bindings (first args) body (let-body args form)]
+                           ((fn continue [pairs env]
+                              (if-let [[name value] (first pairs)]
+                                (let [value-type (type-of value env)]
+                                  (if (abort-escapes? value abort-error-types)
+                                    (let [_ (when (= value-type abort-bottom)
+                                              (reject! "a let binding value that always aborts binds nothing"
+                                                       value :kotoba.error/abort-position))
+                                          value-scope [:result value-type (scope-error-type scope)]
+                                          err (synthetic "abort_err")]
+                                      (list 'result-match-of value-scope (walk value env value-scope true)
+                                            name (continue (rest pairs) (assoc env name value-type))
+                                            err (list 'result-err-of scope err)))
+                                    (list 'let [name (walk-plain value env scope)]
+                                          (continue (rest pairs) (assoc env name value-type)))))
+                                (walk body env scope true)))
+                            (partition 2 bindings) env))
+                         try (lower-try form env scope true)
+                         (if (contains? abort-error-types op)
+                           (let [callee-error (get abort-error-types op)
+                                 wanted (scope-error-type scope)]
+                             (when-not (same-expression-type? callee-error wanted)
+                               (reject! (str "call to aborting function `" op "` inside a scope "
+                                             "whose error type is " (abort-type-text wanted)
+                                             " but it aborts with " (abort-type-text callee-error))
+                                        form :kotoba.error/abort-error-type))
+                             (cons op (mapv #(walk-plain % env scope) args)))
+                           (refuse-position! form scope)))))))]
+          (mapv (fn [{:keys [name source-name params param-types result body] :as function}]
+                  (let [env (zipmap params param-types)
+                        error-type (get abort-error-types name)]
+                    (cond
+                      (some? error-type)
+                      (do (when (= result abort-bottom)
+                            (reject! (str "function " (or source-name name)
+                                          " always aborts; annotate the result type it would return")
+                                     name :kotoba.error/abort-result))
+                          (let [scope [:result result error-type]]
+                            (assoc function
+                                   :result scope
+                                   :abort-error-type error-type
+                                   ;; Which of the two ways it became aborting,
+                                   ;; so the precondition refusal can say
+                                   ;; "throw" only where there is one.
+                                   :abort-own-throw? (abort-escapes? body {})
+                                   :body (walk body env scope true))))
+                      ;; Escaping throws whose type never resolved: run the
+                      ;; inference uncaught so the real refusal is the one seen.
+                      (abort-escapes? body {})
+                      (do (type-of body env)
+                          (reject! (str "function " (or source-name name)
+                                        " throws but its error type could not be inferred")
+                                   name :kotoba.error/abort-error-type))
+                      (or (abort-escapes? body abort-error-types)
+                          (abort-form-mentions? body))
+                      (cond-> (assoc function :body (walk body env nil true))
+                        (abort-form-mentions? body) (assoc :abort-catches? true))
+                      :else function)))
+                functions))))))
+
+(defn closure-dispatcher-function?
+  "The synthetic entry points whose first physical i64 word is a closure pair."
+  [function-name]
+  (or (= '__kotoba_closure_apply function-name)
+      (boolean
+       (re-matches #"__kotoba_invoke(?:_.+)?\$arity[0-4]"
+                   (str function-name)))))
+
+(defn callable-field-read?
+  "`(record-get T v :f)` where T declares :f as `[:fn ...]`."
+  [form]
+  (and (seq? form) (= 'record-get (first form)) (= 4 (count form))
+       (let [type (canonical-closure-result-type (second form))]
+         (and (record-type? type)
+              (callable-type? (record-field-type type (nth form 3)))))))
+
+(defn callable-field-values
+  "The values a `record-new` / `record-assoc` form stores in `[:fn ...]`
+  fields."
+  [form]
+  (when (seq? form)
+    (let [[op type & args] form
+          type (when (contains? '#{record-new record-assoc} op)
+                 (canonical-closure-result-type type))]
+      (when (record-type? type)
+        (case op
+          record-new (keep (fn [[[_ field-type] value]]
+                             (when (callable-type? field-type) value))
+                           (map vector (nth type 2) args))
+          record-assoc (let [[_ field replacement] args]
+                         (when (callable-type? (record-field-type type field))
+                           [replacement])))))))
+
+(defn generated-empty-test?
+  "`(= __kotoba_... 0)`: the empty test a lazy sequence's desugaring writes."
+  [form]
+  (and (seq? form) (= '= (first form)) (= 3 (count form))
+       (let [[a b] (rest form)
+             generated? #(and (symbol? %) (str/starts-with? (str %) "__kotoba_"))
+             zero? #(and (kotoba-integer? %) (zero? %))]
+         (or (and (generated? a) (zero? b)) (and (zero? a) (generated? b))))))
+
+#?(:kotoba
+   (defn closure-number-operations [] [:ref :form/r]
+     (form/form-set
+      (form/append-many
+       (form/append-many
+        (form/append-many (heads-kids (tables/arithmetic))
+                          (heads-kids (tables/comparisons)))
+        (heads-kids (tables/i64-operations)))
+       (heads-kids (tables/i32-operations)))))
+   :default
+   (def closure-number-operations
+     "The operations that read a word as a number, which a closure handle is not
+  (ADR 0353 floor :function-values)."
+     (into (set/union arithmetic comparisons)
+           (concat (keys i64-operations) (keys i32-operations)))))
+
+(defn infer-closure-refinements
+  "Infer checked closure positions without adding a public closure value type.
+
+  Closure pairs intentionally remain i64 words in Wasm/native signatures.  The
+  refinements tell representation-aware runtimes which of those words must be
+  validated as the bounded `(lambda-id, capture-chain)` shape.  Facts only grow:
+  dispatcher arguments seed the graph, static calls propagate requirements to
+  callers, and closure-valued results propagate back through aliases and return
+  positions.  The finite function/parameter graph therefore has a deterministic
+  fixed point."
+  [functions lambda-infos]
+  (let [lambda-ids (mapv :id lambda-infos)
+        function-names (set (map :name functions))
+        seed
+        (into {}
+              (map (fn [{:keys [name closure-param-indexes closure-result?
+                                callable-param-contracts callable-result-contract]}]
+                     [name {:params (cond-> (into (set closure-param-indexes)
+                                                  (keys callable-param-contracts))
+                                      (closure-dispatcher-function? name) (conj 0))
+                            :result? (or (true? closure-result?)
+                                         (some? callable-result-contract))}]))
+              functions)
+        refinement-count-limit
+        (+ 1 (count functions) (reduce + (map (comp count :params) functions)))]
+    (letfn [(binding-value [env name]
+              (get env name))
+            (lambda-info-for-id [id]
+              (first-truthy #(when (= id (:id %)) %) lambda-infos))
+            (pair-chain-values [form]
+              (loop [chain form values []]
+                (cond
+                  (and (kotoba-integer? chain) (zero? chain)) values
+                  (and (seq? chain) (= 'pair (first chain)) (= 3 (count chain)))
+                  (recur (nth chain 2) (conj values (second chain)))
+                  :else nil)))
+            (closure-literal? [form]
+              (and (seq? form)
+                   (= 'pair (first form))
+                   (= 3 (count form))
+                   (kotoba-integer? (second form))
+                   ;; NBB represents guest i64 literals as JavaScript BigInt,
+                   ;; which cannot be hashed by the CLJS persistent-set UID
+                   ;; path. Lambda IDs are bounded by max-functions, so a
+                   ;; deterministic linear scan avoids hashing arbitrary pair
+                   ;; payloads without widening the analysis.
+                   (first-truthy #(= % (second form)) lambda-ids)))
+            (zero-tested-symbol [form]
+              (when (and (seq? form) (= '= (first form)) (= 3 (count form)))
+                (let [[left right] (rest form)]
+                  (cond
+                    (and (symbol? left) (kotoba-integer? right) (zero? right)) left
+                    (and (symbol? right) (kotoba-integer? left) (zero? left)) right
+                    :else nil))))
+            (expression-status [function-name form env param-indexes facts seen]
+              (cond
+                (closure-literal? form) :closure
+                (symbol? form)
+                (if (contains? seen form)
+                  :unknown
+                  (if-let [{bound-form :form bound-env :env bound-status :status}
+                           (binding-value env form)]
+                    ;; The binding loop below already ran this exact query when
+                    ;; it bound the name, so the answer is carried on the entry
+                    ;; rather than re-derived. Re-deriving is what made this
+                    ;; quadratic: a chain of K bindings each referring to the
+                    ;; previous one costs O(i) to resolve at binding i, so the
+                    ;; loop paid sum(i) = O(K^2) walks of the same forms.
+                    (or bound-status
+                        (expression-status function-name bound-form bound-env
+                                           param-indexes facts (conj seen form)))
+                    (if (contains? (get-in facts [function-name :params] #{})
+                                   (get param-indexes form))
+                      :closure
+                      :unknown)))
+                (seq? form)
+                (let [[op & args] form]
+                  (cond
+                    (= op 'let)
+                    (let [bindings (first args) body (let-body args form)]
+                      (loop [pairs (partition 2 bindings) current env]
+                        (if-let [[name value] (first pairs)]
+                          (let [status (expression-status function-name value current
+                                                          param-indexes facts seen)]
+                            (if (= :trap status)
+                              :trap
+                              (recur (next pairs)
+                                     (assoc current name {:form value
+                                                          :env current
+                                                          :status status}))))
+                          (expression-status function-name body current param-indexes
+                                             facts seen))))
+
+                    (= op 'if)
+                    (let [[test then else] args
+                          test-status (expression-status function-name test env
+                                                         param-indexes facts seen)]
+                      (if (= :trap test-status)
+                        :trap
+                        (let [then-status (expression-status function-name then env
+                                                             param-indexes facts seen)
+                              else-status (expression-status function-name else env
+                                                             param-indexes facts seen)
+                              statuses (set [then-status else-status])]
+                          (cond
+                            (= statuses #{:trap}) :trap
+                            (and (contains? statuses :closure)
+                                 (every? #{:closure :trap} statuses)) :closure
+                            :else :unknown))))
+
+                    (= op 'do)
+                    (loop [remaining args]
+                      (if-let [value (first remaining)]
+                        (let [status (expression-status function-name value env
+                                                        param-indexes facts seen)]
+                          (if (or (= :trap status) (nil? (next remaining)))
+                            status
+                            (recur (next remaining))))
+                        :unknown))
+
+                    (and (= op 'quot) (= args '(1 0))) :trap
+
+                    ;; a `[:fn ...]` record field holds a closure (ADR 0353
+                    ;; floor :function-values)
+                    (callable-field-read? form) :closure
+
+                    :else
+                    (let [arg-statuses (mapv #(expression-status
+                                              function-name % env param-indexes facts seen)
+                                             args)]
+                      (cond
+                        (first-truthy #{:trap} arg-statuses) :trap
+                        (and (contains? function-names op)
+                             (get-in facts [op :result?])) :closure
+                        :else :unknown))))
+                :else :unknown))
+            (analyze-pass [facts]
+              (let [next-facts (volatile! facts)]
+                (letfn [(mark-param! [function-name index]
+                          (when (some? index)
+                            (vswap! next-facts update-in
+                                    [function-name :params] (fnil conj #{}) index)))
+                        (mark-result! [function-name]
+                          (vswap! next-facts assoc-in [function-name :result?] true))
+                        (require-closure! [function-name form env param-indexes
+                                           narrowed seen]
+                          (when-not (= :trap (expression-status
+                                             function-name form env param-indexes
+                                             @next-facts seen))
+                            (cond
+                              (closure-literal? form) nil
+                              (symbol? form)
+                              (when-not (or (contains? narrowed form)
+                                            (contains? seen form))
+                                (if-let [{bound-form :form bound-env :env}
+                                         (binding-value env form)]
+                                  (require-closure! function-name bound-form bound-env
+                                                    param-indexes narrowed
+                                                    (conj seen form))
+                                  (mark-param! function-name
+                                               (get param-indexes form))))
+                              (seq? form)
+                              (let [[op & args] form]
+                                (cond
+                                  (= op 'let)
+                                  (let [bindings (first args) body (let-body args form)]
+                                    (loop [pairs (partition 2 bindings) current env]
+                                      (if-let [[name value] (first pairs)]
+                                        (recur (next pairs)
+                                               (assoc current name {:form value
+                                                                    :env current}))
+                                        (require-closure! function-name body current
+                                                          param-indexes narrowed seen))))
+                                  (= op 'if)
+                                  (doseq [branch (rest args)]
+                                    (require-closure! function-name branch env
+                                                      param-indexes narrowed seen))
+                                  (= op 'do)
+                                  (when-let [tail (last args)]
+                                    (require-closure! function-name tail env
+                                                      param-indexes narrowed seen))
+                                  (and (contains? function-names op)
+                                       (not (closure-dispatcher-function? op)))
+                                  (mark-result! op)
+                                  :else nil))
+                              :else nil)))
+                        (scan-calls! [function-name form env param-indexes narrowed]
+                          (when (seq? form)
+                            (if (closure-literal? form)
+                              (let [[_ lambda-id capture-chain] form
+                                    {:keys [captures helper]}
+                                    (lambda-info-for-id lambda-id)
+                                    capture-values (pair-chain-values capture-chain)
+                                    capture-count (count captures)]
+                                (doseq [capture capture-values]
+                                  (scan-calls! function-name capture env param-indexes
+                                               narrowed))
+                                (doseq [index (get-in @next-facts
+                                                     [(:name helper) :params] #{})
+                                        :when (< index capture-count)]
+                                  (when-let [capture (nth capture-values index nil)]
+                                    (require-closure! function-name capture env
+                                                      param-indexes narrowed #{}))))
+                              (let [[op & args] form]
+                                (cond
+                                (= op 'let)
+                                (let [bindings (first args) body (let-body args form)]
+                                  (loop [pairs (partition 2 bindings) current env]
+                                    (if-let [[name value] (first pairs)]
+                                      (do (scan-calls! function-name value current
+                                                       param-indexes narrowed)
+                                          (recur (next pairs)
+                                                 (assoc current name {:form value
+                                                                      :env current})))
+                                      (scan-calls! function-name body current
+                                                   param-indexes narrowed))))
+                                (= op 'if)
+                                (let [[test then else] args
+                                      nonzero-symbol (zero-tested-symbol test)]
+                                  (scan-calls! function-name test env param-indexes narrowed)
+                                  (scan-calls! function-name then env param-indexes narrowed)
+                                  (scan-calls! function-name else env param-indexes
+                                               (cond-> narrowed
+                                                 nonzero-symbol (conj nonzero-symbol))))
+                                :else
+                                (do
+                                  (doseq [arg args]
+                                    (scan-calls! function-name arg env param-indexes
+                                                 narrowed))
+                                  ;; A dispatcher multiplexes lambdas whose
+                                  ;; argument positions may have different
+                                  ;; representation refinements.  Candidate-
+                                  ;; specific requirements belong on each
+                                  ;; helper entry, not on the shared dispatcher
+                                  ;; argument (only its closure handle is a
+                                  ;; uniform checked position).
+                                  (when (and (contains? function-names op)
+                                             (not (closure-dispatcher-function?
+                                                   function-name)))
+                                    (doseq [index (get-in @next-facts
+                                                         [op :params] #{})]
+                                      (when-let [arg (nth args index nil)]
+                                        (require-closure! function-name arg env
+                                                          param-indexes narrowed
+                                                          #{}))))))))))]
+                  (doseq [{:keys [name params body]} functions]
+                    (let [param-indexes (zipmap params (range))]
+                      (when (= :closure (expression-status
+                                         name body {} param-indexes @next-facts #{}))
+                        (mark-result! name))
+                      (when (get-in @next-facts [name :result?])
+                        (require-closure! name body {} param-indexes #{} #{}))
+                      (scan-calls! name body {} param-indexes #{})))
+                  @next-facts)))]
+      (let [facts
+            (loop [facts seed iteration 0]
+              (let [next-facts (analyze-pass facts)]
+                (cond
+                  (= facts next-facts) facts
+                  (>= iteration refinement-count-limit)
+                  (reject! "closure refinement inference did not converge"
+                           {:iterations iteration})
+                  :else (recur next-facts (inc iteration)))))]
+        ;; ADR 0353 floor :function-values: a closure is a function, not a
+        ;; number. Its word stays the one-word i64 handle every dispatcher
+        ;; takes, so the refusal is made where the analysis above knows the
+        ;; word is a closure: a let-bound fn, a call whose result is one
+        ;; (a `[:fn ...]` result contract), a `[:fn ...]` record field.
+        (letfn [(refuse-closure-operands! [function-name form env param-indexes]
+                  (when (seq? form)
+                    (let [[op & args] form]
+                      (if (= op 'let)
+                        (let [bindings (first args) body (let-body args form)]
+                          (loop [pairs (partition 2 bindings) current env]
+                            (if-let [[name value] (first pairs)]
+                              (do (refuse-closure-operands! function-name value current
+                                                            param-indexes)
+                                  (recur (next pairs)
+                                         (assoc current name {:form value :env current})))
+                              (refuse-closure-operands! function-name body current
+                                                        param-indexes))))
+                        (do
+                          (doseq [item (callable-field-values form)]
+                            (when-not (closure-literal? item)
+                              (reject! (str "a [:fn ...] record field takes a fn literal; "
+                                            "this value is not a closure (ADR 0353)")
+                                       form :kotoba.error/function-value-field)))
+                          ;; The one exemption is generated: a lazy sequence is
+                          ;; a closure or 0 (empty), and its desugaring tests
+                          ;; `(= __kotoba_lazy_seq_N 0)`. `__kotoba_` is
+                          ;; reserved, so no source program reaches this.
+                          (when (and (contains? closure-number-operations op)
+                                     (not (generated-empty-test? form)))
+                            (doseq [arg args]
+                              (when (= :closure (expression-status function-name arg env
+                                                                   param-indexes facts #{}))
+                                (if (= '= op)
+                                  (reject! (str "a function value has no equality: (= f g) would "
+                                                "compare two closure handles, and equality over "
+                                                "handles stays refused (ADR 0353)")
+                                           form :kotoba.error/function-value-equality)
+                                  (reject! (str "a function value is not a number: " op
+                                                " over a closure is refused; call it instead"
+                                                " (ADR 0353)")
+                                           form :kotoba.error/function-value-arithmetic)))))
+                          (doseq [arg args]
+                            (refuse-closure-operands! function-name arg env
+                                                      param-indexes)))))))]
+          (doseq [{:keys [name params body]} functions]
+            (refuse-closure-operands! name body {} (zipmap params (range)))))
+        (mapv
+         (fn [{:keys [name param-types result] :as function}]
+           (let [indexes (vec (sort (get-in facts [name :params] #{})))
+                 result? (true? (get-in facts [name :result?]))]
+             (doseq [index indexes]
+               (when-not (= :i64 (nth param-types index nil))
+                 (reject! "closure refinement requires an i64 parameter"
+                          {:function name :parameter-index index})))
+             (when (and result? (not= :i64 result))
+               (reject! "closure refinement requires an i64 result"
+                        {:function name :result result}))
+             (cond-> function
+               (seq indexes) (assoc :closure-param-indexes indexes)
+               result? (assoc :closure-result? true))))
+         functions)))))
+
+(defn check-value-types! [functions]
+  (let [signatures (into {} (map (fn [{:keys [name params param-types result]}]
+                                   [name {:params params :param-types param-types
+                                          :result result}])
+                                 functions))]
+    (binding [*numeric-resolution-final* true]
+      (doseq [{:keys [name params param-types result body]} functions]
+        (let [actual (infer-expression-type body (zipmap params param-types) signatures)]
+          (require-expression-type! actual result name))))
+    (let [nodes (mapcat #(tree-seq coll? seq (:body %)) functions)
+          literal-bytes
+          (reduce + 0
+                  (map value/utf8-byte-count!
+                       (filter string? nodes)))
+          keyword-bytes
+          (reduce + 0
+                  (map (comp value/utf8-byte-count! str)
+                       (filter keyword? nodes)))]
+      (when (> literal-bytes value/string-value-byte-limit)
+        (reject! "module string literals exceed UTF-8 byte limit" literal-bytes))
+      (when (> keyword-bytes value/string-value-byte-limit)
+        (reject! "module keyword literals exceed UTF-8 byte limit" keyword-bytes)))))

@@ -1,0 +1,2832 @@
+(ns kotoba.compiler.frontend.analyze
+  "Module `analyze` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (89 forms, 2609 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs, validate, infer, record-projection, desugar, row, state-ability."
+  (:require [kotoba.lang.coll :as set]
+            [kotoba.lang.text :as str]
+            [kotoba.compiler.affine :as affine]
+            [kotoba.compiler.schema :as schema]
+            [kotoba.compiler.frontend-tables :as tables]
+            [kotoba.hir :as hir]
+            [kotoba.kir :as kir]
+            [kotoba.kir.value :as value]
+            #?@(:kotoba [[kotoba.form :as form]])
+            [kotoba.compiler.frontend.base :refer [*local-state-used* *synthetic-counter* a-normalize-aborts abort-escapes? capability-id->name capability-registry check-abort-facet-unwind! effect-capability-id elaborate-local-state expand-intrinsic-helper-forms first-truthy form-span max-reader-depth read-forms reject! source-operation-registry synthetic validate-interrupt-entries!]]
+            [kotoba.compiler.frontend.kernel-region :refer [absence-marker? check-kernel-region-provenance!]]
+            [kotoba.compiler.frontend.closure-types :refer [*schemas* callable-type? canonical-closure-result-type check-linear-resource-ownership! closure-result-type? invoke-dispatcher-name lambda-dispatchers record-type? schema-ref-type? structured-type? type-alias-form? typed-param-parts variant-type?]]
+            [kotoba.compiler.frontend.expand :refer [binding-symbols expand-closed-multimethod-forms expand-defn-parts expand-record-protocol-forms expand-state-ability-forms kotoba-integer? max-parameters rewrite-pure-application-forms valid-name? variadic-params?]]
+            [kotoba.compiler.frontend.namespace-defs :refer [check-pure-product-source-forms! compiler-rejection? erase-slice-values expand-defdesugar-forms max-functions namespace-parts reserved-binding-name? reserved-function-names #?@(:kotoba [] :default [bytes-operations canonical-list-operations canonical-typed-map-operations decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations generic-option-operations heap-operations heterogeneous-vector-operations i32-operations kgraph-operations lazy-sequence-operations list-operations parametric-result-operations record-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations variant-operations])]]
+            [kotoba.compiler.frontend.validate :refer [constant-literal? def-parts quote-form? validate-expr]]
+            [kotoba.compiler.frontend.infer :refer [*loop-helper-names* *loop-helper-recorder* *row-op-schemas* *state-handlers* absence-in-tail? check-loop-recur-argument-types! check-value-types! elaborate-aborts elaborate-named-abilities infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-expression-type infer-loop-helper-results legacy-absence resolve-absence-if same-expression-type? use-site-text]]
+            [kotoba.compiler.frontend.record-projection :refer [doc-keys-helper-name doc-nth-helper-name doc-rest-helper-name doc-vals-helper-name rewrite-record-projections]]
+            [kotoba.compiler.frontend.desugar :refer [*absence-mode* *document-functions* *expected-callable-contract* *function-arities* *function-callable-param-contracts* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *local-option-types* *local-types* *loop-counter* *loop-helper-shapes* *pending-lambdas* *pending-loop-helpers* *required-closure-dispatchers* *used-capability-keywords* *uses-apply?* *uses-lazy?* char-helper-name desugar-expr desugar-result-expr doc-append-from-helper-name expression-callable-contract lazy-drop-helper-name lazy-take-helper-name realized-lowering string-from-i64-helper-name #?@(:kotoba [put2])]]
+            [kotoba.compiler.frontend.row :refer [specialize-row-parameters type-literals]]
+            [kotoba.compiler.frontend.state-ability :refer [specialize-state-abilities state-handle-bodies state-refuse-impure-handler! thread-state-abilities]])
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                          [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                                 :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
+                                 ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]]]]
+                                 :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+
+;; forward references inside this module (the cut keeps the original form order)
+(declare unported-heads typed-op-specs resolve-absences analyze-forms* substitute-constants)
+
+
+;; ---- desugar on the Kotoba route (selfhost S3, desugar half): the env, the result records, refusals ----
+;; The host threads ~30 dynamic vars through desugar; here one record is threaded by value. The fields the
+;; ported heads read today: the synthetic-name counter (`*synthetic-counter*`, a volatile on the host), the
+;; contextual closure result type (`*contextual-closure-result-type*`, nil-form for none), the absence mode
+;; (`*absence-mode*` = :none) and the module's function names (a Form set: a head that is one of them is an
+;; ordinary call, `desugar-ordinary-call`; every other head that is not ported here is refused as unported).
+;; A pass is (env, Form) -> :fe/dr {env' form'}; a list of forms is :fe/drs. A refusal is a thrown :fe/err
+;; (ADR 0007), so every call of an aborting function sits in tail position or as a `let` value.
+#?(:kotoba
+   (defn fe-env [counter :i64 result [:ref :form/r] none :bool arities [:ref :form/r] tbl [:ref :form/r]] [:ref :fe/env]
+     (record-new [:ref :fe/env] counter result none arities
+                 (form/form-set (form/no-forms)) (form/nil-form) (form/form-set (form/no-forms)) -1 tbl
+                 (form/nil-form) false "" (form/nil-form) (form/nil-form)))
+   :default nil)
+
+;; the list of the call's arguments from index I as a Form seq (the host's `(rest form)` / `args`)
+#?(:kotoba
+   (defn args-of [form [:ref :form/r]] [:list [:ref :form/r]]
+     (form/rest-list form))
+   :default nil)
+
+#?(:kotoba
+   (defn fe-tables [] [:ref :form/r]
+     (form/form-map
+      (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (put2 (form/no-forms)
+        (form/keyword-form :string-idx) (tables/contextual-string-argument-indexes))
+        (form/keyword-form :document-idx) (tables/contextual-document-argument-indexes))
+        (form/keyword-form :f64-idx) (tables/contextual-f64-argument-indexes))
+        (form/keyword-form :f32-idx) (tables/contextual-f32-argument-indexes))
+        (form/keyword-form :vec-f64) (tables/contextual-vector-f64-argument-types))
+        (form/keyword-form :typed-vec) (tables/typed-vector-operations))
+        (form/keyword-form :doc-heads) (tables/document-head-set))
+        (form/keyword-form :non-shadowable) (tables/non-shadowable-special-heads))
+        (form/keyword-form :str-int) (tables/str-integer-heads))
+        (form/keyword-form :doc-ctor) (tables/document-constructor-heads))
+        (form/keyword-form :doc-ret) (tables/document-returning-heads))
+        (form/keyword-form :unported) (unported-heads))
+        (form/keyword-form :typed-ops) (typed-op-specs))
+        (form/keyword-form :cap-registry) (capability-registry))))
+   :default nil)
+
+;; heads of the host's `case op` (and its cond chain) that have no Kotoba port yet: the scaffolding that shrinks as
+;; arms land. A head outside this set and outside the ported arms is an ordinary call (`desugar-ordinary-call`).
+#?(:kotoba
+   (defn unported-heads [] [:ref :form/r]
+     (form/edn-form "#{fn fn-ref invoke apply eval lazy-cons lazy-first lazy-rest lazy-empty? lazy-map lazy-filter take drop document loop dotimes doseq assert! retract! observe! facet-enter! facet-leave! match cap-call typed-cap-call char string-join reduce mapv filterv into map map-indexed filter remove}"))
+   :default nil)
+
+;; the table-driven typed operations: op -> [arity message kinds-per-operand]
+#?(:kotoba
+   (defn typed-op-specs [] [:ref :form/r]
+     (form/edn-form "{typed-list-nth [3 \"typed-list-nth requires type, value, and index\" [:raw :value :expr]]
+    typed-list-conj [3 \"typed-list-conj requires type, value, and item\" [:raw :value :list-item]]
+    typed-set-count [2 \"typed-set-count requires type and value\" [:raw :value]]
+    typed-set-contains [3 \"typed-set-contains requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-conj [3 \"typed-set-conj requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-disj [3 \"typed-set-disj requires type, value, and item\" [:raw :value :set-item]]
+    typed-set-equal [3 \"typed-set-equal requires type and two values\" [:raw :value :value]]
+    typed-set-nth [3 \"typed-set-nth requires type, value, and index\" [:raw :value :expr]]
+    typed-map-count [2 \"typed-map-count requires type and value\" [:raw :value]]
+    typed-map-contains [3 \"typed-map-contains requires type, value, and key\" [:raw :value :key]]
+    typed-map-get [3 \"typed-map-get requires type, value, and key\" [:raw :value :key]]
+    typed-map-entry-at [3 \"typed-map-entry-at requires type, value, and index\" [:raw :value :expr]]
+    typed-map-keys [2 \"typed-map-keys requires type and value\" [:raw :value]]
+    typed-map-vals [2 \"typed-map-vals requires type and value\" [:raw :value]]
+    typed-map-assoc [4 \"typed-map-assoc requires type, value, key, and item\" [:raw :value :key :val]]
+    typed-map-dissoc [3 \"typed-map-dissoc requires type, value, and key\" [:raw :value :key]]
+    typed-map-equal [3 \"typed-map-equal requires type and two values\" [:raw :value :value]]
+    hetero-vector-count [2 \"hetero-vector-count requires type and value\" [:raw :value]]
+    hetero-vector-at [3 \"hetero-vector-at requires type, value, and literal index\" [:raw :value :raw]]
+    hetero-vector-equal [3 \"hetero-vector-equal requires type and two values\" [:raw :value :value]]
+    record-equal [3 \"record-equal requires type and two values\" [:ct :value :value]]
+    result-ok-of [2 \"result-ok-of requires type and payload\" [:raw :ok]]
+    result-err-of [2 \"result-err-of requires type and payload\" [:raw :err]]
+    result-ok?-of [2 \"result-ok?-of requires type and result\" [:raw :value]]
+    result-value-of [3 \"result-value-of requires type, result, and fallback\" [:raw :value :ok]]
+    result-error-of [3 \"result-error-of requires type, result, and fallback\" [:raw :value :err]]
+    option-some-of [2 \"option-some-of requires type and payload\" [:raw :payload]]
+    option-none-of [1 \"option-none-of requires one type\" [:raw]]
+    option-some?-of [2 \"option-some?-of requires type and value\" [:raw :value]]
+    option-value-of [3 \"option-value-of requires type, value, and fallback\" [:raw :value :payload]]
+    option-or [2 \"option-or requires an option value and a fallback\" [:expr :expr]]}"))
+   :default nil)
+#?(:kotoba nil :default (def sequencing-operations tables/sequencing-operations))
+(def max-lowered-nodes 100000)
+
+(defn definition-failure!
+  "The definition-layer sibling of `internal-failure!`.
+
+  `internal-failure!` is installed at three PER-EXPRESSION chokepoints
+  (`desugar-expr`, `validate-expr`, `infer-expression-type`). Top-level form
+  handling runs before any of them, so a host error escaping there reached
+  `kotoba.sema/analyze` with no `ex-data` at all and the CLI could say only
+  `internal compiler error` -- exit 70 with `:code :kotoba/internal-error` and
+  nothing else. Measured 2026-09-03 on amu 57ba0ee0: `(defn)`, `(defn nil
+  [] 0)`, `(defn 42 [] 0)` and twelve siblings all arrived that way, because
+  `expand-defn-parts` called `(name source-name)` on whatever sat in the name
+  position (`Doesn't support name: 42`).
+
+  Those fifteen are now REFUSED by name (see `expand-defn-parts`), which is
+  the right answer for a caller who typed something wrong: exit 65, not 70.
+  This function is the other half -- the backstop for a host error nobody has
+  measured yet. It keeps `:phase :internal` and therefore exit 70, because a
+  compiler that broke is not a caller who typed something wrong. What changes
+  is that 70 now says WHICH DECLARATION it broke reading.
+
+  What travels is compiler vocabulary and source position, never user data:
+  the head, the span, and the host exception's own message. The head is spelled
+  into the code only when it is in `definition-heads` -- see that var for why
+  it is a separate vocabulary from `reserved-function-names` rather than an
+  addition to it. The FORM is deliberately not attached, for the same reason
+  `internal-failure!` does not attach it: `kotoba.compiler.diagnostic/from-error`
+  copies `:span` into the envelope and never `:form`, and this must not become
+  the first place a source fragment leaks into one.
+
+  `form` may be nil. Three passes (`expand-record-protocol-forms`,
+  `expand-closed-multimethod-forms`, `expand-defdesugar-forms`) run over the
+  whole form vector rather than one declaration, so there is no single form to
+  point at. Naming an arbitrary one of them would produce a span that looks
+  like it located the problem and did not; the operation is reported without a
+  span instead."
+  [error head form]
+  (if (or (compiler-rejection? error)
+          ;; Same carve-out as `internal-failure!`: `analyze` owns host stack
+          ;; exhaustion one frame further out and refuses it by name.
+          (kir/host-stack-exhausted? error))
+    (throw error)
+    (let [named? (contains? definition-heads head)
+          span (or (get (meta form) :span) (form-span form))
+          cause (ex-message error)]
+      (throw (ex-info (str "internal compiler failure while reading "
+                           (if named? (str "a `" head "` declaration")
+                               "a top-level declaration")
+                           (when span (str " at line " (:line span)
+                                           " column " (:column span)))
+                           ": " cause)
+                      (cond-> {:phase :internal
+                               :kotoba.error/code
+                               (if named?
+                                 (keyword "kotoba.error.internal-operation" (name head))
+                                 :kotoba.error/internal-operation-failure)
+                               :kotoba.error/cause cause}
+                        named? (assoc :kotoba.error/operation head)
+                        span (assoc :span span)))))))
+
+(defn guarding-definition
+  "Run `thunk` for one top-level declaration, naming `head` if a host error
+  escapes it. A deliberate refusal passes through untouched."
+  [head form thunk]
+  (try (thunk)
+       (catch #?(:clj Throwable :cljs :default) error
+         (definition-failure! error head form))))
+
+(defn absence-in-body?
+  "Any absence marker anywhere in FORM."
+  [form]
+  (cond (absence-marker? form) true
+        (seq? form) (boolean (first-truthy absence-in-body? form))
+        (vector? form) (boolean (first-truthy absence-in-body? form))
+        :else false))
+
+#?(:kotoba
+   (defn closure-apply-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_closure_apply :params [__kotoba_apply_closure __kotoba_apply_args] :i64-pair-chain-param-indexes [1] :result :i64 :effects #{} :body (if (= __kotoba_apply_args 0) (__kotoba_invoke$arity0 __kotoba_apply_closure) (let [a0 (pair-first __kotoba_apply_args) t1 (pair-second __kotoba_apply_args)] (if (= t1 0) (__kotoba_invoke$arity1 __kotoba_apply_closure a0) (let [a1 (pair-first t1) t2 (pair-second t1)] (if (= t2 0) (__kotoba_invoke$arity2 __kotoba_apply_closure a0 a1) (let [a2 (pair-first t2) t3 (pair-second t2)] (if (= t3 0) (__kotoba_invoke$arity3 __kotoba_apply_closure a0 a1 a2) (let [a3 (pair-first t3) t4 (pair-second t3)] (if (= t4 0) (__kotoba_invoke$arity4 __kotoba_apply_closure a0 a1 a2 a3) 0)))))))))}"))
+   :default
+(def closure-apply-helper
+  {:name '__kotoba_closure_apply
+   :params '[__kotoba_apply_closure __kotoba_apply_args]
+   :i64-pair-chain-param-indexes [1]
+   :result :i64 :effects #{}
+   :body
+   '(if (= __kotoba_apply_args 0)
+      (__kotoba_invoke$arity0 __kotoba_apply_closure)
+      (let [a0 (pair-first __kotoba_apply_args)
+            t1 (pair-second __kotoba_apply_args)]
+        (if (= t1 0)
+          (__kotoba_invoke$arity1 __kotoba_apply_closure a0)
+          (let [a1 (pair-first t1) t2 (pair-second t1)]
+            (if (= t2 0)
+              (__kotoba_invoke$arity2 __kotoba_apply_closure a0 a1)
+              (let [a2 (pair-first t2) t3 (pair-second t2)]
+                (if (= t3 0)
+                  (__kotoba_invoke$arity3 __kotoba_apply_closure a0 a1 a2)
+                  (let [a3 (pair-first t3) t4 (pair-second t3)]
+                    (if (= t4 0)
+                      (__kotoba_invoke$arity4 __kotoba_apply_closure a0 a1 a2 a3)
+                      0)))))))))}))
+
+#?(:kotoba
+   (defn lazy-take-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_lazy_take :params [__kotoba_lazy_n __kotoba_lazy_seq] :result :i64 :effects #{} :body (if (<= __kotoba_lazy_n 0) 0 (if (= __kotoba_lazy_seq 0) 0 (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)] (if (= __kotoba_lazy_cell 0) 0 (pair (__kotoba_invoke$arity0 (pair-first __kotoba_lazy_cell)) (__kotoba_lazy_take (- __kotoba_lazy_n 1) (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell))))))))}"))
+   :default
+(def lazy-take-helper
+  {:name lazy-take-helper-name
+   :params '[__kotoba_lazy_n __kotoba_lazy_seq]
+   :result :i64 :effects #{}
+   :body
+   '(if (<= __kotoba_lazy_n 0)
+      0
+      (if (= __kotoba_lazy_seq 0)
+        0
+        (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)]
+          (if (= __kotoba_lazy_cell 0)
+            0
+            (pair (__kotoba_invoke$arity0 (pair-first __kotoba_lazy_cell))
+                  (__kotoba_lazy_take
+                   (- __kotoba_lazy_n 1)
+                   (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell))))))))}))
+
+#?(:kotoba
+   (defn lazy-drop-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_lazy_drop :params [__kotoba_lazy_n __kotoba_lazy_seq] :result :i64 :effects #{} :body (if (<= __kotoba_lazy_n 0) __kotoba_lazy_seq (if (= __kotoba_lazy_seq 0) 0 (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)] (if (= __kotoba_lazy_cell 0) 0 (__kotoba_lazy_drop (- __kotoba_lazy_n 1) (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell)))))))}"))
+   :default
+(def lazy-drop-helper
+  {:name lazy-drop-helper-name
+   :params '[__kotoba_lazy_n __kotoba_lazy_seq]
+   :result :i64 :effects #{}
+   :body
+   '(if (<= __kotoba_lazy_n 0)
+      __kotoba_lazy_seq
+      (if (= __kotoba_lazy_seq 0)
+        0
+        (let [__kotoba_lazy_cell (__kotoba_invoke$arity0 __kotoba_lazy_seq)]
+          (if (= __kotoba_lazy_cell 0)
+            0
+            (__kotoba_lazy_drop
+             (- __kotoba_lazy_n 1)
+             (__kotoba_invoke$arity0 (pair-second __kotoba_lazy_cell)))))))}))
+
+(defn reject-reserved-source-symbols!
+  "`__kotoba_` is the prefix every synthesized binding uses. Deterministic
+  synthesized names are only safe if a program cannot write one: a user local
+  called `__kotoba_and_2` would be shadowed by the temp `(and x <expr>)` binds,
+  and `<expr>` is user code evaluated inside that scope -- real capture, not a
+  theoretical one.
+
+  Checked once over the SOURCE forms, before any desugaring, because after
+  desugaring the synthesized names are indistinguishable from written ones. The
+  prefix is reserved outright rather than only in binding position: a program
+  that cannot mention the name cannot capture, shadow or read one."
+  [forms]
+  ;; A quoted symbol is DATA: it is never a binding, so it cannot capture or be
+  ;; captured, which is the whole reason the prefix is reserved. The same holds
+  ;; for a `case` TEST constant, which is compared and never evaluated. The
+  ;; compiler's own source writes synthetic names both ways, and refusing them
+  ;; made the compiler unable to check itself.
+  (letfn [(reserved-in [x]
+            (cond
+              (quote-form? x) nil
+              (reserved-binding-name? x) x
+              (and (seq? x) (= 'case (first x)) (seq (rest x)))
+              (let [tail (drop 2 x)
+                    results (map second (partition 2 tail))
+                    default (when (odd? (count tail)) [(last tail)])]
+                (first-truthy reserved-in (concat [(second x)] results default)))
+              (coll? x) (first-truthy reserved-in (seq x))
+              :else nil))]
+    (when-let [value (first-truthy reserved-in forms)]
+      (reject! "symbol uses the reserved __kotoba_ prefix" value))))
+
+(defn intrinsic-helper-name?
+  "Is NAME one of the frontend-supplied library-head helpers?"
+  [name]
+  (and (symbol? name)
+       (let [s (str name)]
+         (= "__kotoba_intrinsic_" (subs s 0 (min 19 (count s)))))))
+
+(defn implicit-export-exclusions
+  "Names the IMPLICIT export set (no :export clause, no defn-) leaves out
+  that it did not have to before 2026-09-25: the library-head helpers, the
+  loop helpers made from THEIR loops, and a loop helper that aborts (a throw
+  in a loop body, lang/abort-ability.edn :loop-body -- its interface is
+  [:result T E], which no export carries). Every other function is exported
+  exactly as before, so a module that uses none of these exports the same
+  names."
+  [functions abort-error-types]
+  (let [by-name (into {} (map (juxt :name identity)) functions)
+        calls (fn [f] (into #{} (keep #(when (and (seq? %) (symbol? (first %))) (first %)))
+                            (tree-seq coll? seq (:body f))))
+        loop-helper? (fn [n] (:loop-helper? (get by-name n)))
+        owned (loop [frontier (into #{} (comp (filter #(intrinsic-helper-name? (:name %)))
+                                               (mapcat calls) (filter loop-helper?))
+                                    functions)
+                     seen #{}]
+                (if (empty? frontier)
+                  seen
+                  (let [seen (into seen frontier)]
+                    (recur (into #{} (comp (mapcat #(calls (get by-name %)))
+                                           (filter loop-helper?) (remove seen))
+                                 frontier)
+                           seen))))]
+    (fn [name]
+      (or (intrinsic-helper-name? name)
+          (contains? owned name)
+          (and (loop-helper? name) (contains? abort-error-types name))))))
+
+(defn expand-app-data-bytes-writes
+  "`(fs/app-data-bytes request content)` -- the WRITE / APPEND spelling -- as
+  the ONE bytes request the wire carries: the request text followed by the
+  content, which the handler splits at the request's separator. nbb's host
+  layer takes the two as separate arguments; this is the same call with the
+  frame built for it. Done on SOURCE forms, before the library-head pass, so
+  the `string-to-utf8` it writes is a head that pass resolves."
+  [form]
+  (cond
+    (seq? form)
+    (let [form* (apply list (map expand-app-data-bytes-writes form))]
+      (if (and (= 'fs/app-data-bytes (first form*)) (= 3 (count form*)))
+        (list 'fs/app-data-bytes
+              (list 'bytes-concat (list 'string-to-utf8 (second form*)) (nth form* 2)))
+        form*))
+    (vector? form) (mapv expand-app-data-bytes-writes form)
+    :else form))
+
+(defn annotate-doseq-collection-kinds
+  "Lexically mark pair-sequence symbols used as doseq collections. Pair and
+  owned-vector values have different backend representations, so this
+  provenance must be resolved before the syntax-only doseq desugar."
+  [root]
+  (letfn [(kind-of [form env]
+            (cond
+              (symbol? form) (get env form)
+              (vector? form) :vector
+              (and (seq? form)
+                   (contains? #{'list 'cons 'rest
+                                '__kotoba_pair_sequence}
+                              (first form))) :pair
+              :else nil))
+          (walk-bindings [bindings env]
+            (loop [pairs (seq (partition 2 bindings))
+                   current env
+                   out []]
+              (if-let [[name value] (first pairs)]
+                (let [value* (walk-form value current)
+                      kind (kind-of value* current)
+                      next-env (if (symbol? name)
+                                 (cond-> (dissoc current name)
+                                   kind (assoc name kind))
+                                 current)]
+                  (recur (next pairs) next-env (conj out name value*)))
+                [(vec out) current])))
+          (walk-doseq-binding [binding env]
+            (loop [tokens (seq binding) current env out []]
+              (if-not tokens
+                [(vec out) current]
+                (let [item (first tokens)
+                      collection (second tokens)
+                      collection* (walk-form collection current)
+                      kind (kind-of collection* current)
+                      collection* (if (and (= :pair kind)
+                                           (symbol? collection*))
+                                    (list '__kotoba_pair_sequence collection*)
+                                    collection*)
+                      after-item (if (symbol? item)
+                                   (dissoc current item)
+                                   current)]
+                  (let [[remaining next-env group-out]
+                        (loop [remaining (nnext tokens)
+                               modifier-env after-item
+                               group-out (conj out item collection*)]
+                          (if (and remaining (keyword? (first remaining)))
+                            (let [modifier (first remaining)
+                                  value (second remaining)]
+                              (if (= modifier :let)
+                                (let [[value* next-env]
+                                      (if (and (vector? value)
+                                               (even? (count value)))
+                                        (walk-bindings value modifier-env)
+                                        [(walk-form value modifier-env)
+                                         modifier-env])]
+                                  (recur (nnext remaining) next-env
+                                         (conj group-out modifier value*)))
+                                (recur (nnext remaining) modifier-env
+                                       (conj group-out modifier
+                                             (walk-form value modifier-env)))))
+                            [remaining modifier-env group-out]))]
+                    (if remaining
+                      (recur remaining next-env group-out)
+                      [(vec group-out) next-env]))))))
+          (walk-form [form env]
+            (let [result
+                  (cond
+                    (seq? form)
+                    (let [[op & args] form]
+                      (case op
+                        let
+                        (let [[bindings & body] args]
+                          (if (and (vector? bindings) (even? (count bindings)))
+                            (let [[bindings* body-env] (walk-bindings bindings env)]
+                              (list* 'let bindings*
+                                     (map #(walk-form % body-env) body)))
+                            (apply list op (map #(walk-form % env) args))))
+
+                        doseq
+                        (let [[binding & body] args]
+                          (if (and (vector? binding) (<= 2 (count binding)))
+                            (let [[binding* body-env]
+                                  (walk-doseq-binding binding env)]
+                              (list* 'doseq binding*
+                                     (map #(walk-form % body-env) body)))
+                            (apply list op (map #(walk-form % env) args))))
+
+                        (apply list op (map #(walk-form % env) args))))
+                    (vector? form) (mapv #(walk-form % env) form)
+                    ;; `(into {} …)` here was two defects at once, and both
+                    ;; only appear on `:cljs`. `{}` is a PersistentArrayMap
+                    ;; that promotes to a hashed map above EIGHT entries, and
+                    ;; a `.kotoba` integer literal is a JS bigint, which
+                    ;; ClojureScript cannot hash -- so a nine-entry
+                    ;; integer-keyed map literal died here, before desugaring
+                    ;; could say anything about it, with `Cannot create
+                    ;; property 'closure_uid_…' on bigint '0'`. It also
+                    ;; discarded the comparator `kotoba-reader/reader-map`
+                    ;; installs for exactly that reason. Rebuilding from
+                    ;; `(empty form)` keeps both: no key is hashed, and the
+                    ;; reader's sorted map stays sorted.
+                    (map? form) (reduce-kv (fn [out k v]
+                                             (assoc out (walk-form k env)
+                                                    (walk-form v env)))
+                                           (empty form) form)
+                    (set? form) (set (map #(walk-form % env) form))
+                    :else form)]
+              (if (and (seq (meta form))
+                       (or (coll? result) (symbol? result)))
+                (with-meta result (meta form))
+                result)))]
+    (walk-form root {})))
+#?(:kotoba
+   (defn string-from-i64-nat-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_string_from_i64_nat"))
+   :default
+(def string-from-i64-nat-helper-name '__kotoba_string_from_i64_nat))
+
+#?(:kotoba
+   (defn string-from-i64-nat-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_string_from_i64_nat :params [n] :param-types [:i64] :result :string :effects #{} :body (if (< n 10) (string-substring \"0123456789\" n (+ n 1)) (string-concat (__kotoba_string_from_i64_nat (quot n 10)) (string-substring \"0123456789\" (- n (* (quot n 10) 10)) (+ (- n (* (quot n 10) 10)) 1))))}"))
+   :default
+(def string-from-i64-nat-helper
+  "Unsigned decimal digits for string-from-i64 (Product Value ABI v1).
+  Uses only string-substring/string-concat already qualified for wasm."
+  {:name string-from-i64-nat-helper-name
+   :params '[n]
+   :param-types [:i64]
+   :result :string
+   :effects #{}
+   :body '(if (< n 10)
+            (string-substring "0123456789" n (+ n 1))
+            (string-concat
+             (__kotoba_string_from_i64_nat (quot n 10))
+             (string-substring "0123456789" (- n (* (quot n 10) 10))
+                               (+ (- n (* (quot n 10) 10)) 1))))}))
+
+#?(:kotoba
+   (defn string-from-i64-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_string_from_i64 :params [n] :param-types [:i64] :result :string :effects #{} :body (if (< n 0) (string-concat \"-\" (__kotoba_string_from_i64_nat (- 0 n))) (__kotoba_string_from_i64_nat n))}"))
+   :default
+(def string-from-i64-helper
+  "Signed decimal printer for string-from-i64 surface (Product Value ABI v1)."
+  {:name string-from-i64-helper-name
+   :params '[n]
+   :param-types [:i64]
+   :result :string
+   :effects #{}
+   :body '(if (< n 0)
+            (string-concat "-" (__kotoba_string_from_i64_nat (- 0 n)))
+            (__kotoba_string_from_i64_nat n))}))
+
+#?(:kotoba
+   (defn char-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_char :params [n] :param-types [:i64] :result :string :effects #{} :body (string-from-utf8 (bytes-from-vector-i64 (if (< n 128) (vector-conj (vector-alloc 0) n) (if (< n 2048) (vector-conj (vector-conj (vector-alloc 0) (+ 192 (quot n 64))) (+ 128 (- n (* (quot n 64) 64)))) (if (< n 65536) (vector-conj (vector-conj (vector-conj (vector-alloc 0) (+ 224 (quot n 4096))) (+ 128 (- (quot n 64) (* (quot n 4096) 64)))) (+ 128 (- n (* (quot n 64) 64)))) (vector-conj (vector-conj (vector-conj (vector-conj (vector-alloc 0) (+ 240 (quot n 262144))) (+ 128 (- (quot n 4096) (* (quot n 262144) 64)))) (+ 128 (- (quot n 64) (* (quot n 4096) 64)))) (+ 128 (- n (* (quot n 64) 64)))))))))}"))
+   :default
+(def char-helper
+  "`(char n)`: the one-code-point string for code point N (Clojure's char, read
+  as a string because this language has no char type; the compiler's own sources
+  already use one-character strings for characters). N is UTF-8 encoded into a
+  byte vector and decoded by `string-from-utf8`, so a surrogate or an out-of-range
+  code point traps by name (`:utf8/*`) instead of producing a wrong string."
+  {:name char-helper-name
+   :params '[n]
+   :param-types [:i64]
+   :result :string
+   :effects #{}
+   :body '(string-from-utf8
+           (bytes-from-vector-i64
+            (if (< n 128)
+              (vector-conj (vector-alloc 0) n)
+              (if (< n 2048)
+                (vector-conj (vector-conj (vector-alloc 0)
+                                          (+ 192 (quot n 64)))
+                             (+ 128 (- n (* (quot n 64) 64))))
+                (if (< n 65536)
+                  (vector-conj (vector-conj (vector-conj (vector-alloc 0)
+                                                         (+ 224 (quot n 4096)))
+                                            (+ 128 (- (quot n 64) (* (quot n 4096) 64))))
+                               (+ 128 (- n (* (quot n 64) 64))))
+                  (vector-conj (vector-conj (vector-conj (vector-conj (vector-alloc 0)
+                                                                      (+ 240 (quot n 262144)))
+                                                         (+ 128 (- (quot n 4096) (* (quot n 262144) 64))))
+                                            (+ 128 (- (quot n 64) (* (quot n 4096) 64))))
+                               (+ 128 (- n (* (quot n 64) 64)))))))))}))
+
+(defn uses-char? [form]
+  (cond
+    (seq? form) (or (= char-helper-name (first form))
+                    (first-truthy uses-char? (rest form)))
+    (coll? form) (first-truthy uses-char? form)
+    :else false))
+#?(:kotoba
+   (defn doc-rest-from-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_rest_from"))
+   :default
+(def doc-rest-from-helper-name '__kotoba_doc_rest_from))
+#?(:kotoba
+   (defn doc-part-from-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_doc_part_from"))
+   :default
+(def doc-part-from-helper-name '__kotoba_doc_part_from))
+
+#?(:kotoba
+   (defn document-helpers [] [:ref :form/r]
+     (form/edn-form "[{:name __kotoba_doc_nth :params [d i] :param-types [:document :i64] :result :document :effects #{} :body (if (= (document-kind d) :vector) (option-value-of [:option :document] (document-vector-at d i) (document-null)) (if (= (document-kind d) :list) (option-value-of [:option :document] (document-list-at d i) (document-null)) (if (= (document-kind d) :map) (option-value-of [:option :document] (document-map-entry-at d i) (document-null)) (document-null))))} {:name __kotoba_doc_rest_from :params [d i acc] :param-types [:document :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_rest_from d (+ i 1) (document-vector-conj acc (__kotoba_doc_nth d i))) acc)} {:name __kotoba_doc_rest :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_rest_from d 1 (document-vector))} {:name __kotoba_doc_part_from :params [d i j acc] :param-types [:document :i64 :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_part_from d (+ i 1) j (document-vector-conj acc (__kotoba_doc_nth (__kotoba_doc_nth d i) j))) acc)} {:name __kotoba_doc_keys :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_part_from d 0 0 (document-vector))} {:name __kotoba_doc_vals :params [d] :param-types [:document] :result :document :effects #{} :body (__kotoba_doc_part_from d 0 1 (document-vector))} {:name __kotoba_doc_append_from :params [d i acc] :param-types [:document :i64 :document] :result :document :effects #{} :body (if (< i (document-count d)) (__kotoba_doc_append_from d (+ i 1) (document-vector-conj acc (__kotoba_doc_nth d i))) acc)}]"))
+   :default
+(def document-helpers
+  [{:name doc-nth-helper-name
+    :params '[d i] :param-types [:document :i64] :result :document :effects #{}
+    ;; element I of a vector, a list, or a map (its I-th [key value] entry);
+    ;; nil (document-null) out of range or for any other kind -- Clojure's
+    ;; `(nth x i nil)`.
+    :body '(if (= (document-kind d) :vector)
+             (option-value-of [:option :document] (document-vector-at d i) (document-null))
+             (if (= (document-kind d) :list)
+               (option-value-of [:option :document] (document-list-at d i) (document-null))
+               (if (= (document-kind d) :map)
+                 (option-value-of [:option :document] (document-map-entry-at d i) (document-null))
+                 (document-null))))}
+   {:name doc-rest-from-helper-name
+    :params '[d i acc] :param-types [:document :i64 :document] :result :document :effects #{}
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_rest_from d (+ i 1)
+                                     (document-vector-conj acc (__kotoba_doc_nth d i)))
+             acc)}
+   {:name doc-rest-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    ;; everything after the first element, as a vector
+    :body '(__kotoba_doc_rest_from d 1 (document-vector))}
+   {:name doc-part-from-helper-name
+    :params '[d i j acc] :param-types [:document :i64 :i64 :document] :result :document :effects #{}
+    ;; part J (0 key, 1 value) of every [key value] entry of a map
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_part_from d (+ i 1) j
+                                     (document-vector-conj
+                                      acc (__kotoba_doc_nth (__kotoba_doc_nth d i) j)))
+             acc)}
+   {:name doc-keys-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    :body '(__kotoba_doc_part_from d 0 0 (document-vector))}
+   {:name doc-vals-helper-name
+    :params '[d] :param-types [:document] :result :document :effects #{}
+    :body '(__kotoba_doc_part_from d 0 1 (document-vector))}
+   {:name doc-append-from-helper-name
+    :params '[d i acc] :param-types [:document :i64 :document] :result :document :effects #{}
+    ;; every element of D from I on, appended to the document vector ACC
+    :body '(if (< i (document-count d))
+             (__kotoba_doc_append_from d (+ i 1)
+                                       (document-vector-conj acc (__kotoba_doc_nth d i)))
+             acc)}]))
+
+(defn uses-documents?
+  "True when a function set mentions `:document` in a signature or calls a
+  `document-*` head: only those modules get the document sequence helpers."
+  [functions]
+  (boolean
+   (some (fn [{:keys [param-types result body]}]
+           (or (some #{:document} (tree-seq coll? seq (concat param-types [result])))
+               (some #(and (symbol? %)
+                           (or (str/starts-with? (str %) "document-")
+                               (= '__kotoba_document_of %)))
+                     (tree-seq coll? seq body))))
+         functions)))
+
+(defn document-conj-step
+  "The reduce step that appends the item X to the document vector ACC."
+  [acc x]
+  (list 'fn [acc x] (list 'document-vector-conj acc x)))
+
+(defn uses-string-from-i64? [form]
+  (cond
+    (seq? form) (or (= string-from-i64-helper-name (first form))
+                    (= string-from-i64-nat-helper-name (first form))
+                    (first-truthy uses-string-from-i64? (rest form)))
+    (coll? form) (first-truthy uses-string-from-i64? form)
+    :else false))
+
+#?(:kotoba
+   (defn map-get-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_map_get"))
+   :default
+(def map-get-helper-name '__kotoba_map_get))
+
+#?(:kotoba
+   (defn map-get-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_map_get :params [m k default] :result :i64 :effects #{} :body (if (= m 0) default (if (= (pair-first (pair-first m)) k) (pair-second (pair-first m)) (__kotoba_map_get (pair-second m) k default)))}"))
+   :default
+(def map-get-helper
+  "Compiler-synthesized recursive linear scan over a desugar-map cons-list,
+  injected into a module's function set only when `get` is actually used
+  (analyze's uses-map-get? scan) -- ADR-2607150000. Written directly in
+  already-primitive form (if/=/pair-first/pair-second/self-call), not run
+  through desugar-expr. Each recursive step costs 1 unit of this
+  compiler's existing fixed 512-instruction-call fuel budget (ir.clj/
+  backend/wasm.clj/core.clj's `default-fuel`/global fuel counter) -- a
+  map lookup on a long map, or a miss, can exhaust it; not a new limit,
+  the existing one now also bounds map-walk depth."
+  {:name map-get-helper-name
+   :params '[m k default]
+   :result :i64
+   :effects #{}
+   :body '(if (= m 0)
+            default
+            (if (= (pair-first (pair-first m)) k)
+              (pair-second (pair-first m))
+              (__kotoba_map_get (pair-second m) k default)))}))
+
+(defn uses-map-get? [form]
+  (cond
+    (seq? form) (or (= map-get-helper-name (first form))
+                    (first-truthy uses-map-get? (rest form)))
+    (coll? form) (first-truthy uses-map-get? form)
+    :else false))
+
+#?(:kotoba
+   (defn map-without-helper-name [] [:ref :form/r]
+     (form/edn-form "__kotoba_map_without"))
+   :default
+(def map-without-helper-name '__kotoba_map_without))
+
+#?(:kotoba
+   (defn map-without-helper [] [:ref :form/r]
+     (form/edn-form "{:name __kotoba_map_without :params [m k] :result :i64 :effects #{} :body (if (= m 0) 0 (if (= (pair-first (pair-first m)) k) (__kotoba_map_without (pair-second m) k) (pair (pair-first m) (__kotoba_map_without (pair-second m) k))))}"))
+   :default
+(def map-without-helper
+  "Compiler-synthesized recursive filter over a desugar-map cons-list,
+  removing every entry whose key equals `k` while preserving the relative
+  order of the rest -- `assoc`'s desugar (below) calls this on the OLD map
+  before prepending the new pair, so re-`assoc`-ing an existing key no
+  longer leaves the old entry as dead weight (a real bug found and fixed
+  in the same ADR-2607150000 line of work that first landed assoc: the
+  original desugar only ever prepended, `get`'s first-match-wins scan made
+  the RESULT correct but the map grew without bound under repeated
+  re-assoc of the same key). Injected only when `assoc` is actually used
+  (`uses-map-without?`), same pattern as `map-get-helper`. Recurses through
+  the WHOLE tail even after a match (not just the first hit) so any
+  pre-existing duplicate from before this fix, or a hand-built map literal
+  with a repeated key, is fully cleaned up, not just shadowed once more."
+  {:name map-without-helper-name
+   :params '[m k]
+   :result :i64
+   :effects #{}
+   :body '(if (= m 0)
+            0
+            (if (= (pair-first (pair-first m)) k)
+              (__kotoba_map_without (pair-second m) k)
+              (pair (pair-first m) (__kotoba_map_without (pair-second m) k))))}))
+
+(defn uses-map-without? [form]
+  (cond
+    (seq? form) (or (= map-without-helper-name (first form)) (first-truthy uses-map-without? (rest form)))
+    (coll? form) (first-truthy uses-map-without? form)
+    :else false))
+
+(defn resolve-loop-helper-param-types
+  "`loop`/`recur` desugars to a synthesized recursive helper whose parameters
+  are the loop bindings followed by the captured outer variables (see the
+  `loop` case in desugar-expr). The helper carries no param-type annotations
+  because a captured variable's type is knowable only at the helper's call
+  site. Recover each loop-helper's param-types from the (unique, non-recursive)
+  call site it has in its enclosing function body -- `(helper loop-init...
+  captured-sym...)` -- by fixpoint: each round, infer every function whose
+  param-types are already known, recording the argument types at every
+  still-unresolved loop-helper call. Enclosing callers resolve first (they are
+  non-helpers, or an outer loop-helper resolved in an earlier round), so nested
+  loops converge. Returns `functions` with every loop-helper's :param-types
+  filled in; any helper left unresolved (only possible when the module has an
+  independent type error that makes inference throw) keeps an all-:i64
+  placeholder so the genuine error still surfaces in check-value-types!.
+
+  T4.5 map/filter/reduce overlay `:known-types` from `*loop-helper-shapes*`:
+  the source is `:vector-i64` by construction, even when the call-site
+  argument is still a provisional `:i64` parameter. The overlay never
+  widens a recorded type -- it only replaces a known slot."
+  ([functions] (resolve-loop-helper-param-types functions {}))
+  ([functions shapes]
+  (let [helper-names (into #{} (comp (filter :loop-helper?) (map :name)) functions)]
+    (if (empty? helper-names)
+      functions
+      (letfn [(placeholder [{:keys [params]}] (vec (repeat (count params) :i64)))
+              (overlay [helper-name params recorded]
+                (if-let [known (get-in shapes [helper-name :known-types])]
+                  (mapv (fn [p t] (or (get known p) t)) params recorded)
+                  recorded))
+              (round [resolved]
+                (let [recorder (volatile! {})
+                      sigs (into {}
+                                 (map (fn [{:keys [name params param-types result] :as f}]
+                                        [name {:params params
+                                               :param-types (cond
+                                                              (contains? resolved name) (resolved name)
+                                                              (contains? helper-names name) (placeholder f)
+                                                              param-types param-types
+                                                              :else (placeholder f))
+                                               ;; Preserve declared loop-helper result (T4.5 map/filter → :vector-i64).
+                                               :result (or result :i64)}]))
+                                 functions)]
+                  (binding [*loop-helper-names* (into #{} (remove #(contains? resolved %) helper-names))
+                            *loop-helper-recorder* recorder]
+                    (doseq [{:keys [name params body] :as f} functions
+                            :when (or (not (contains? helper-names name))
+                                      (contains? resolved name))]
+                      (try
+                        (infer-expression-type body (zipmap params (get-in sigs [name :param-types])) sigs)
+                        (catch #?(:clj Exception :cljs :default) _
+                          ;; An independent type error in this body -- ignore
+                          ;; here; check-value-types! will report it properly.
+                          nil))))
+                  (merge resolved @recorder)))]
+        (loop [resolved {}]
+          (let [next-resolved (round resolved)]
+            (if (or (= (count next-resolved) (count helper-names))
+                    (= (count next-resolved) (count resolved)))
+              (mapv (fn [{:keys [name params] :as f}]
+                      (if (contains? helper-names name)
+                        (assoc f :param-types
+                               (overlay name params
+                                        (get next-resolved name (placeholder f))))
+                        f))
+                    functions)
+              (recur next-resolved)))))))))
+
+(defn resolve-absence-non-tails
+  "FORM, an absence root, with everything that is not one of its tails
+  resolved (a test, a `let` binding, a statement, a call's arguments)."
+  [form locals signatures]
+  (cond
+    (absence-marker? form) form
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (with-meta (list 'if (resolve-absences (nth form 1) locals signatures false)
+                     (resolve-absence-non-tails (nth form 2) locals signatures)
+                     (resolve-absence-non-tails (nth form 3) locals signatures))
+      (meta form))
+    (and (seq? form) (= 'let (first form)) (vector? (second form)) (= 3 (count form)))
+    (let [[pairs locals']
+          (reduce (fn [[acc current] [name value]]
+                    (let [v (resolve-absences value current signatures false)]
+                      [(conj acc name v)
+                       (assoc current name
+                              (try (infer-expression-type v current signatures)
+                                     (catch #?(:clj Exception :cljs :default) _ nil)))]))
+                  [[] locals] (partition 2 (second form)))]
+      (with-meta (list 'let pairs (resolve-absence-non-tails (nth form 2) locals' signatures))
+        (meta form)))
+    (and (seq? form) (= 'do (first form)) (<= 2 (count form)))
+    (with-meta (apply list 'do
+                      (concat (mapv #(resolve-absences % locals signatures true) (butlast (rest form)))
+                              [(resolve-absence-non-tails (last form) locals signatures)]))
+      (meta form))
+    :else (resolve-absences form locals signatures false)))
+
+(defn resolve-absences
+  "Resolve every absence marker in FORM, innermost `if` first, threading `let`
+  locals. STATEMENT? marks FORM's tails as a dropped value. Markers nothing
+  can type are left for `rewrite-record-projection` and, after it, for
+  `retire-absence-markers`."
+  ([form locals signatures] (resolve-absences form locals signatures false))
+  ([form locals signatures statement?]
+   (cond
+     (not (seq? form)) form
+     (absence-marker? form) form
+     (and (= 'let (first form)) (vector? (second form)) (= 3 (count form)))
+     (let [[pairs locals']
+           (reduce (fn [[acc current] [name value]]
+                     (let [v (resolve-absences value current signatures false)]
+                       [(conj acc name v)
+                        (assoc current name
+                               (try (infer-expression-type v current signatures)
+                                      (catch #?(:clj Exception :cljs :default) _ nil)))]))
+                   [[] locals] (partition 2 (second form)))]
+       (with-meta (list 'let pairs (resolve-absences (nth form 2) locals' signatures statement?))
+         (meta form)))
+     (and (= 'do (first form)) (<= 2 (count form)))
+     (with-meta (apply list 'do
+                       (concat (mapv #(resolve-absences % locals signatures true) (butlast (rest form)))
+                               [(resolve-absences (last form) locals signatures statement?)]))
+       (meta form))
+     ;; An absence ROOT: the outermost `if` whose tails hold a marker. Its
+     ;; tails share one type (`(cond a :one b :two)` wraps both keywords), so
+     ;; what is not a tail is resolved first and then the root as a whole.
+     (and (= 'if (first form)) (= 4 (count form)) (absence-in-tail? form))
+     (resolve-absence-if (resolve-absence-non-tails form locals signatures)
+                         locals signatures statement?)
+     (and (= 'if (first form)) (= 4 (count form)))
+     (with-meta (list 'if (resolve-absences (nth form 1) locals signatures false)
+                      (resolve-absences (nth form 2) locals signatures statement?)
+                      (resolve-absences (nth form 3) locals signatures statement?))
+       (meta form))
+     :else
+     (with-meta (apply list (map #(resolve-absences % locals signatures false) form))
+       (meta form)))))
+
+(defn absence-signatures [functions]
+  (into {} (map (fn [{:keys [name params param-types result]}]
+                  [name {:params params :param-types param-types :result result}]))
+        functions))
+
+(defn resolve-function-absences
+  "Every function body, once result inference has run (so a call's type is
+  known) and before abort elaboration moves tails into result values."
+  [functions]
+  (if-not (first-truthy #(absence-in-body? (:body %)) functions)
+    functions
+    (let [signatures (absence-signatures functions)]
+      (mapv (fn [{:keys [params param-types] :as f}]
+              (update f :body resolve-absences
+                      (zipmap params (or param-types (repeat nil))) signatures))
+            functions))))
+
+(defn retire-absence-markers
+  "A marker nothing could type means what the desugar used to write (0, or
+  `(option-none)` for a literal nil), so the type check that follows refuses
+  or admits the program exactly as before markers existed."
+  [form]
+  (cond
+    (absence-marker? form) (legacy-absence form)
+    (seq? form) (with-meta (apply list (map retire-absence-markers form)) (meta form))
+    (vector? form) (with-meta (mapv retire-absence-markers form) (meta form))
+    :else form))
+
+;; --- an eager self-recursive let binding (lang-h1) --------------------------
+;;
+;; `let` is strict: every binding is evaluated before the body runs, whatever
+;; the body then decides. When the binding's value calls the function being
+;; defined and the body uses the binding only under one branch of an `if`, the
+;; recursion runs on every path -- including the path that branch exists to
+;; guard against, typically the base case. Measured while porting aiueos
+;; `os/aiueos/native/tcp_stream.kotoba`: `next-run` bound to the next poll
+;; step above the `if` that decided whether to poll again recursed past its
+;; own base case; the fix was to call a helper inside the branch. Nothing here
+;; is invented: the binding, the call and the branch are read off the
+;; desugared body, and the refusal names all three and the form that fixes it.
+
+(defn need-join
+  "Combine how two evaluated-in-sequence forms need a binding: a path that
+  always evaluates one of them always needs it."
+  [a b]
+  (cond (or (= :always a) (= :always b)) :always
+        (or (= :sometimes a) (= :sometimes b)) :sometimes
+        :else :never))
+
+(defn binding-need
+  "How FORM needs the let binding NAME: `:always` when every path through FORM
+  evaluates a reference to it, `:sometimes` when some path does not, `:never`
+  when nothing references it. An `if` needs it always only when its test does
+  or both branches do; a `let` that rebinds NAME shadows it for the rest of
+  its bindings and its body; a `fn` literal's body runs later, so a reference
+  there is at most sometimes."
+  [binder form]
+  (cond
+    (= binder form) :always
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          need-test (binding-need binder test)
+          need-then (binding-need binder then)
+          need-else (binding-need binder else)]
+      (cond (= :always need-test) :always
+            (and (= :always need-then) (= :always need-else)) :always
+            (every? #{:never} [need-test need-then need-else]) :never
+            :else :sometimes))
+    (and (seq? form) (= 'let (first form))
+         (vector? (second form)) (even? (count (second form))))
+    (loop [pairs (partition 2 (second form)) need :never]
+      (if-let [[bound value] (first pairs)]
+        (let [need (need-join need (binding-need binder value))]
+          (if (= bound binder)
+            need
+            (recur (next pairs) need)))
+        (reduce need-join need (map #(binding-need binder %) (drop 2 form)))))
+    (and (seq? form) (= 'fn (first form)))
+    (if (first-truthy #(= binder %) (tree-seq coll? seq form)) :sometimes :never)
+    (coll? form) (reduce need-join :never (map #(binding-need binder %) (seq form)))
+    :else :never))
+
+(defn deciding-branch
+  "The first `if` in FORM (pre-order) whose test does not reference NAME and
+  whose branches disagree about it -- one references it, the other does not
+  -- as `[if-form :then|:else]`, or nil when no single `if` decides it."
+  [binder form]
+  (cond
+    (and (seq? form) (= 'if (first form)) (= 4 (count form)))
+    (let [[_ test then else] form
+          then-refers? (not= :never (binding-need binder then))
+          else-refers? (not= :never (binding-need binder else))]
+      (if (and (= :never (binding-need binder test))
+               (not= then-refers? else-refers?))
+        [form (if then-refers? :then :else)]
+        (first-truthy #(deciding-branch binder %) [test then else])))
+    (coll? form) (first-truthy #(deciding-branch binder %) (seq form))
+    :else nil))
+
+(defn self-call-in
+  "The first call to one of SELF-NAMES inside FORM, or nil."
+  [self-names form]
+  (first-truthy #(when (and (seq? %) (contains? self-names (first %))) %)
+        (tree-seq coll? seq form)))
+
+(defn eager-recursive-let-binding!
+  "Refuse the let binding NAME of FUNCTION whose VALUE calls the function
+  itself (CALL) while BODY needs the binding only on some paths. The branch
+  that decides it is named when one `if` does; the fix named is to bind
+  inside that branch or call a helper from it."
+  [function binder value call body]
+  (let [[deciding side] (deciding-branch binder body)
+        test-text (when deciding (str "(if " (use-site-text (second deciding)) " ...)"))
+        side-text (when side (name side))]
+    (reject! (str "eager self-recursive let binding: " binder " in " function
+                  " binds " (use-site-text call) " before "
+                  (if deciding test-text "the body")
+                  " decides whether it is needed -- let is strict, so "
+                  (first call) " recurses on every path"
+                  (if deciding
+                    (str ", including the one the " side-text
+                         " branch guards against; bind it inside that branch, (if "
+                         (use-site-text (second deciding))
+                         (if (= side :then)
+                           (str " (let [" binder " " (use-site-text value) "] ...) ...)")
+                           (str " ... (let [" binder " " (use-site-text value) "] ...))"))
+                         ", or call a helper there")
+                    (str ", though " binder " is used only on some of them; bind it "
+                         "where it is needed, or call a helper there")))
+             value :kotoba.error/eager-recursive-let-binding
+             (cond-> {:kotoba.error/function function
+                      :kotoba.error/binding binder
+                      :kotoba.error/call call}
+               side (assoc :kotoba.error/branch side)))))
+
+(defn check-eager-recursive-let-bindings!
+  "Walk FUNCTION's BODY (desugared: `cond`/`when` are already `if`) and
+  refuse the first `let` binding whose value calls one of SELF-NAMES and
+  whose body needs the binding only on some paths. A binding the body never
+  references is left alone: that is sequencing, not a guarded recursion, and
+  it is not this shape."
+  [function self-names body]
+  (letfn [(walk [form]
+            (when (coll? form)
+              (when (and (seq? form) (= 'let (first form))
+                         (vector? (second form)) (even? (count (second form))))
+                (doseq [[binder value] (partition 2 (second form))]
+                  (when-let [call (self-call-in self-names value)]
+                    (when (= :sometimes (binding-need binder (cons 'do (drop 2 form))))
+                      (eager-recursive-let-binding! function binder value call
+                                                    (cons 'do (drop 2 form)))))))
+              (doseq [child (seq form)] (walk child))))]
+    (walk body)))
+
+;; --- an export that is not a public function names why (lang-h8) ----------
+;;
+;; `namespace exports must name declared public functions` was the whole
+;; message for three different mistakes: exporting a `def` constant (exports
+;; are functions; a constant has no entry to call), exporting a `defn-`, and
+;; exporting a name the module never defines. Measured while porting aiueos:
+;; a poll bound exported as a `def` cost a round to learn the rule and another
+;; to learn the fix. The head is kept; what follows it names the export, which
+;; of the three it is, and -- for the constant -- the one-line rewrite.
+
+(defn constant-source-text
+  "VALUE as written, through `use-site-text` (integers as digits on both
+  runtimes), bounded so a large literal does not become the message."
+  [value]
+  (let [text (use-site-text value)]
+    (if (> (count text) 40) (str (subs text 0 37) "...") text)))
+
+(defn private-spelling
+  "How a private function was declared, for the export refusal: `defn-`, or
+  `defn` with `^:private` on the name. One code either way
+  (`:kotoba.error/export-names-private-function`); only the sentence's fix
+  differs, because the two spellings have two different edits."
+  [source-name]
+  (if (:private (meta source-name)) "^:private" "defn-"))
+
+(defn export-not-a-public-function!
+  "Refuse EXPORTS, naming the first that is not in SOURCE-PUBLIC and why: a
+  constant of RAW-CONSTANTS (name -> value as written), a private function
+  of PRIVATE-NAMES (name -> spelling, see `private-spelling`), or undefined."
+  [exports source-public private-names raw-constants]
+  (let [offender (first (remove (set source-public) exports))
+        head (str "namespace exports must name declared public functions: " offender)]
+    (cond
+      (contains? raw-constants offender)
+      (let [value-text (constant-source-text (get raw-constants offender))
+            fix (str "(defn " offender " [] " value-text ")")]
+        (reject! (str head " is a def constant, not a function; export a function "
+                      "that returns it: write " fix " in place of (def " offender
+                      " " value-text ")")
+                 exports :kotoba.error/export-names-constant
+                 {:kotoba.error/export offender :kotoba.error/fix fix}))
+      (contains? private-names offender)
+      (reject! (if (= "^:private" (get private-names offender))
+                 (str head " is declared with ^:private, which is private; drop the "
+                      "^:private metadata to export it")
+                 (str head " is declared with defn-, which is private; declare it "
+                      "with defn to export it"))
+               exports :kotoba.error/export-names-private-function
+               {:kotoba.error/export offender})
+      :else
+      (reject! (str head " is not defined in this module")
+               exports :kotoba.error/export-names-undefined
+               {:kotoba.error/export offender}))))
+
+(defn check-no-abort-before-recur!
+  "lang/abort-ability.edn :loop-body :not-before-recur. A throw or an aborting
+  call inside a loop body is admitted on a path that EXITS the loop. On a path
+  that goes on to `recur`, its elaboration puts the recur inside the call's
+  `result-match-of` arm -- a tail position the reference interpreter runs as
+  a loop but that ESM, Wasm and native run as a real call (measured
+  2026-09-25: ESM `budget/frames` and the Wasm host `unreachable` after tens
+  to hundreds of iterations where the reference answered; osaho refuses it
+  `loop-helper self-call outside tail position`). Refused here, by name,
+  before any backend can disagree."
+  [functions]
+  (doseq [{:keys [name body loop-helper?]} functions
+          :when loop-helper?]
+    (letfn [(walk [form under-match?]
+              (when (seq? form)
+                (let [[op & args] form]
+                  (cond
+                    (and (= op name) under-match?)
+                    (reject! (str "a throw or a call to an aborting function before recur on the same "
+                                  "path is not admitted: its result match would take the recur out of "
+                                  "tail position; abort only on a path that exits the loop, or move the "
+                                  "call out of the loop")
+                             form :kotoba.error/abort-position)
+                    (= op 'result-match-of)
+                    (let [[_ value _ ok-body _ err-body] args]
+                      (walk value under-match?)
+                      (walk ok-body true)
+                      (walk err-body true))
+                    :else (doseq [a args] (walk a under-match?))))))]
+      (walk body false))))
+
+(defn check-state-abort-interaction!
+  "A specialization cannot also abort in slice 1: its interface is already the
+  state pair, and a `[:result T E]` inside it is a lowering nobody wrote."
+  [functions clones abort-error-types]
+  (doseq [f functions
+          :when (and (contains? clones (:name f)) (contains? abort-error-types (:name f)))]
+    (reject! (str "state slice 1 does not admit a stateful function that aborts: "
+                  (or (:source-name f) (:of (get clones (:name f)))))
+             (:name f) :kotoba.error/state-abort))
+  (doseq [f functions
+          body (state-handle-bodies (:body f))
+          :when (abort-escapes? body abort-error-types)]
+    (reject! (str "state slice 1 does not admit a call to an aborting function inside a handle body: "
+                  (or (:source-name f) (:name f)))
+             (:name f) :kotoba.error/state-abort)))
+
+(defn direct-facts [form function-names]
+  (let [effects (volatile! #{}) calls (volatile! #{})]
+    (letfn [(walk [x]
+              (cond
+                (seq? x)
+                (let [[op & args] x]
+                  (cond
+                    (= op 'cap-call)
+                    (do (vswap! effects conj
+                                [:cap/call (effect-capability-id (first args))])
+                        (walk (second args)))
+                    (= op 'typed-cap-call)
+                    (do (vswap! effects conj
+                                [:cap/call (effect-capability-id (first args))])
+                        (walk (nth args 3)))
+                    (contains? function-names op)
+                    (do (vswap! calls conj op) (doseq [arg args] (walk arg)))
+                    :else (doseq [arg args] (walk arg))))
+                (coll? x) (doseq [item x] (walk item))))]
+      (walk form)
+      {:effects @effects :calls @calls})))
+
+(defn infer-effects
+  "Every function's effect row. Capability effects propagate through calls:
+  what a callee exercises, its caller exercises. `:abort` is not propagated
+  HERE, and that is not the same as saying it does not propagate: since slice
+  2 a caller of an aborting function is itself aborting, but that is decided
+  by `infer-abort-error-types` and recorded as `:abort-error-type`, which the
+  direct row below reads. Union over calls would be WRONG -- a caller that
+  CATCHES has no `:abort`, and it calls the aborting function just the same.
+  The mark, not the call graph, is the authority."
+  [functions]
+  (let [names (set (map :name functions))
+        direct (into {} (map (fn [{:keys [name body abort-error-type state-handler]}]
+                               [name (cond-> (direct-facts body names)
+                                       abort-error-type (update :effects conj :abort)
+                                       ;; State ability, slice 1: a handler
+                                       ;; specialization performs :state. Like
+                                       ;; :abort, the mark is the authority and
+                                       ;; the call graph is not: the function
+                                       ;; that installs the handler calls the
+                                       ;; specialization and does NOT perform it.
+                                       state-handler (update :effects conj :state))]))
+                     functions)]
+    (loop [inferred (into {} (map (fn [[name facts]] [name (:effects facts)]) direct))]
+      (let [next-effects
+            (into {} (map (fn [[name {direct-effects :effects calls :calls}]]
+                            [name (reduce set/union direct-effects
+                                          (map #(disj (get inferred % #{}) :abort :state) calls))])
+                          direct))]
+        (if (= inferred next-effects) inferred (recur next-effects))))))
+
+(defn bounded-sum [values]
+  (reduce (fn [total value]
+            (min (inc max-lowered-nodes) (+ total value)))
+          0 values))
+
+(defn lowered-cost [form env]
+  (cond
+    (kotoba-integer? form) 1
+    (value/f64-value? form) 1
+    (string? form) 1
+    (keyword? form) 1
+    (boolean? form) 1
+    (vector? form) (bounded-sum (cons 1 (map #(lowered-cost % env) form)))
+    (symbol? form) (get env form 1)
+    :else
+    (let [[op & args] form]
+      (if (= op 'let)
+        (let [[bindings body] args
+              env' (reduce (fn [current [name value]]
+                             (assoc current name (lowered-cost value current)))
+                           env (partition 2 bindings))]
+          (lowered-cost body env'))
+        (bounded-sum (cons 1 (map #(lowered-cost % env) args)))))))
+
+(defn check-lowering-budget! [functions]
+  (let [cost (bounded-sum (map #(lowered-cost (:body %) {}) functions))]
+    (when (> cost max-lowered-nodes)
+      (reject! "lowered program budget exhausted" cost))))
+
+(defn check-namespace-capabilities!
+  "ADR-2607182410 declare-then-check for an optional `ns` `:capabilities`
+  clause: DECLARED (namespace-parts' :capabilities) must equal exactly what
+  was actually USED via a named `(cap-call :some/name ...)` anywhere in the
+  namespace (collected into *used-capability-keywords* as each is resolved
+  during desugaring) -- both directions are rejected, mirroring the
+  `:aiueos/imports` declare-then-check convention this org already uses
+  elsewhere (orgs/kotoba-lang/aiueos/examples/apps/notes.edn). A no-arg-
+  cap-call-by-int module has an empty `used` set regardless -- this check
+  only ever fires when the `ns` form actually wrote a `:capabilities`
+  clause (`declared` is nil otherwise, see analyze's call site)."
+  [declared used]
+  (when declared
+    (let [undeclared (set/difference used declared)
+          unused (set/difference declared used)]
+      (when (seq undeclared)
+        ;; Keep the historical message token so existing suites match, while
+        ;; including the semantic operation names for W1 diagnostics.
+        (reject! (str "cap-call uses a capability not declared in namespace :capabilities: "
+                      (pr-str undeclared))
+                 undeclared))
+      (when (seq unused)
+        (reject! (str "namespace :capabilities declares a capability never used via cap-call: "
+                      (pr-str unused))
+                 unused)))))
+
+(defn param-name+wrap
+  "For one `defn` PARAM: a plain symbol is kept as-is (identity wrap). A
+  vector/map destructuring pattern (ADR-2607150000) gets a fresh gensym'd
+  parameter name, plus a body-wrapping fn that binds the pattern from that
+  gensym via a `let` -- reusing desugar-expr's own `let`-destructuring
+  (above) rather than duplicating it: `(defn f [{:keys [a]}] body)`
+  becomes params `[tmp]`, body `(let [{:keys [a]} tmp] body)`, which then
+  goes through desugar-expr exactly like any other `let`. Returns
+  `[param-symbol wrap-fn]`."
+  [param]
+  (if (symbol? param)
+    [param identity]
+    (let [tmp (synthetic "param-destr")]
+      [tmp (fn [body] (list 'let [param tmp] body))])))
+
+(defn in-place-targets
+  "Names written through `vector-assoc!` or `vector-f64-assoc!` anywhere in
+  `form`. Read threads expanded (`affine/expand-threads`): inside `->` the
+  written handle is the threaded value, not the step's first argument.
+
+  The f64 sibling was missing: a `vector-f64-assoc!` was never a target, so
+  its handle was never checked at all."
+  [form]
+  (cond
+    (seq? form)
+    (into (if (and (contains? '#{vector-assoc! vector-f64-assoc!} (first form))
+                   (symbol? (second form)))
+            #{(second form)}
+            #{})
+          (mapcat in-place-targets form))
+    (coll? form) (into #{} (mapcat in-place-targets form))
+    :else #{}))
+
+(defn affine-param-names
+  "Parameter NAMES from a raw parameter vector, typed or not.
+
+  `[t :vector-i64 i :i64]` and `[t i]` both give `[t i]`, and the position of
+  a name in that vector is the position an argument takes at a call site --
+  which is what `module-linear-returning` indexes by.
+
+  A malformed declaration is not this pass's business: `(defn f 7 0)` has no
+  parameter vector at all, and the refusal that names that belongs to the
+  guard that already exists for it. Returning `[]` here keeps this pass inert
+  on such a form instead of making it the first thing to touch it -- measured
+  2026-09-08, filtering a non-vector threw and turned a
+  `:kotoba.error/subset-reject` into an internal compiler error."
+  [raw-params]
+  (if (vector? raw-params)
+    (vec (filter symbol? raw-params))
+    []))
+
+(defn check-affine-writes-module!
+  "Refuse `vector-assoc!` on a handle that is not provably dead afterwards,
+  for every function in the module at once.
+
+  ## Why the module and not the function
+
+  It used to run inside `defn-parts`, one function at a time, and one function
+  is not enough to decide the question. The shape every accumulator has is a
+  helper that takes a vector, updates it, and RETURNS it -- and a returned
+  handle is an escape as far as a single body can tell, because the caller may
+  keep it. So the helper copied, and so did `x25519.field/mul`: measured
+  2026-09-08 on aarch64, the same 3000-iteration loop costs 3001 vector
+  handles and 48,016 arena items copying and 1 handle and 16 items in place.
+
+  Deciding it needs both halves at once -- the callee lets the handle escape
+  nowhere but its return, AND every caller gives it up at the call -- and the
+  second half is a fact about other functions. `affine/module-linear-returning`
+  computes the pairs that satisfy both; `*linear-returning*` is how `linear?`
+  is told, and it is empty unless a module proved something, so a program that
+  compiled before compiles the same way.
+
+  ## Why the bang still has to be written
+
+  Nothing here makes `vector-assoc` in-place. This admits a `vector-assoc!`
+  the author wrote and this analysis can now prove safe; without the bang the
+  update allocates as it always did.
+
+  ## What this does NOT close, measured
+
+  A function whose vector PARAMETER is linear in its own body is admitted
+  whatever its callers do, and has been since the gate existed. That is
+  unsound and the consequence is observable, not theoretical -- measured
+  2026-09-08 by compiling and running it:
+
+      (defn- bump [t :vector-i64] :vector-i64
+        (vector-assoc! t 0 (+ (vector-at t 0) 1)))
+      (defn main [] :i64
+        (let [t (vector-alloc 4) u (bump t)]
+          (+ (vector-at u 0) (vector-at t 0))))
+
+  answers 2 as an aarch64 binary. It should answer 1: `main` reads its own
+  `t` after handing it over, and the store `bump` made was never supposed to
+  be visible to a reader that did not ask for it. `main` writes no bang, so
+  the gate never looks at it.
+
+  `module-linear-returning` is the machinery that would close it -- it checks
+  every call site -- but turning it into a REQUIREMENT rather than an
+  additional way to qualify refuses two shapes that work today: a public
+  helper whose callers are in another module (`torihiki.book`'s `slab/add!`
+  is exactly that, and superproject ADR-2609010500 exists for it), and any
+  function this module does not see called. Whole-program linking would
+  answer the first. That is a decision about the language, not a patch to
+  make here, so this pass widens what qualifies and leaves the old path
+  exactly as it was."
+  [all-functions]
+  (let [functions (->> all-functions
+                       (filter #(and (symbol? (:name %)) (coll? (:body %))))
+                       ;; Threads expanded before anything is counted: a
+                       ;; `vector-assoc!` inside `->` writes the threaded
+                       ;; value, and reading the source as written checked
+                       ;; the wrong name (see `affine/expand-threads`).
+                       (map #(update % :body (fn [body] (map affine/expand-threads body)))))
+        _ (doseq [{:keys [name body]} functions]
+            (when-let [form (first-truthy affine/unanalysable-thread body)]
+              (reject! (str "vector-assoc! inside " (first form) " in " name
+                            " cannot be checked for linearity; write the"
+                            " writes as nested calls or a let")
+                       form)))
+        ;; An exported function's callers are not in this module, so no call
+        ;; site can be checked and the answer has to be no. Excluded by
+        ;; removing it from the input rather than by filtering the result:
+        ;; a pair that cannot be decided must not be assumed while OTHER
+        ;; pairs are being decided against it.
+        private-functions (remove :public? functions)
+        proved (affine/module-linear-returning
+                (mapv (fn [{:keys [name raw-params body]}]
+                        {:name name
+                         :params (affine-param-names raw-params)
+                         :body body})
+                      private-functions))]
+    (binding [affine/*linear-returning* proved]
+      (doseq [{:keys [name raw-params body]} functions
+              target (in-place-targets body)]
+        (let [index (first (keep-indexed #(when (= %2 target) %1)
+                                         (affine-param-names raw-params)))]
+          ;; Two ways to earn the bang, and the second is what this pass
+          ;; added. NOT a replacement for the first: `linear?` is what every
+          ;; program compiled against before, and narrowing it here would
+          ;; refuse programs that work today for a reason unrelated to this
+          ;; change. See the module docstring for the hole that leaves open
+          ;; and why closing it is a separate decision.
+          (when-not (or (affine/linear? (cons 'do body) target)
+                        (and index (contains? proved [name index])))
+            (reject! (str "vector-assoc! requires a linear handle: " target
+                          " is used more than once on some path through " name
+                          ", or reaches somewhere this cannot see")
+                     body)))))))
+
+(defn check-affine-writes!
+  "Refuse `vector-assoc!` on a handle that is not provably dead afterwards.
+
+  `vector-assoc!` exists so a backend may lower an update to a STORE rather
+  than a copy, which is the difference between a struct of arrays that can be
+  written and one that costs O(length) per element (superproject
+  ADR-2609010200). That lowering is only indistinguishable from copying when
+  the handle being written is dead afterwards -- so the bang is a claim, and
+  this is where the claim is checked.
+
+  Whole-body, because linearity is not a property of one call: a name written
+  here and read three forms later is exactly the case an in-place store would
+  corrupt, and the single form cannot see it.
+
+  Unadmitted rather than unchecked. A program that writes a live handle is
+  refused at compile time; `vector-assoc` without the bang is always
+  available and always allocates."
+  [name body]
+  (doseq [target (in-place-targets body)]
+    (when-not (affine/linear? (cons 'do body) target)
+      (reject! (str "vector-assoc! requires a linear handle: " target
+                    " is used more than once on some path through " name
+                    ", or reaches somewhere this cannot see")
+               body))))
+
+(defn declaration-clauses
+  "The `(params ...)` clauses a defn form declares, single-arity written as
+  one clause. Defensive on purpose: this runs BEFORE `expand-defn-parts`
+  has refused the malformed shapes, so a form it cannot read yields no
+  clauses rather than a host error, and the refusal that names the shape
+  still comes from the one place that owns it."
+  [form]
+  (let [declaration (drop 2 form)
+        declaration (if (string? (first declaration)) (rest declaration) declaration)]
+    (cond
+      (vector? (first declaration)) [(apply list declaration)]
+      (every? #(and (seq? %) (vector? (first %))) declaration) (vec declaration)
+      :else [])))
+
+(defn variadic-source-names
+  "The names of the defns that declare a `[fixed ... & rest]` clause."
+  [defs]
+  (into #{}
+        (keep (fn [[_ source-name :as form]]
+                (when (and (symbol? source-name)
+                           (first-truthy #(variadic-params? (first %)) (declaration-clauses form)))
+                  source-name)))
+        defs))
+
+(defn variadic-call-arities
+  "Every arity at which a variadic function of this module is CALLED, read
+  off the source bodies before any of them is desugared -- the closed-module
+  fact that lets a variadic defn be specialized only where it is used.
+
+  Head position is the only admitted position. A variadic defn has no
+  single interface, so it cannot be a VALUE: `(fn-ref f)`, `(apply f xs)`, a
+  callback `(map f xs)`, a bare `f` in a vector -- each is refused here by
+  name. The `fn` profile is not reused for those because it never had them:
+  a closure's arities are fixed at the lambda, and `fn-ref` of a named
+  function lifts one clause per arity in `*function-arities*`, which for a
+  variadic name would be the arities of the calls it happened to see. A
+  refusal is the honest answer until an interface for the value exists.
+
+  Refused here rather than at the use site so the message can say what the
+  name IS. A local that shadows a variadic name is refused the same way; the
+  message says so, because a rename is the fix.
+
+  Returns `{source-name #{arity ...}}` over VARIADIC-NAMES only."
+  [defs variadic-names]
+  (let [found (volatile! {})
+        walk (fn walk [form]
+               (cond
+                 (seq? form)
+                 (let [[op & args] form]
+                   (when-not (= 'quote op)
+                     (when (contains? variadic-names op)
+                       (when (> (count args) max-parameters)
+                         (reject! (str "variadic function " op " is called with "
+                                       (count args) " arguments; a variadic defn is "
+                                       "specialized through arity " max-parameters
+                                       " (the ABI bound), so a longer call has no "
+                                       "clause to reach")
+                                  form :kotoba.error/call-arity
+                                  {:function op :supplied (count args)}))
+                       (vswap! found update op (fnil conj #{}) (count args)))
+                     (when (seq? op) (walk op))
+                     (run! walk args)))
+                 (symbol? form)
+                 (when (contains? variadic-names form)
+                   (reject! (str "variadic function " form " is used as a value; "
+                                 "a variadic defn is specialized per call site and has "
+                                 "no single interface, so it is admitted only by direct "
+                                 "call `(" form " ...)` -- not through fn-ref, apply, a "
+                                 "callback position, or a bare reference. If this `"
+                                 form "` is a local binding, it shadows the function: "
+                                 "rename one of them")
+                            form :kotoba.error/subset-reject
+                            {:function form}))
+                 (coll? form) (run! walk form)
+                 :else nil))]
+    (doseq [form defs
+            clause (declaration-clauses form)]
+      (run! walk (rest clause)))
+    @found))
+
+(defn resolve-overloaded-calls
+  "Resolve a call to an overloaded source name to the clause's ABI name.
+
+  The refusal's TEXT is pinned verbatim outside this repository -- amu's nbb
+  project suite compares it with `=`, not a regex -- so the arities the name
+  does admit and the count that was written are carried in ex-data rather than
+  appended to the sentence. Widening the sentence is a coordinated change with
+  amu, not a local one."
+  [form overloads overloaded-sources]
+  (cond
+    (seq? form)
+    (let [[op & args] form]
+      (if (= 'quote op)
+        form
+        (let [resolved-op (if (symbol? op)
+                            (get overloads [op (count args)] op)
+                            op)
+              _ (when (and (contains? overloaded-sources op) (= resolved-op op))
+                  (reject! "no matching multi-arity clause" form
+                           :kotoba.error/call-arity
+                           {:function op
+                            :expected (into (sorted-set)
+                                            (keep (fn [[[overload-name arity] _]]
+                                                    (when (= overload-name op) arity)))
+                                            overloads)
+                            :supplied (count args)}))
+              result (list* resolved-op
+                            (map #(resolve-overloaded-calls % overloads overloaded-sources) args))]
+          (if (seq (meta form)) (with-meta result (meta form)) result))))
+    (vector? form) (mapv #(resolve-overloaded-calls % overloads overloaded-sources) form)
+    (map? form) (into (empty form)
+                      (map (fn [[k v]] [(resolve-overloaded-calls k overloads overloaded-sources)
+                                       (resolve-overloaded-calls v overloads overloaded-sources)]))
+                      form)
+    :else form))
+
+;; ── computed constants: a pure `def` value folds at analysis time ────────────
+;;
+;; Until 2026-09-11 a top-level `def` took a closed LITERAL and nothing else:
+;; `(def k (* 4 1024))` was refused `constant value must be closed bounded
+;; integer/string/...` -- a sentence about closedness for a value that is
+;; closed, only not yet spelled out. Measured on the selfhost distance
+;; (kotoba-lang lang/selfhost-distance.edn at amu a406845e, project route):
+;; 9 of the compiler's own 210 sources were refused at such a `def`, every
+;; one a pure expression over constants -- `(set [...])`, `(into #{} ...)`,
+;; `(str ...)`, `(merge a b)`, `(* 4 1024)`.
+;;
+;; CLASSIFICATION, written before the change (AGENTS.md, "is it a property or
+;; implementation state"): the literal-only rule was IMPLEMENTATION STATE.
+;; Nothing in lang/guest-grammar.edn, lang/surface-status.edn or
+;; lang/safety-claims.edn says a module-level constant must be spelled as a
+;; literal; what they forbid at module level is AMBIENT STATE and EFFECTS.
+;; That half IS a property and stays refused -- `(def cache (atom ...))`,
+;; `(def lazy (delay ...))`, a capability call -- but by its own name below,
+;; not with the closedness sentence.
+;;
+;; THE FOLD. `(def name EXPR)` is analysed as a one-function probe module
+;; over the constants defined BEFORE it, `(defn kotoba-fold-value [] EXPR)`;
+;; its effect row must be empty; it is executed ONCE on the reference
+;; interpreter (`kotoba.kir/execute`, the same fuel the KIR constant oracle
+;; runs `main` under) and the RESULT is spelled back as the literal the
+;; author could have written. From there the definition takes exactly the
+;; path a literal `def` takes -- `resolve-constant-aliases!`,
+;; `substitute-constants` -- so `(def k 4096)` and `(def k (* 4 1024))` are
+;; the same constant, mint the same definition CIDs for every function that
+;; reads them, and the constant's type is the type the literal's own inference
+;; gives it. A result with no literal spelling (an i64 or string set, a typed
+;; map) is spelled as the canonical constructor call the literal would have
+;; lowered to (`typed-set-new` / `typed-map-new`, items in the interpreter's
+;; canonical order), which is the same KIR again.
+;;
+;; Refused BY NAME: a stateful or effectful head (`atom` `delay` `volatile!`
+;; `agent` `promise` `future`, a `cap-call`, a namespace capability), a
+;; non-empty effect row or named operation, a reference to a constant defined
+;; LATER in the module (order), a reference to the constant itself
+;; (recursion), a call to a function of this module (a constant is evaluated
+;; before any function exists), fuel exhaustion, a trap, and a result whose
+;; type has no literal spelling (a closure, an option, a result, a variant, a
+;; nominal record, a list, a stream, a task, a document, bytes).
+
+
+
+(def def-fold-fuel
+  "The budget one `def` value is evaluated under. The same number the KIR
+  constant oracle runs `main` under (`kotoba.kir/oracle-fuel`, which is
+  private there); exhausting it is a refusal named `fuel`, never a slower
+  compile."
+  100000)
+
+#?(:kotoba nil :default (def stateful-def-heads tables/stateful-def-heads))
+
+#?(:kotoba nil :default (def effectful-def-heads tables/effectful-def-heads))
+
+(def fold-probe-namespace 'kotoba.constant-fold.probe)
+(def fold-probe-function 'kotoba-fold-value)
+
+(defn def-refusal! [name sentence form]
+  (reject! (str "def value of " name " " sentence) form
+           :kotoba.error/def-value-not-constant {:constant name}))
+
+(defn type-spelling [type]
+  (pr-str type))
+
+(defn spell-folded-value
+  "The literal (or canonical constructor form) for VALUE, a reference
+  interpreter result of TYPE. Throws a `:kotoba.fold/unspellable` ex-info
+  naming the type that has no spelling; the caller turns it into the refusal."
+  [type value]
+  (letfn [(unspellable! [why]
+            (throw (ex-info why {:kotoba.fold/unspellable true :type type})))
+          (spell [type value]
+            (cond
+              (= :i64 type) value
+              (= :bool type) value
+              (= :string type) value
+              (= :keyword type) value
+              ;; a symbol is spelled as the quoted datum `'sym` -- the
+              ;; literal `(def s 'a)` is held as, so `(def s (symbol "a"))`
+              ;; is the same constant (2026-09-12)
+              (= :symbol type) (list 'quote value)
+              (= :f64 type)
+              #?(:clj value
+                 :cljs (with-meta (list 'f64-from-bits (value/f64-to-i64-bits value))
+                         {:kotoba.reader/f64-literal true}))
+              ;; the legacy pair map: keyword keys, i64 values -- a map
+              ;; literal of exactly that shape lowers to it again
+              (= :map type) (into {} value)
+              (= :vector-i64 type) (vec value)
+              (and (vector? type) (= :set (first type)))
+              (let [item-type (second type)
+                    items (second value)]
+                (cond
+                  ;; An EMPTY set has no literal that carries its type: `#{}`
+                  ;; is refused by the literal rule (non-empty keyword-set),
+                  ;; so the canonical constructor is its spelling -- exactly
+                  ;; what `(typed-set-new [:set :keyword])` in a def already
+                  ;; admits. Measured 2026-09-12 (selfhost measurement 20):
+                  ;; `(def ^:dynamic *linear-returning* #{})` in this
+                  ;; repository's own affine.cljk was refused `evaluates to a
+                  ;; [:set :keyword] that is outside the constant bounds` --
+                  ;; a bounds sentence for a value of zero items -- and every
+                  ;; module requiring it (10) stopped there.
+                  (empty? items) (list 'typed-set-new type)
+                  (= :keyword item-type) (set items)
+                  ;; the symbol set's literal is the quoted set, as the
+                  ;; keyword set's is the bare one (2026-09-12)
+                  (= :symbol item-type) (list 'quote (set items))
+                  :else (list* 'typed-set-new type (map #(spell item-type %) items))))
+              (and (vector? type) (= :map (first type)))
+              (let [[_ key-type value-type] type]
+                (if (and (= :symbol key-type)
+                         (contains? #{:i64 :string :keyword :bool} value-type))
+                  ;; the scalar-valued symbol-key map's literal is the quoted
+                  ;; map `'{a 1 b 2}` (2026-09-12); any other value type has
+                  ;; no map literal and takes the constructor below with
+                  ;; quoted keys
+                  (list 'quote (into {} (map (fn [[k v]] [k (spell value-type v)]) (second value))))
+                  (list* 'typed-map-new type
+                         (mapcat (fn [[k v]] [(spell key-type k) (spell value-type v)])
+                                 (second value)))))
+              (and (vector? type) (= :vector (first type)))
+              (mapv spell (second type) (rest value))
+              (and (vector? type) (= :record (first type)))
+              (let [[_ id fields] type]
+                (if (= "kotoba.map-literal" (namespace id))
+                  ;; the anonymous closed record a keyword-keyed map literal
+                  ;; lowers to (2026-09-11): spelled back as that literal
+                  (into {} (map (fn [[field-name field-type] field-value]
+                                  [field-name (spell field-type field-value)])
+                                fields (rest value)))
+                  (unspellable! (str "evaluates to a record of the nominal type " id
+                                     ", which has no literal spelling -- construct it where it is used, in a function"))))
+              :else
+              (unspellable! (str "evaluates to a " (type-spelling type)
+                                 ", which has no literal spelling and so cannot be a module constant -- compute it in a function"))))]
+    (spell type value)))
+
+(defn fold-def-value!
+  "Evaluate VALUE-FORM, the expression of `(def NAME VALUE-FORM)`, once at
+  analysis time and return the literal it stands for. PRIOR is the ordered
+  vector of `[name literal]` for every constant defined before this one,
+  LATER the set of constant names defined after it, FUNCTIONS the module's
+  function names."
+  [name value-form prior later functions form]
+  (let [head (when (seq? value-form) (first value-form))]
+    (when (contains? stateful-def-heads head)
+      (reject! (str "def value is stateful/effectful: (" head " ...) -- move it into a function or a capability")
+               form :kotoba.error/def-value-stateful {:constant name :head head}))
+    (when (contains? effectful-def-heads head)
+      (reject! (str "def value is stateful/effectful: (" head " ...) -- move it into a function or a capability")
+               form :kotoba.error/def-value-stateful {:constant name :head head}))
+    ;; A constant is folded once at analysis time, so a capability call ANYWHERE
+    ;; in it (`(= "1" (env/read "X"))`) is an effect the fold cannot perform.
+    ;; Refused by name here; it used to reach the fold and fail as an internal
+    ;; compiler error.
+    (when-let [op (first-truthy (fn [x] (when (and (seq? x) (symbol? (first x))
+                                                   (contains? source-operation-registry (first x)))
+                                          (first x)))
+                                (tree-seq #(and (coll? %) (not (quote-form? %))) seq value-form))]
+      (reject! (str "def value is stateful/effectful: (" op " ...) -- move it into a function or a capability")
+               form :kotoba.error/def-value-stateful {:constant name :head op}))
+    (let [mentioned (set (filter symbol? (tree-seq #(and (coll? %) (not (quote-form? %)))
+                                                   seq value-form)))]
+      (when (contains? mentioned name)
+        (def-refusal! name (str "refers to itself: " name " -- a constant cannot be recursive; write the value out") form))
+      (when-let [forward (seq (filter later mentioned))]
+        (def-refusal! name (str "refers to a later constant: " (str/join ", " (map str (sort-by str forward)))
+                                " is defined after " name " -- a constant may read only the constants above it; reorder the definitions")
+                      form))
+      (when-let [called (seq (filter functions mentioned))]
+        (def-refusal! name (str "calls " (str/join ", " (map str (sort-by str called)))
+                                ", a function of this module -- a constant is evaluated before any function exists; compute it in a function or write the value out")
+                      form)))
+    (let [probe (into [(list 'ns fold-probe-namespace {:kotoba/export [fold-probe-function]})]
+                      (concat (map (fn [[prior-name literal]] (list 'def prior-name literal)) prior)
+                              [(list 'defn fold-probe-function [] value-form)]))
+          hir (try (analyze-forms* probe nil)
+                   (catch #?(:clj Throwable :cljs :default) e
+                     (if (compiler-rejection? e)
+                       (throw e)
+                       (def-refusal! name (str "did not analyse: " (ex-message e)) form))))
+          _ (when (or (seq (:effects hir)) (seq (:named-operations hir)))
+              (def-refusal! name (str "is stateful/effectful: its effect row is "
+                                      (pr-str (into (sorted-set) (concat (:effects hir) (:named-operations hir))))
+                                      " -- a module-level constant must be effect-free; move it into a function or a capability")
+                            form))
+          probe-function (first-truthy #(when (= fold-probe-function (:name %)) %) (:functions hir))
+          result-type (:result probe-function)
+          ;; A closure, a cons list, a lazy sequence and a kgraph datom are
+          ;; all `:i64` HANDLES into the interpreter's arenas -- the number
+          ;; `execute` hands back is an index into a heap that does not
+          ;; survive the probe, and spelling it as an integer literal would be
+          ;; a wrong answer that type-checks. The heads are known, so refuse
+          ;; on the head, in every function the probe lowered (a lambda lifts
+          ;; into its own function; `apply` into a dispatcher).
+          _ (when (:closure-result? probe-function)
+              (def-refusal! name "evaluates to a closure, which has no literal spelling and so cannot be a module constant -- write a defn, or call it where it is used" form))
+          ;; A `loop` desugars to a `__kotoba_loop_N` helper whose self-tail
+          ;; re-entry is ZERO-CHARGE on the reference interpreter (kotoba.kir
+          ;; T7.1: "hosts must still wall-clock-bound adversarial infinite
+          ;; loops") -- so the fuel above cannot bound one, and an unbounded
+          ;; loop at a def would hang the compiler rather than be refused.
+          ;; Measured 2026-09-11: `(def x (loop [i 0] (if (< i 0) i (recur
+          ;; (+ i 1)))))` ran past 100000 fuel without a trap. Refused by
+          ;; name; a call to a function is charged per entry and stays
+          ;; bounded.
+          _ (when-let [helpers (seq (->> (:functions hir)
+                                         (map :name)
+                                         (filter #(re-matches #"__kotoba_loop_\d+" (str %)))
+                                         sort))]
+              (def-refusal! name (str "contains a loop (" (str/join ", " (map str helpers))
+                                      "): loop iterations are zero-charge on the reference interpreter, so the compile-time fuel cannot bound it -- write the value out or compute it in a function")
+                            form))
+          _ (let [handle-heads (set/union (set (keys heap-operations)) list-operations
+                                          lazy-sequence-operations (set (keys kgraph-operations)))
+                  seen (->> (:functions hir)
+                            (mapcat (fn [f] (tree-seq coll? seq (:body f))))
+                            (filter seq?)
+                            (keep (fn [x] (let [h (first x)] (when (contains? handle-heads h) h))))
+                            distinct sort)]
+              (when (seq seen)
+                (def-refusal! name (str "evaluates through a heap handle (" (str/join ", " (map str seen))
+                                        "): a closure, a list, a lazy sequence or a kgraph datom has no literal spelling and so cannot be a module constant -- compute it in a function")
+                              form)))
+          value (try (kir/execute (kir/lower hir) fold-probe-function [] {:fuel def-fold-fuel})
+                     (catch #?(:clj Throwable :cljs :default) e
+                       (let [data (ex-data e)]
+                         (cond
+                           ;; `:budget/fuel` since P4 of superproject
+                           ;; adr-2609242100 (osaho renamed `:fuel-exhausted`).
+                           ;; The old name matched nothing on an osaho that
+                           ;; names the budget, so an exhausted fold fell to the
+                           ;; generic arm below ("trapped at compile time:
+                           ;; fuel") -- right outcome, wrong reason.
+                           (= :budget/fuel (:trap data))
+                           (def-refusal! name (str "exhausted the compile-time fuel (" def-fold-fuel
+                                                   ") -- a constant is evaluated once at analysis time; bound the computation or move it into a function")
+                                         form)
+                           (:trap data)
+                           (def-refusal! name (str "trapped at compile time: " (clojure.core/name (:trap data))
+                                                   " -- the expression does not evaluate; fix it or move it into a function")
+                                         form)
+                           :else
+                           (def-refusal! name (str "did not evaluate: " (ex-message e)) form)))))
+          spelled (try (spell-folded-value result-type value)
+                       (catch #?(:clj Throwable :cljs :default) e
+                         (if (:kotoba.fold/unspellable (ex-data e))
+                           (def-refusal! name (ex-message e) form)
+                           (throw e))))]
+      (when-not (constant-literal? spelled)
+        (def-refusal! name (str "evaluates to a " (type-spelling result-type)
+                                " that is outside the constant bounds (string byte limit, item limits) -- shorten it or compute it in a function")
+                      form))
+      spelled)))
+
+(defn resolve-constant-aliases!
+  ([value constants] (resolve-constant-aliases! value constants #{}))
+  ([value constants resolving]
+   (cond
+     (type-alias-form? value)
+     (let [name (second value)]
+       (when-not (contains? constants name)
+         (reject! "constant alias must name a declared constant" value))
+       (when (contains? resolving name)
+         (reject! "constant aliases must be acyclic" value))
+       (resolve-constant-aliases! (get constants name) constants (conj resolving name)))
+     (symbol? value)
+     (do
+       (when-not (contains? constants value)
+         (reject! "constant alias must name a declared constant" value))
+       (when (contains? resolving value)
+         (reject! "constant aliases must be acyclic" value))
+       (resolve-constant-aliases! (get constants value) constants
+                                  (conj resolving value)))
+     (vector? value) (mapv #(resolve-constant-aliases! % constants resolving) value)
+     (map? value) (into (empty value)
+                        (map (fn [[key item]]
+                               [(resolve-constant-aliases! key constants resolving)
+                                (resolve-constant-aliases! item constants resolving)]))
+                        value)
+     :else value)))
+
+(defn substitute-bindings
+  [op bindings constants bound]
+  (when-not (and (vector? bindings) (even? (count bindings)))
+    (reject! (case op
+               let "let requires an even binding vector"
+               loop "loop requires an even binding vector")
+             bindings))
+  (loop [pairs (partition 2 bindings) bound bound out []]
+    (if-let [[pattern value] (first pairs)]
+      (recur (next pairs)
+             (into bound (binding-symbols pattern))
+             (conj out pattern (substitute-constants value constants bound)))
+      [out bound])))
+
+(defn substitute-constants
+  "Lexically substitute closed top-level constants without replacing call
+  heads or names shadowed by params/let/loop bindings."
+  [form constants bound]
+  (cond
+    (symbol? form) (if (and (not (contains? bound form))
+                            (contains? constants form))
+                     (get constants form)
+                     form)
+    (seq? form)
+    (let [[op & args] form
+          result (case op
+                   quote form
+                   (let loop) (let [[bindings & body] args
+                                    [bindings' bound'] (substitute-bindings op bindings constants bound)]
+                                (list* op bindings'
+                                       (map #(substitute-constants % constants bound') body)))
+                   ;; The catch binder shadows a constant of the same name in
+                   ;; the handler, exactly as a let binding would.
+                   try (let [[body clause] args]
+                         (if (and (seq? clause) (= 'catch (first clause))
+                                  (symbol? (last (butlast clause))))
+                           (let [binder (last (butlast clause))
+                                 handler (last clause)]
+                             (list 'try (substitute-constants body constants bound)
+                                   (concat (butlast clause)
+                                           [(substitute-constants handler constants (conj bound binder))])))
+                           (list* op (map #(substitute-constants % constants bound) args))))
+                   (list* op (map #(substitute-constants % constants bound) args)))]
+      (if (seq (meta form)) (with-meta result (meta form)) result))
+    (vector? form) (mapv #(substitute-constants % constants bound) form)
+    (set? form) (set (map #(substitute-constants % constants bound) form))
+    (map? form) (into (empty form)
+                      (map (fn [[k v]] [(substitute-constants k constants bound)
+                                       (substitute-constants v constants bound)]))
+                      form)
+    :else form))
+
+(defn analyze*
+  "Analyze Kotoba source into HIR: `read-forms`, then `analyze-forms*`."
+  ([source] (analyze* source nil))
+  ([source opts] (analyze-forms* (read-forms source) opts)))
+
+;; ADR 0353 floor :function-values. A `[:fn ...]` record field is the
+;; closure handle word below the language, as a `[:fn ...]` result or
+;; parameter contract already is (`:callable-result-contract`): the checker
+;; and `infer-closure-refinements` have used the contract, and KIR, which has
+;; no function type, receives the field as `:i64`. Returns its argument
+;; itself when nothing changed, so a module with no such field keeps its HIR
+;; -- and its definition CIDs -- exactly.
+(defn erase-callable-field-types [x]
+  (letfn [(walk [x]
+            (cond
+              ;; a descriptor, not a `variant-match` arm `[:record p body]`:
+              ;; its name is a keyword and its fields a vector of pairs
+              (and (record-type? x) (keyword? (second x)) (vector? (nth x 2))
+                   (every? #(and (vector? %) (= 2 (count %))) (nth x 2))
+                   (first-truthy (comp callable-type? second) (nth x 2)))
+              (assoc x 2 (mapv (fn [[field type]]
+                                 [field (if (callable-type? type) :i64 (walk type))])
+                               (nth x 2)))
+              (map? x) (let [y (reduce-kv (fn [m k v] (let [w (walk v)]
+                                                        (if (identical? w v) m (assoc m k w))))
+                                          x x)]
+                         y)
+              (vector? x) (let [y (mapv walk x)]
+                            (if (every? true? (map identical? x y)) x (with-meta y (meta x))))
+              (seq? x) (let [y (map walk x)]
+                         (if (every? true? (map identical? x y)) x (with-meta (apply list y) (meta x))))
+              :else x))]
+    (walk x)))
+
+(defn analyze-forms**
+  "Analyze already-read Kotoba source forms into HIR. `analyze*` is the
+  text entry; `fold-def-value!` calls this one directly with the probe
+  module it builds for a computed constant, so the fold and the module it
+  sits in are analysed by the same function.
+
+  opts:
+    :language-profile  when `:pure-product`, enforce pure-product-profile.edn
+                       admission (T2.1): no capabilities/cap-call/disallowed sugar,
+                       empty effects.
+    :admit-linked-synthetics?  when true, skip reject-reserved-source-symbols!
+                       (T8.3 multi-file project monomorph: project/link-source
+                       re-emits HIR bodies that already contain desugared
+                       `__kotoba_or_*` / `__kotoba_and_*` bindings from the
+                       per-module first pass. User source still cannot invent
+                       those names — each module was checked before link.)"
+  [source-forms opts]
+  (binding [*row-op-schemas* (volatile! nil)]
+  (let [language-profile (when (map? opts) (:language-profile opts))
+        admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
+        lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
+        ;; The reserved-prefix check reads what the AUTHOR wrote: the doseq
+        ;; annotation below inserts `__kotoba_pair_sequence` markers, which
+        ;; would otherwise be refused as if the author had written them.
+        _ (when-not admit-linked-synthetics?
+            (reject-reserved-source-symbols! source-forms))
+        forms (rewrite-pure-application-forms
+               (mapv annotate-doseq-collection-kinds source-forms))
+        _ (when (= :pure-product language-profile)
+            (check-pure-product-source-forms! forms))
+        ;; Library heads (adr-2609242330): after the reserved-prefix check,
+        ;; because the helpers it appends use the reserved prefix.
+        forms (expand-intrinsic-helper-forms (mapv expand-app-data-bytes-writes forms))
+        ;; State ability, slice 1: after the reserved-prefix check, because
+        ;; what it writes uses the reserved prefix. `defhandler` becomes
+        ;; private defns; the state spellings become reserved heads.
+        state-expansion (expand-state-ability-forms forms)
+        forms (:forms state-expansion)
+        _ (vreset! *state-handlers* (:handlers state-expansion))
+        ;; The definition layer's backstop, installed at every entry point
+        ;; that turns a top-level declaration into parts. A deliberate
+        ;; refusal passes through untouched; a HOST error that escapes now
+        ;; names the declaration it escaped from instead of arriving at
+        ;; `kotoba.sema/analyze` with no ex-data at all. See
+        ;; `definition-failure!` for why these three pass `nil` for the form.
+        ;;
+        ;; The three thunks FORCE their sequence result. A guard around a
+        ;; call that returns a lazy seq catches nothing -- the host error is
+        ;; raised where the seq is realised, which is after `try` has
+        ;; returned -- and it looks exactly like a guard that works. The
+        ;; per-declaration guards below return eager vectors already.
+        record-protocol-expansion (guarding-definition
+                                   'defrecord nil
+                                   #(update (expand-record-protocol-forms forms)
+                                            :forms vec))
+        forms (:forms record-protocol-expansion)
+        protocol-dispatch (:dispatch record-protocol-expansion)
+        forms (guarding-definition 'defmulti nil
+                                   #(vec (expand-closed-multimethod-forms forms)))
+        forms (guarding-definition 'defdesugar nil
+                                   #(vec (expand-defdesugar-forms forms)))
+        namespaces (filter #(and (seq? %) (= 'ns (first %))) forms)
+        defs (filter #(and (seq? %) (contains? '#{defn defn-} (first %))) forms)
+        constant-forms (filter #(and (seq? %) (= 'def (first %))) forms)
+        other (remove #(or (and (seq? %) (= 'ns (first %)))
+                           (and (seq? %) (contains? '#{defn defn-} (first %)))
+                           (and (seq? %) (= 'def (first %)))) forms)
+        _ (when (> (count namespaces) 1)
+            (reject! "at most one namespace form is admitted" namespaces :kotoba.error/namespace-count))
+        namespace-info (when-let [namespace-form (first namespaces)]
+                         (guarding-definition 'ns namespace-form
+                                              #(namespace-parts namespace-form)))
+        declared-schemas (or (:schemas namespace-info) {})
+        record-schemas (:record-schemas record-protocol-expansion)
+        schema-collisions (set/intersection (set (keys declared-schemas))
+                                            (set (keys record-schemas)))
+        schema-conflicts (set (filter #(not= (get declared-schemas %)
+                                             (get record-schemas %))
+                                      schema-collisions))
+        _ (when (seq schema-conflicts)
+            (reject! "defrecord namespace :schemas forward declaration must match exactly"
+                     schema-conflicts :kotoba.error/record-schema-collision))
+        merged-schemas-raw (merge declared-schemas record-schemas)
+        merged-schemas (when (seq merged-schemas-raw)
+                         (schema/validate-table! merged-schemas-raw))
+        namespace-info (assoc (or namespace-info {})
+                              :schemas merged-schemas
+                              :schema-identities
+                              (when merged-schemas (schema/identities merged-schemas)))
+        _ (vreset! *row-op-schemas* merged-schemas)
+        def-declarations (mapv (fn [form]
+                                 (let [{:keys [name] :as parts}
+                                       (guarding-definition 'def form #(def-parts form))]
+                                   (when-not (valid-name? name)
+                                     (reject! "invalid constant name" name))
+                                   (when (contains? reserved-function-names name)
+                                     (reject! "reserved constant name" name))
+                                   (assoc parts :form form)))
+                               constant-forms)
+        _ (when-not (= (count (distinct (map :name def-declarations))) (count constant-forms))
+            (reject! "duplicate constant name" constant-forms))
+        source-names (mapv second defs)
+        ;; The constant pool, in declaration order. A literal `def` enters
+        ;; as written (its aliases resolve below, against the whole pool, as
+        ;; they always have). A computed `def` is folded HERE, in order, over
+        ;; the resolved values of every constant above it -- so a reference
+        ;; to a constant below it is refused by name (`fold-def-value!`) --
+        ;; and enters the pool as the literal it evaluated to.
+        raw-constants (loop [remaining def-declarations
+                             pool (into {} (keep (fn [{:keys [name value] :as d}]
+                                                   (when (contains? d :value) [name value])))
+                                        def-declarations)
+                             prior []]
+                        (if-let [{:keys [name value fold-form form] :as d} (first remaining)]
+                          (if (contains? d :fold-form)
+                            (let [resolved-prior (mapv (fn [prior-name]
+                                                         [prior-name (resolve-constant-aliases!
+                                                                      (get pool prior-name) pool #{prior-name})])
+                                                       prior)
+                                  later (set (map :name (rest remaining)))
+                                  literal (guarding-definition
+                                           'def form
+                                           #(fold-def-value! name fold-form resolved-prior later
+                                                             (set source-names) form))]
+                              (recur (rest remaining) (assoc pool name literal) (conj prior name)))
+                            (recur (rest remaining) pool (conj prior name)))
+                          pool))
+        constants (into {}
+                        (map (fn [[name value]]
+                               [name (resolve-constant-aliases! value raw-constants #{name})]))
+                        raw-constants)
+        _ (when-not (= (count source-names) (count (distinct source-names)))
+            (reject! "duplicate function name" defs))
+        variadic-names (variadic-source-names defs)
+        call-arities (if (seq variadic-names)
+                       (guarding-definition 'defn nil
+                                            #(variadic-call-arities defs variadic-names))
+                       {})
+        ;; An export is an interface another module links against, and a
+        ;; variadic defn has none: it is specialized at THIS module's call
+        ;; sites, and a module that imported it could only call the arities
+        ;; this one happened to use. amu's `:interface` carries fixed
+        ;; clauses and nothing variadic, so there is no contract to follow;
+        ;; refused by name until one exists. An implicit export (no
+        ;; `(:export ...)` clause, single-file mode) is not this case: every
+        ;; call site is in the module.
+        _ (when-let [exported (seq (filter variadic-names (:exports namespace-info)))]
+            (reject! (str "variadic function " (first exported) " cannot be exported: "
+                          "an export must have a fixed interface, and a [fixed ... & rest] "
+                          "defn is specialized per call site of this module. Export a "
+                          "fixed-arity defn that calls it, or give the clause a fixed "
+                          "parameter vector")
+                     (first exported) :kotoba.error/subset-reject
+                     {:function (first exported)}))
+        def-parts (vec (mapcat (fn [form]
+                                 (guarding-definition
+                                  (first form) form
+                                  #(expand-defn-parts form constants
+                                                      (get call-arities (second form) #{}))))
+                               defs))
+        function-arities
+        (reduce (fn [out {:keys [source-name logical-arity raw-params]}]
+                  (if (vector? raw-params)
+                    (let [typed? (or (first-truthy keyword? raw-params)
+                                     (first-truthy type-alias-form? raw-params)
+                                     (and (even? (count raw-params))
+                                          (first-truthy structured-type?
+                                                (map second (partition 2 raw-params)))))
+                          arity (or logical-arity
+                                    (if typed? (quot (count raw-params) 2)
+                                        (count raw-params)))]
+                      (update out source-name (fnil conj #{}) arity))
+                    out))
+                {} def-parts)
+        document-functions (into #{}
+                                 (comp (filter #(= :document (:result %)))
+                                       (map :source-name))
+                                 def-parts)
+        _ (when (> (count def-parts) max-functions)
+            (reject! "function count exceeds admission limit" (count def-parts)))
+        ;; After every function is parsed and before anything is desugared:
+        ;; the affine analysis reads SOURCE shapes, and it needs all of them
+        ;; at once. See `check-affine-writes-module!`.
+        _ (check-affine-writes-module! def-parts)
+        overloaded-sources (->> def-parts
+                                (group-by :source-name)
+                                (keep (fn [[name clauses]]
+                                        (when (> (count clauses) 1) name)))
+                                set)
+        overloads (into {}
+                        (keep (fn [{:keys [source-name logical-arity name]}]
+                                (when (contains? overloaded-sources source-name)
+                                  [[source-name logical-arity] name])))
+                        def-parts)
+        _ (when (contains? overloaded-sources 'main)
+            (reject! "main must have exactly one zero-arity clause" 'main))
+        function-callable-result-contracts
+        (into {}
+              (keep (fn [{:keys [source-name logical-arity raw-params
+                                 callable-result-contract]}]
+                      (when callable-result-contract
+                        (let [typed? (or (first-truthy keyword? raw-params)
+                                         (first-truthy type-alias-form? raw-params)
+                                         (and (even? (count raw-params))
+                                              (first-truthy structured-type?
+                                                    (map second (partition 2 raw-params)))))
+                              arity (or logical-arity
+                                        (if typed? (quot (count raw-params) 2)
+                                            (count raw-params)))]
+                          [[source-name arity] callable-result-contract]))))
+              def-parts)
+        ;; The parameter side of the same table (typed closure parameters,
+        ;; 2026-09-12): which argument positions of which clause carry a
+        ;; `[:fn ...]` contract. Read by `desugar-ordinary-call`.
+        function-callable-param-contracts
+        (into {}
+              (keep (fn [{:keys [source-name raw-params]}]
+                      (when (vector? raw-params)
+                        (let [;; a parameter vector this refuses is refused
+                              ;; again, with the same sentence, where the
+                              ;; clause is parsed below; nothing is reported
+                              ;; from here so the first refusal a program
+                              ;; sees is the one it saw before this table
+                              parts (try (typed-param-parts raw-params constants)
+                                         (catch #?(:clj Exception :cljs :default) _ nil))
+                              contracts (into {}
+                                              (keep-indexed
+                                               (fn [index part]
+                                                 (when-let [contract (:callable-contract part)]
+                                                   [index contract])))
+                                              parts)]
+                          (when (seq contracts)
+                            [[source-name (count parts)] contracts])))))
+              def-parts)
+        ;; ADR-2607150000: mapcat, not mapv -- a defn using `loop` may
+        ;; expand into itself PLUS one or more synthesized loop-helper
+        ;; functions (collected via *pending-loop-helpers*, bound fresh
+        ;; per defn so helpers from one function's loops never leak into
+        ;; another's). defn PARAMS may now be destructuring patterns
+        ;; (param-name+wrap above), not just plain symbols. *loop-counter*
+        ;; is bound ONCE for the whole source (not per-defn) so loop-helper
+        ;; names stay unique across every defn, not just within one.
+        ;; ADR-2607182410: `used-capabilities` is created OUTSIDE the
+        ;; `binding` below (unlike *loop-counter*'s own fresh volatile,
+        ;; which only needs to live inside it) so `check-namespace-
+        ;; capabilities!` can still deref it once `parsed` is fully built
+        ;; and `binding`'s dynamic extent has ended -- the *var* rebinding
+        ;; ends with the `let`, but the volatile object itself, referenced
+        ;; here from outside, keeps whatever `resolve-capability-keyword!`
+        ;; conjoined onto it during desugaring.
+        used-capabilities (volatile! #{})
+        ;; local-state slice 1: set when a function-local atom is elaborated.
+        ;; Created out here, like used-capabilities and for the same reason --
+        ;; it is read after `binding`'s dynamic extent has ended.
+        local-state-used (volatile! false)
+        lambda-infos (atom [])
+        uses-apply? (volatile! false)
+        uses-lazy? (volatile! false)
+        required-dispatchers (volatile! #{})
+        loop-helper-shapes (volatile! {})
+        parsed (binding [*loop-counter* (volatile! 0)
+                          *loop-helper-shapes* loop-helper-shapes
+                          *lambda-counter* (volatile! lambda-id-base)
+                          *pending-lambdas* lambda-infos
+                          *uses-apply?* uses-apply?
+                          *uses-lazy?* uses-lazy?
+                          *required-closure-dispatchers* required-dispatchers
+                          *function-arities* function-arities
+                          *document-functions* document-functions
+                          *function-callable-result-contracts*
+                          function-callable-result-contracts
+                          *function-callable-param-contracts*
+                          function-callable-param-contracts
+                          *synthetic-counter* (volatile! 0)
+                          *used-capability-keywords* used-capabilities
+                          *local-state-used* local-state-used]
+               ;; `vec` (forcing) must stay INSIDE `binding`'s dynamic
+               ;; extent: `mapcat` is lazy, so `(vec (binding [...]
+               ;; (mapcat ...)))` would rebind *loop-counter* only around
+               ;; building the (unrealized) lazy seq, then unbind it before
+               ;; `vec` actually forces each element -- confirmed live as an
+               ;; NPE (`*loop-counter*` back to its nil default) on any
+               ;; source using `loop`.
+               (vec
+                     (mapcat
+                     (fn [{:keys [name source-name raw-params result body effects-ceiling
+                                  result-inferred? callable-result-contract]}]
+                       (let [source-name (or source-name name)]
+                         (when-not (valid-name? name) (reject! "invalid function name" name))
+                         (when (contains? reserved-function-names name)
+                           (reject! "reserved function name" name))
+                         (when-not (vector? raw-params)
+                           (reject! "function parameters must be a vector" raw-params))
+                         ;; Reached only by an EMPTY body since 2026-09-12:
+                         ;; `defn-parts` collapses several forms to one `do`
+                         ;; (guest-grammar `:implicit-body-forms :sequences`).
+                         ;; Measured the same day (selfhost measurement 17,
+                         ;; amu b6052761): 13 of the compiler's own modules
+                         ;; still stopped here, and every one was a body
+                         ;; spelled as `#?(:clj ... :cljs ...)` only -- which
+                         ;; this reader (features #{:kotoba}) reads as NOTHING.
+                         ;; The sentence says so; "one result expression" alone
+                         ;; read as if the sequencing had not landed.
+                         (when-not (= 1 (count body))
+                           (reject! "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)" body))
+                         (let [param-parts (typed-param-parts raw-params constants)
+                               _ (when (> (count param-parts) max-parameters)
+                                   (reject! "function parameters exceed ABI-supported arity" raw-params
+                                            :kotoba.error/max-parameters))
+                               name+wraps (mapv #(param-name+wrap (:pattern %)) param-parts)
+                               params (mapv first name+wraps)
+                               param-types (mapv :type param-parts)
+                               param-types-inferred
+                               (into #{} (keep-indexed (fn [index part]
+                                                         (when (:inferred? part) index)))
+                                     param-parts)
+                               callable-param-contracts
+                               (into {}
+                                     (keep-indexed (fn [index part]
+                                                     (when-let [contract (:callable-contract part)]
+                                                       [index contract])))
+                                     param-parts)
+                               wrap-body (apply comp (map second name+wraps))]
+                           (when-not (and (every? valid-name? params) (= (count params) (count (distinct params))))
+                             (reject! "function parameters must be unique bounded symbols with ABI-supported arity" raw-params))
+                           (let [loop-helpers (atom [])
+                                 constant-bound (into #{} (mapcat #(binding-symbols (:pattern %)) param-parts))
+                                 ;; local-state slice 1 runs on SOURCE, before
+                                 ;; desugaring: a cell is a rebinding chain the
+                                 ;; rest of the pipeline reads as ordinary
+                                 ;; `let`/`if`. A body that does not mention the
+                                 ;; slice comes back identical.
+                                 source-body (elaborate-local-state
+                                              (substitute-constants
+                                               (wrap-body (first body))
+                                               constants constant-bound))
+                                 ;; Product Value ABI v1: typed option params for if-some/when-some.
+                                 option-locals
+                                 (into {}
+                                       (keep (fn [[p t]]
+                                               (when (and (vector? t) (= :option (first t)))
+                                                 [p t]))
+                                             (map vector params param-types)))
+                                 ;; All params + ns schemas so record-get of
+                                 ;; [:option T] fields desugars with the real T
+                                 ;; (closes option-string-in-record gap).
+                                 local-types (zipmap params param-types)
+                                 source-callable-contract
+                                 (binding [*lexical-callable-contracts*
+                                           (into {} (map (fn [[index contract]]
+                                                           [(nth params index) contract]))
+                                                 callable-param-contracts)]
+                                   (expression-callable-contract source-body))
+                                 _ (when (and callable-result-contract
+                                              source-callable-contract
+                                              (not= callable-result-contract
+                                                    source-callable-contract))
+                                     (reject! "returned callable contract does not match the declared result contract"
+                                              {:function source-name
+                                               :expected callable-result-contract
+                                               :actual source-callable-contract}
+                                              :kotoba.error/callable-result-contract))
+                                 desugared (binding [*pending-loop-helpers* loop-helpers
+                                                     *local-option-types* option-locals
+                                                     *local-types* local-types
+                                                     *schemas* (:schemas namespace-info)
+                                                     *lexical-bindings* (set params)
+                                                     *lexical-callable-contracts*
+                                                     (into {} (map (fn [[index contract]]
+                                                                     [(nth params index) contract]))
+                                                           callable-param-contracts)
+                                                     *expected-callable-contract*
+                                                     callable-result-contract
+                                                     ;; gap 1: a declared result keeps the
+                                                     ;; i64 stand-in for a missing else
+                                                     *absence-mode* (if result-inferred? :none :legacy)]
+                                             (realized-lowering
+                                              (if (closure-result-type? result (:schemas namespace-info))
+                                                (desugar-result-expr result source-body)
+                                                (desugar-expr source-body))))]
+                             (into [(cond-> {:name name :source-name source-name
+                                             :params params :param-types param-types
+                                             :result result :effects #{}
+                                             :result-inferred? result-inferred?
+                                             :body desugared}
+                                      (seq param-types-inferred)
+                                      (assoc :param-types-inferred param-types-inferred)
+                                      (seq callable-param-contracts)
+                                      (assoc :callable-param-contracts callable-param-contracts)
+                                      callable-result-contract
+                                      (assoc :callable-result-contract callable-result-contract)
+                                      effects-ceiling (assoc :effects-ceiling effects-ceiling))]
+                                   @loop-helpers)))))
+                     def-parts)))
+        ;; State ability, slice 1: specialize every stateful function per
+        ;; handler it runs under, and split every handler clause, BEFORE any
+        ;; inference -- which functions are stateful is syntax, and a
+        ;; specialization is inferred at its own handler's state type.
+        state-specialization
+        (specialize-state-abilities
+         parsed (mapv :helper @lambda-infos) @*state-handlers*
+         (cond
+           (some? (:exports namespace-info)) (set (:exports namespace-info))
+           (first-truthy (complement :public?) def-parts)
+           (set (map :source-name (filter :public? def-parts)))
+           :else nil)
+         loop-helper-shapes)
+        parsed (:functions state-specialization)
+        state-clones (:clones state-specialization)
+        _ (vreset! *state-handlers* (:handlers state-specialization))
+        ;; Infer lambda helper bodies before constructing dispatchers.  A
+        ;; dispatcher has one concrete Wasm result type, so typed closures must
+        ;; not share the legacy i64 dispatcher family. Keep every not-yet-
+        ;; admitted result on the legacy i64 path, where the ordinary value
+        ;; checker retains its previous fail-closed behavior.
+        preliminary-lambdas
+        (let [helpers (mapv :helper @lambda-infos)
+              ;; A lifted lambda may call an earlier lexical closure. Its body
+              ;; already contains the requested synthetic dispatcher call, but
+              ;; the real dispatcher functions are constructed only after
+              ;; lambda result inference. Seed signatures here so an enclosing
+              ;; lambda can infer the structured value returned by that nested
+              ;; call instead of falling back to its provisional :i64.
+              inference-dispatchers
+              (mapv (fn [[result-type arity parameter-types]]
+                      {:name (invoke-dispatcher-name result-type arity parameter-types)
+                       :params (vec (cons '__kotoba_inference_closure
+                                          (map #(symbol (str "__kotoba_inference_arg_" %))
+                                               (range arity))))
+                       :param-types (if parameter-types
+                                      (into [:i64] parameter-types)
+                                      (vec (repeat (inc arity) :i64)))
+                       :result result-type
+                       :result-inferred? false
+                       ;; This body is never emitted or checked; only the
+                       ;; signature participates in infer-absent-results.
+                       :body 0})
+                    @required-dispatchers)
+              inference-functions
+              (cond-> (into parsed (concat helpers inference-dispatchers))
+                (first-truthy #(uses-string-from-i64? (:body %)) helpers)
+                (into [string-from-i64-nat-helper string-from-i64-helper])
+                (first-truthy #(uses-char? (:body %)) helpers)
+                (conj char-helper)
+                (uses-documents? helpers)
+                (into document-helpers))
+              candidates (binding [*schemas* (:schemas namespace-info)]
+                           (->> inference-functions
+                                (mapv #(update % :body resolve-overloaded-calls
+                                               overloads overloaded-sources))
+                                (mapv #(if (:param-types %)
+                                         %
+                                         (assoc % :param-types
+                                                (vec (repeat (count (:params %)) :i64)))))
+                                infer-absent-results))
+              by-name (into {} (map (juxt :name identity)) candidates)]
+          (mapv (fn [{:keys [helper contract-result] :as info}]
+                  (let [typed (get by-name (:name helper))
+                        result (canonical-closure-result-type
+                                (:result typed) (:schemas namespace-info))
+                        _ (when (and contract-result
+                                     (not (same-expression-type? result contract-result)))
+                            (reject! "fn result does not match the declared callable contract"
+                                     {:function (:name helper)
+                                      :expected contract-result :actual result}
+                                     :kotoba.error/callable-result-type))
+                        typed (assoc typed :result result)]
+                    (assoc info :helper
+                           (if (closure-result-type? result {})
+                             typed
+                             (dissoc helper :result-inferred?)))))
+                @lambda-infos))
+        parsed (into parsed
+                     (concat (map :helper preliminary-lambdas)
+                             (lambda-dispatchers
+                              preliminary-lambdas
+                              (cond-> @required-dispatchers
+                                @uses-apply? (into (map (fn [arity] [:i64 arity])
+                                                       (range 5)))
+                                @uses-lazy? (conj [:i64 0])))
+                             (when @uses-apply? [closure-apply-helper])
+                             (when @uses-lazy? [lazy-take-helper lazy-drop-helper])))
+        _ (when (> (count parsed) max-functions)
+            (reject! "function count exceeds admission limit after closure lowering"
+                     (count parsed)))
+        parsed (mapv #(update % :body resolve-overloaded-calls overloads overloaded-sources) parsed)
+        ;; ADR-2607150000: inject the synthesized `get`/`assoc` helpers only
+        ;; when a desugared body actually calls them -- keeps modules that
+        ;; never use `get`/`assoc` byte-identical to before this change. A
+        ;; user `defn` that collides with a helper's reserved name is
+        ;; caught for free by the existing :duplicate-function-name check
+        ;; below (signatures' map semantics silently drop one entry, count
+        ;; mismatch trips it).
+        parsed (cond-> parsed
+                 (first-truthy #(uses-map-get? (:body %)) parsed) (conj map-get-helper)
+                 (first-truthy #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
+                 (first-truthy #(uses-string-from-i64? (:body %)) parsed)
+                 (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
+                 (first-truthy #(uses-char? (:body %)) parsed)
+                 (conj char-helper)
+                 (uses-documents? parsed)
+                 (into document-helpers))
+        parsed (mapv #(if (:param-types %)
+                        %
+                        (assoc % :param-types (vec (repeat (count (:params %)) :i64))))
+                     parsed)
+        ;; Synthesized loop-helpers were param-type-defaulted to all-:i64 just
+        ;; above (they carry no annotations); recover the real types of their
+        ;; captured outer variables from each helper's call site so a loop that
+        ;; captures a :string/:f64/record variable type-checks and lowers with
+        ;; the correct local types instead of a spurious "expected i64" error.
+        ;; slice-value: erase the ADR 0285 carrier into the two i64 words the
+        ;; machine carries, BEFORE any pass that reasons about types. Every
+        ;; later stage -- the two inference passes below, abort elaboration,
+        ;; `validate-expr`, `check-value-types!`, the provenance check, HIR,
+        ;; KIR, both backends, the verifier -- sees a program made of `:i64`
+        ;; and of the `slice-load-*`/`slice-store-*`/`kernel-subregion`
+        ;; operations that already had a lowering. It runs AFTER
+        ;; `resolve-overloaded-calls` because it changes arities, and after
+        ;; the `:param-types` defaulting above because it reads them.
+        slice-parameter-functions (volatile! #{})
+        parsed (erase-slice-values parsed slice-parameter-functions)
+        parsed (resolve-loop-helper-param-types parsed @loop-helper-shapes)
+        ;; ADR 0027: and then the loop-helper's RESULT, from the exits of the
+        ;; loop it was made from. Immediately after its parameter types and
+        ;; before anything reads its signature, so no later pass ever sees the
+        ;; `:i64` placeholder the desugar had to write.
+        parsed (infer-loop-helper-results parsed @loop-helper-shapes)
+        parsed (check-loop-recur-argument-types! parsed @loop-helper-shapes)
+        ;; Parameters before results: a result is inferred from a body whose
+        ;; locals include the parameters, so refining one changes the other.
+        ;; ADR 0353 floor :row-records: a parameter read as a record is a row,
+        ;; and its function exists only as its specializations. Before
+        ;; parameter inference, so a specialization's row parameter is
+        ;; already its record when anything else reasons about it.
+        ;; ADR 0353 floor :literal-typing: a map or vector literal lowered
+        ;; before any type was inferred is typed by its items, before rows
+        ;; read it (a let-bound literal passed to a row is its record).
+        parsed (type-literals parsed)
+        parsed (binding [*schemas* (:schemas namespace-info)]
+                 (specialize-row-parameters
+                  parsed
+                  (cond
+                    (some? (:exports namespace-info)) (set (:exports namespace-info))
+                    (first-truthy (complement :public?) def-parts)
+                    (set (map :source-name (filter :public? def-parts)))
+                    :else nil)))
+        parsed (infer-absent-parameter-types parsed)
+        ;; ADR 0189: resolve `(record-get value :field)` to the canonical
+        ;; 3-arity form. This must precede every later pass that runs type
+        ;; inference — elaborate-named-abilities does, and its record-get case
+        ;; destructures [type value field], so a 2-arity form reaching it puts
+        ;; the value symbol in the type slot and `(nth type 2)` throws.
+        ;;
+        ;; Abort ability, slice 1: result inference and abort-error-type
+        ;; inference feed each other (a throw's operand may be a call; a try's
+        ;; binder type is a callee's error type), so they run together to a
+        ;; fixed point. A module with no `throw`/`try` takes the unchanged
+        ;; single `infer-absent-results` path.
+        ;; Abort ability, slice 2: A-normalize an aborting operand or test
+        ;; into a `let` binding. Twice, because the two kinds are known at
+        ;; different times -- own `throw`s are syntax and must be moved BEFORE
+        ;; inference (a bottom-typed operand is refused by
+        ;; `require-expression-type!` before the fixed point could report
+        ;; anything), and which functions abort is only known after it. The
+        ;; two prefixes keep the runs' synthesized names disjoint.
+        parsed (a-normalize-aborts parsed {} "abort_thrown")
+        {parsed :functions abort-error-types :abort-error-types}
+        (infer-abort-error-types parsed)
+        _ (check-state-abort-interaction! parsed state-clones abort-error-types)
+        ;; Gap 1 (`absence-type`): every result type is known now, and abort
+        ;; elaboration has not yet moved tails into result values.
+        parsed (resolve-function-absences parsed)
+        parsed (a-normalize-aborts parsed abort-error-types "abort_operand")
+        parsed (elaborate-aborts parsed abort-error-types)
+        _ (check-no-abort-before-recur! parsed)
+        ;; State ability, slice 1: lower by state passing, now that every
+        ;; result type is known and abort's lowering is done.
+        parsed (thread-state-abilities parsed state-clones @*state-handlers*)
+        parsed (rewrite-record-projections parsed (:schemas namespace-info)
+                                           protocol-dispatch)
+        parsed (mapv #(update % :body retire-absence-markers) parsed)
+        ;; `option-or` intentionally survives syntactic desugaring until the
+        ;; rewrite above can infer its payload descriptor from locals and
+        ;; function signatures. Re-run absent-result inference now that the
+        ;; internal `option-value-of` form has an admitted type signature.
+        parsed (infer-absent-results parsed)
+        _ (validate-interrupt-entries! parsed)
+        named-elaboration (elaborate-named-abilities parsed)
+        parsed (:functions named-elaboration)
+        parsed (infer-closure-refinements parsed preliminary-lambdas)
+        used-capability-names
+        (set/union @used-capabilities (:used named-elaboration))
+        signatures (into {} (map (juxt :name :params) parsed))
+        source-public (->> def-parts (filter :public?) (map :source-name) distinct vec)
+        expand-export (fn [source-name]
+                        (let [clauses (->> def-parts
+                                           (filter #(= source-name (:source-name %)))
+                                           (sort-by #(or (:logical-arity %) 0)))]
+                          (if (> (count clauses) 1)
+                            (mapv :name clauses)
+                            [source-name])))
+        exports (cond
+                  (some? (:exports namespace-info)) (vec (mapcat expand-export (:exports namespace-info)))
+                  ;; Any private function -- `defn-` or `defn ^:private` --
+                  ;; narrows the implicit export set to the public ones. Was
+                  ;; `(some #(= 'defn- (first %)) defs)`, which read the
+                  ;; head and would have exported a `^:private` function.
+                  ;; The library-head helpers (`intrinsic-helper-name?`) are
+                  ;; private but do not narrow: a module that wrote no defn-
+                  ;; exports what it exported before it called one.
+                  (first-truthy #(and (not (:public? %))
+                                      (not (intrinsic-helper-name? (:source-name %))))
+                                def-parts)
+                  (vec (mapcat expand-export source-public))
+                  :else (vec (remove (implicit-export-exclusions parsed abort-error-types)
+                                     (map :name parsed))))
+        entry (when (contains? signatures 'main) 'main)]
+    (when (seq (set/intersection (set (keys constants)) (set source-names)))
+      (reject! "constant and function names must be disjoint" forms))
+    (when (seq other) (reject! "only ns, def, defn, and defn- are allowed at top level"
+                                 (first other) :kotoba.error/top-level-form))
+    (when (empty? parsed) (reject! "at least one defn is required" forms))
+    (when-not (= (count parsed) (count signatures)) (reject! "duplicate function name" defs))
+    (when (and (some? (:exports namespace-info))
+               (not-every? (set source-public) (:exports namespace-info)))
+      (export-not-a-public-function! (:exports namespace-info) source-public
+                                     (->> def-parts (remove :public?)
+                                          (map (fn [{:keys [source-name]}]
+                                                 [source-name (private-spelling source-name)]))
+                                          (into {}))
+                                     raw-constants))
+    (when (and (nil? entry) (nil? (:exports namespace-info)))
+      (reject! "entryless library requires an explicit non-empty namespace export list" defs))
+    (when (and (nil? entry) (empty? exports))
+      (reject! "entryless library requires at least one exported function" exports))
+    (when (and entry (not (empty? (get signatures entry))))
+      (reject! "main must take zero arguments" 'main))
+    (when (and entry (not (first-truthy #{entry} exports)))
+      (reject! "main entrypoint must be exported" exports))
+    ;; Abort ability: an aborting function's interface is `[:result T E]`, and
+    ;; an EXPORT may abort -- its callers see that `[:result T E]`. This was a
+    ;; blanket refusal ("unhandled abort at export boundary") while the wire ABI
+    ;; did not carry a result across an export boundary; per amu ADR 0354 the
+    ;; language admits it and a target that cannot carry the boundary type
+    ;; refuses by name at its own boundary check, instead of the whole language
+    ;; refusing for every target. `main` is the exception: the entrypoint has a
+    ;; fixed `:i64` result and cannot abort.
+    (when (and entry (contains? abort-error-types entry))
+      (reject! (str "unhandled abort at export boundary; catch it with try: " entry)
+               entry :kotoba.error/abort-unhandled-export))
+    ;; slice-value: a slice parameter is TWO machine words, and an export's
+    ;; callers spell one word per argument. Refused here rather than in the
+    ;; erasure pass because the export list is not known until now, and
+    ;; refusing every slice parameter would forbid the only shape the carrier
+    ;; is for -- an internal traversal handed a region by the module's own
+    ;; entry point.
+    (doseq [name (cond-> (vec exports) entry (conj entry))
+            :when (contains? @slice-parameter-functions name)]
+      (reject! (str "a slice parameter cannot cross an export boundary: " name
+                    " carries two machine words per slice and its callers spell one")
+               name :kotoba.error/slice-export-boundary))
+    (check-namespace-capabilities! (:capabilities namespace-info)
+                                   used-capability-names)
+    (let [declared (set (keys (:schemas namespace-info)))
+          refs (->> parsed
+                    (tree-seq coll? seq)
+                    (filter schema-ref-type?)
+                    (map second)
+                    set)
+          missing (set/difference refs declared)]
+      (when (seq missing)
+        (reject! "value type references a schema outside the closed namespace table" missing)))
+    ;; Inline nominal descriptors are convenient for field-aware source
+    ;; operations while [:ref ...] keeps recursive/cross-root schemas closed.
+    ;; When an inline descriptor names a declared schema, it must be byte-for-
+    ;; byte the authoritative descriptor before ref/descriptor type
+    ;; compatibility is admitted.
+    (let [schemas (:schemas namespace-info)
+          mismatched
+          (->> parsed
+               (tree-seq coll? seq)
+               (filter #(or (record-type? %) (variant-type? %)))
+               (filter (fn [descriptor]
+                         (let [identity (second descriptor)]
+                           (and (contains? schemas identity)
+                                (not= descriptor (get schemas identity))))))
+               vec)]
+      (when (seq mismatched)
+        (reject! "inline nominal descriptor differs from closed namespace schema"
+                 (first mismatched))))
+    (let [budget (volatile! 0)]
+      (doseq [{:keys [name source-name params body]} parsed]
+        (validate-expr body (set params) signatures 0 budget)
+        ;; After validation, so every `let` and `if` here is well-formed.
+        ;; Synthesized helpers (`__kotoba_loop_N`) are skipped: their
+        ;; recursion is a `recur` the source wrote in tail position.
+        (when-not (str/includes? (str name) "__")
+          (check-eager-recursive-let-bindings! (or source-name name)
+                                               (set (remove nil? [name source-name]))
+                                               body))))
+    (check-value-types! parsed)
+    (check-linear-resource-ownership! parsed)
+    (check-kernel-region-provenance! parsed)
+    (check-lowering-budget! parsed)
+    (let [typed-values? (boolean
+                         (or (seq (:schemas namespace-info))
+                             (first-truthy #(or (seq (:closure-param-indexes %))
+                                        (seq (:i64-pair-chain-param-indexes %))
+                                        (:closure-result? %))
+                               parsed)
+                         (first-truthy (fn [{:keys [param-types result body]}]
+                                 (or (first-truthy #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
+                                                (structured-type? %)) param-types)
+                                     (or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} result)
+                                         (structured-type? result))
+                                     ;; `:bool` literals are plain 0/1 words, not typed values.
+                                     ;; A `:bool` PARAMETER is different: it is a real host
+                                     ;; boolean at the public boundary and must retain its
+                                     ;; `:param-types` table in typed HIR. Without that, a
+                                     ;; library whose only typed feature is `[b :bool]` emits
+                                     ;; compatibility HIR and silently relabels `b` as :i64.
+                                     (first-truthy #(or (string? %) (keyword? %)
+                                                (and (seq? %)
+                                                     (or (contains? typed-map-operations (first %))
+                                                         (contains? typed-safe-value-operations (first %))
+                                                         (contains? parametric-result-operations (first %))
+                                                         (contains? variant-operations (first %))
+                                                         (contains? generic-option-operations (first %))
+                                                         (contains? canonical-list-operations (first %))
+                                                         (contains? bytes-operations (first %))
+                                                         (contains? heterogeneous-vector-operations (first %))
+                                                         (contains? typed-set-operations (first %))
+                                                         (contains? canonical-typed-map-operations (first %))
+                                                         (contains? record-operations (first %))
+                                                         (= 'vector-new (first %))
+                                                         (= 'vector-f64-new (first %))
+                                                         (contains? typed-vector-operations (first %))
+                                                         (contains? typed-f64-vector-operations (first %))
+                                                         (contains? document-fixed-operations (first %))
+                                                         (contains? document-variadic-operations (first %))
+                                                         (contains? i32-operations (first %))
+                                                         ;; Scalar f64/f32 ops (incl. f64-from-bits and the
+                                                         ;; f64-/f32-comparison ops) require the typed (KIR v4)
+                                                         ;; emitter: the untyped v3 path has no lowering for
+                                                         ;; them and would emit a `call nil`. A body may use
+                                                         ;; these while every exported signature stays scalar
+                                                         ;; :i64, so scan for them here, not just in signatures.
+                                                         (contains? f64-operations (first %))
+                                                         (contains? f32-operations (first %))
+                                                         (contains? decimal-operations (first %)))))
+                                           (tree-seq coll? seq body))))
+                               parsed)))
+          function-effects (infer-effects parsed)
+          _ (check-abort-facet-unwind! parsed function-effects)
+          ;; State ability, slice 1: a handler for a pure ability is pure.
+          ;; Its clauses were split into plain functions, so their inferred
+          ;; rows are the whole of what the handler can do.
+          _ (doseq [{:keys [name body state-handler-clause]} parsed
+                    :when state-handler-clause
+                    :let [row (get function-effects name #{})]
+                    :when (seq row)]
+              (state-refuse-impure-handler!
+               (:name (get @*state-handlers* (:handler state-handler-clause)))
+               (:op state-handler-clause)
+               (into (sorted-set)
+                     (map (fn [effect]
+                            (if (vector? effect)
+                              (or (first-truthy (fn [[id op]] (when (= (str id) (str (second effect))) op))
+                                            capability-id->name)
+                               effect)
+                              effect)))
+                     row)
+               body))
+          _ (doseq [{:keys [name lazy-thunk?]} parsed
+                    :when (and lazy-thunk? (seq (get function-effects name)))]
+              (reject! "lazy sequence thunks must be effect-free because forcing is non-memoized"
+                       name))
+          _ (doseq [{:keys [name source-name effects-ceiling body]} parsed]
+              (when effects-ceiling
+                (let [inferred (get function-effects name #{})
+                      excess (set/difference inferred effects-ceiling)]
+                  (when (seq excess)
+                    (let [ops (into #{}
+                                    (keep (fn [effect]
+                                            (if (vector? effect)
+                                              (get capability-id->name (second effect))
+                                              effect)))
+                                    excess)
+                          span (or (get (meta body) :span) (form-span body))]
+                      (throw (ex-info
+                              (str "inferred effects exceed declared effect ceiling"
+                                   (when source-name (str " for " source-name))
+                                   (when (seq ops) (str ": " (pr-str ops))))
+                              (cond-> {:phase :effect-ceiling
+                                       :function (or source-name name)
+                                       :inferred inferred
+                                       :ceiling effects-ceiling
+                                       :excess excess
+                                       :operations ops}
+                                span (assoc :span span)))))))))
+          functions (mapv (fn [function]
+                            (cond-> (assoc function :effects
+                                           (get function-effects (:name function)))
+                              (:effects-ceiling function)
+                              (assoc :effects-ceiling (:effects-ceiling function))
+                              ;; A frontend-internal mark: which parameters were
+                              ;; written without a type. HIR has a closed key
+                              ;; set and this is not one of its keys.
+                              true (dissoc :param-types-inferred :abort-error-type :abort-own-throw? :abort-catches?
+                                           :state-handler :state-handler-clause)
+                              (not typed-values?) (dissoc :param-types)))
+                          (mapv erase-callable-field-types parsed))
+          main-result (some->> parsed (first-truthy #(when (= 'main (:name %)) (:result %))))
+          named-operations (cond-> (into (sorted-set) @used-capabilities)
+                             ;; The elaboration adds nothing to the effect row
+                             ;; -- the cell does not exist at runtime -- so this
+                             ;; is where a reader of `check` sees it happened.
+                             @local-state-used (conj :local-state))
+          effects (reduce set/union #{} (vals function-effects))
+          _ (when (and (= :pure-product language-profile) (seq effects))
+              (reject! "pure-product profile requires empty effects"
+                       {:effects effects}
+                       :kotoba.error/pure-product-effects))]
+      (hir/validate!
+       {:format (if typed-values? :kotoba.hir/v3 :kotoba.hir/v2)
+        :namespace (:namespace namespace-info)
+        :schemas (erase-callable-field-types (:schemas namespace-info))
+        :schema-identities (:schema-identities namespace-info)
+        :entry entry :exports (vec exports)
+        :result (when entry main-result)
+        ;; Admission conservatively covers private functions too: changing an
+        ;; export boundary must never change the authority the module declares.
+        :effects effects
+        ;; W1: semantic ability/operation names after elaboration (no numeric IDs).
+        :named-operations named-operations
+        :language-profile language-profile
+        :functions functions})))))
+
+(defn analyze-forms*
+  "`analyze-forms**` with this analysis's state handler table bound: a probe
+  module analysed from inside it (`fold-def-value!`) gets a table of its own."
+  [source-forms opts]
+  (binding [*state-handlers* (volatile! {})]
+    (analyze-forms** source-forms opts)))
+
+(defn analyze
+  "Analyze Kotoba source into HIR, refusing in this language's own vocabulary
+  when the host runs out of native stack.
+
+  Why the wrapper. `check-reader-depth!` bounds nesting at 512 -- but it
+  measures the SOURCE, and desugaring creates nesting the source does not
+  have. A flat `(case i 0 .. 63 default)` reads at depth 2 and becomes a
+  64-deep chain of `if`, which `analyze*` then walks recursively. Measured
+  2026-08-24: the JVM analyzes 128 arms, and ClojureScript raised a raw
+  `RangeError: Maximum call stack size exceeded` from inside the compiler --
+  an admission limit that says 512 while the host gives out an order of
+  magnitude earlier, and gives out in the host's words instead of ours.
+
+  This does NOT raise the ceiling. It makes crossing it a refusal a caller can
+  read and act on, with `:phase :subset` and a stable code like every other
+  refusal here. Raising it means not consuming host stack per level of
+  desugared nesting, which is a different change and is not this one.
+
+  The predicate is `kotoba.kir/host-stack-exhausted?` -- shared, not copied.
+  The same invariant already holds at the KIR constant oracle, and one
+  invariant should not have three implementations."
+  ([source] (analyze source nil))
+  ([source opts]
+   (try
+     (analyze* source opts)
+     (catch #?(:clj Throwable :cljs :default) e
+       (if (kir/host-stack-exhausted? e)
+         (throw (ex-info "desugared nesting exhausted the host stack"
+                         {:phase :subset
+                          :kotoba.error/code :kotoba.error/host-nesting-exhausted
+                          :source-reader-depth-limit max-reader-depth
+                          :note "the source is inside the admission limit; the tree the desugar builds is not"}))
+         (throw e))))))
+
+;; --- non-fatal findings: `(* 0 <call>)` sequencing (lang-h4) ----------------
+;;
+;; This frontend refuses or admits; it has had no channel for a finding that
+;; is neither. amu's `kotoba.compiler.diagnostic` envelope carries `:severity`,
+;; and every refusal here arrives there as `:error`. `lint` is the non-fatal
+;; peer: it analyzes SOURCE exactly as `analyze` does (a refusal propagates
+;; unchanged) and then reports findings as maps in that same vocabulary --
+;; `:code`, `:severity :warning`, `:message`, `:span` when the form kept one
+;; -- for a caller to print or gate on. Nothing is refused.
+;;
+;; The one finding so far. `(+ v (* 0 (poll fd)))` is how a `.kotoba` program
+;; sequences a call whose value it does not want: multiplying by zero keeps
+;; the call and drops the result. aiueos writes it deliberately, so it is
+;; not refused -- but a reader who did not write it sees an arithmetic
+;; expression, not a side effect, and the sunk call is easy to miss. The
+;; finding names the call and the function it is in.
+
+(defn zero-literal?
+  "True for the integer literal 0 on either runtime (a ClojureScript BigInt
+  is not `zero?`; its digits are)."
+  [form]
+  (and (kotoba-integer? form) (= "0" (str form))))
+
+(defn sunk-call-form?
+  "A call form whose value can be sunk: a simple-symbol head that is not one
+  of the core special forms."
+  [form]
+  (and (seq? form) (simple-symbol? (first form))
+       (not (contains? '#{if let do fn quote} (first form)))))
+
+(defn zero-multiply?
+  "`(* 0 call)` or `(* call 0)`."
+  [form]
+  (and (seq? form) (= '* (first form)) (= 3 (count form))
+       (let [[_ a b] form]
+         (or (and (zero-literal? a) (sunk-call-form? b))
+             (and (zero-literal? b) (sunk-call-form? a))))))
+
+(defn zero-multiply-findings
+  "Every `(* 0 <call>)` in FUNCTION's BODY as a finding. When the product is an
+  operand of `+`, the `+` form is the site shown -- that is the shape as
+  written, `(+ v (* 0 call))` -- otherwise the product itself."
+  [function body]
+  (let [found (volatile! [])
+        note! (fn [site product]
+                (let [[_ a b] product
+                      call (if (sunk-call-form? a) a b)]
+                  (vswap! found conj
+                          (cond-> {:code :kotoba.lint/zero-multiply-sequencing
+                                   :severity :warning
+                                   :function function
+                                   :sunk-call (first call)
+                                   :message (str (use-site-text site) " in " function
+                                                 " sequences " (use-site-text call)
+                                                 " by multiplying it by zero: " (first call)
+                                                 " runs for its effect and its value is discarded")}
+                            (form-span site) (assoc :span (form-span site))))))]
+    (letfn [(walk [form]
+              (when (coll? form)
+                (let [plus? (and (seq? form) (= '+ (first form)))]
+                  (doseq [child (seq form)]
+                    (if (zero-multiply? child)
+                      (do (note! (if plus? form child) child)
+                          (doseq [grandchild (rest child)] (walk grandchild)))
+                      (walk child))))))]
+      (if (zero-multiply? body)
+        (do (note! body body) (doseq [child (rest body)] (walk child)))
+        (walk body)))
+    @found))
+
+(defn lint
+  "Analyze SOURCE as `analyze` does, then return a vector of non-fatal
+  findings about it -- empty when there is nothing to say. A refusal raised
+  by analysis propagates unchanged: a program that does not compile has no
+  findings, it has an error. Synthesized functions (names carrying `__`) are
+  not reported on; the source never wrote them."
+  ([source] (lint source nil))
+  ([source opts]
+   (let [hir (analyze source opts)]
+     (into []
+           (mapcat (fn [{:keys [name body]}]
+                     (when-not (str/includes? (str name) "__")
+                       (zero-multiply-findings name body))))
+           (:functions hir)))))
