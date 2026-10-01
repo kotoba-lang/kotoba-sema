@@ -2926,7 +2926,6 @@
     (= :vector-i64 type) '(vector-new)
     (= :vector-f64 type) '(vector-f64-new)
     (= :document type) '(document-null)
-    (= :map type) '(map-new)
     (= :option-i64 type) '(option-none)
     (= :result-i64 type) '(result-ok 0)
     (= :string-index type) '(string-index-new)
@@ -5615,8 +5614,13 @@
         context-record (let [t (canonical-closure-result-type contextual-type)]
                          (when (record-type? t) t))]
     (cond
-      (and context-record (= #{:keyword} kinds))
+      (and context-record (contains? #{#{:keyword} #{}} kinds))
       (desugar-map-against-record form context-record)
+
+      ;; ADR 0353 floor :empty-map-literal: `{}` where its context declares
+      ;; a typed map is that map, empty.
+      (and (empty? form) (canonical-typed-map-type? contextual-type))
+      (list 'typed-map-new contextual-type)
 
       (contains? kinds nil)
       (let [offender (first (remove map-literal-key-kind (keys form)))]
@@ -5988,7 +5992,8 @@
                 (let [projection (synthetic "match-key")
                       sub (match-pattern-plan sub-pattern projection form true)]
                   (-> plan
-                      (update :temps conj [projection (list 'get subject key)])
+                      (update :temps conj [projection (with-meta (list 'get subject key)
+                                                         {::match-projection true})])
                       (update :temps into (:temps sub))
                       (update :tests conj (list match-has-marker subject key))
                       (update :tests into (:tests sub))
@@ -10904,6 +10909,20 @@
             (require-expression-type! type :f32 arg))
           :bool)
 
+      ;; ADR 0353 floor :empty-map-literal. A literal with keyword keys is a
+      ;; record (`type-literal`), and `{}` has none: no field set, no row to
+      ;; extend. What gives it one -- a record or typed map its context
+      ;; declares, or the first key an `assoc` puts in it -- has already
+      ;; rewritten it by now, so an empty literal reaching here is refused
+      ;; rather than becoming the retired keyword->i64 map.
+      (and (= op 'map-new) (empty? args))
+      (reject! (str "an empty map literal {} has no row to extend: it is not a "
+                    "keyword->i64 map any more, and nothing here says its type. "
+                    "assoc keys into it ((assoc {} :a 1) is the record {:a 1}), "
+                    "write the literal with its fields, or give it a record or "
+                    "[:map K V] type from context")
+               (list 'map-new) :kotoba.error/empty-map-literal)
+
       (= op 'map-new)
       (do (doseq [[key-form value-form key-type value-type]
                   (map (fn [[key-form value-form] [key-type value-type]]
@@ -12579,11 +12598,23 @@
         ;; refuse ("if test must be bool or an option"; an `:i64` by its own
         ;; name, floor :bool-predicates).
         (= op 'if)
-        (let [[test & branches] (mapv #(rewrite-record-projection % locals signatures schemas) args)
-              test-type (try (infer-expression-type test locals signatures)
-                             (catch #?(:clj Exception :cljs :default) _ nil))]
-          (resolve-absence-if (list* 'if (option-presence-test test test-type) branches)
-                              locals signatures))
+        (let [test (rewrite-record-projection (first args) locals signatures schemas)
+              static (when (and (boolean? test)
+                                (first-truthy #(and (seq? %) (= match-has-marker (first %)))
+                                              (tree-seq coll? seq (first args))))
+                       test)]
+          (if (some? static)
+            ;; A map pattern on a record: presence was decided statically
+            ;; (floor :empty-map-literal), so the test is gone, not wrapped,
+            ;; and an arm that cannot match is not there to be typed.
+            (rewrite-record-projection (if static (second args) (nth args 2 false))
+                                       locals signatures schemas)
+            (let [branches (mapv #(rewrite-record-projection % locals signatures schemas)
+                                 (rest args))
+                  test-type (try (infer-expression-type test locals signatures)
+                                 (catch #?(:clj Exception :cljs :default) _ nil))]
+            (resolve-absence-if (list* 'if (option-presence-test test test-type) branches)
+                              locals signatures))))
 
         (= op '__kotoba_present)
         (let [value (rewrite-record-projection (first args) locals signatures schemas)
@@ -12849,9 +12880,15 @@
           (when (canonical-typed-map-type? value-type)
             (reject! "match map patterns admit the bounded map only; this scrutinee is a canonical typed map"
                      form))
-          (when (record-type? descriptor)
-            (reject! "match map patterns admit the bounded map only; this scrutinee is a record"
-                     form))
+          (if (record-type? descriptor)
+            ;; ADR 0353 floor :empty-map-literal: a map literal is a record,
+            ;; so a map pattern reads one. A record's field set is its type,
+            ;; so presence is decided here, statically: a field it has is
+            ;; present, and an arm naming a key it lacks does not match -- in
+            ;; a row function's specialization, the arm written for another
+            ;; record. Both are constants the enclosing `if` folds away.
+            (let [key (second rewritten-args)]
+              (boolean (first-truthy (fn [[field _]] (= field key)) (nth descriptor 2))))
           ;; Presence, on a value type with no presence primitive. `map-get`
           ;; answers the DEFAULT for an absent key, so one lookup cannot tell
           ;; an absent key from a key whose value happens to equal the
@@ -12860,7 +12897,7 @@
           ;; the receiver is always a symbol here (the scrutinee binding or a
           ;; projection temp), so neither the map nor the key is re-evaluated.
           (let [[value key] rewritten-args]
-            (list '= (list 'map-get value key 0) (list 'map-get value key 1))))
+            (list '= (list 'map-get value key 0) (list 'map-get value key 1)))))
 
         (= op 'get)
         (let [rewritten-args
@@ -12887,6 +12924,13 @@
                 (if (record-field-type descriptor key)
                   (list 'record-get descriptor value key)
                   (list 'do value default)))
+
+            ;; A match pattern's projection of a key the record lacks: its
+            ;; arm does not match and is folded away (floor
+            ;; :empty-map-literal), so the temp is never read.
+            (and (record-type? descriptor) (::match-projection (meta form))
+                 (not (record-field-type descriptor key)))
+            (list 'do value 0)
 
             (record-type? descriptor)
             (do
@@ -12920,8 +12964,7 @@
               ;; take its key type from the first key. Only the two key types
               ;; a literal may carry are retyped, so a keyword-keyed `(assoc
               ;; {} :a 1)` still lowers to the legacy map it always did.
-              retyped-key (when (and (= :map value-type)
-                                     (= '(map-new) receiver)
+              retyped-key (when (and (= '(map-new) receiver)
                                      (seq pairs))
                             (let [key-type
                                   (try (infer-expression-type (first pairs)
@@ -14212,6 +14255,29 @@
       (and (= 'map-new op) (seq args) (even? (count args))
            (every? keyword? (take-nth 2 args)))
       (let [entries (partition 2 args)
+            types (mapv #(literal-item-type (second %) locals table) entries)]
+        (if (every? some? types)
+          (do (when (> (count entries) max-record-fields)
+                (reject! (str "map literal with keyword keys lowers to a closed record and "
+                              "exceeds the record field limit: " (count entries)
+                              " entries, at most " max-record-fields)
+                         form :kotoba.error/map-literal-value))
+              (list* 'record-new
+                     (map-literal-record-type (mapv (fn [[k _] t] [k t]) entries types))
+                     (map second entries)))
+          form))
+
+      ;; ADR 0353 floor :empty-map-literal. `{}` has no row of its own, so
+      ;; `(assoc {} :a x :b y)` is the literal `{:a x :b y}` -- the record of
+      ;; the keys it assoc's, fields in a map literal's key order, a repeated
+      ;; key's last value winning as `assoc`'s does -- and never the
+      ;; keyword->i64 pair map `(map-new)` used to be. An integer or string
+      ;; first key is the typed map `rewrite-record-projection` retypes.
+      (and (= 'map-assoc op) (= '(map-new) (first args)) (seq (rest args))
+           (even? (count (rest args)))
+           (every? keyword? (take-nth 2 (rest args))))
+      (let [entries (reduce (fn [m [k v]] (assoc m k v)) {} (partition 2 (rest args)))
+            entries (sort-by key (map-literal-key-order :keyword) entries)
             types (mapv #(literal-item-type (second %) locals table) entries)]
         (if (every? some? types)
           (do (when (> (count entries) max-record-fields)

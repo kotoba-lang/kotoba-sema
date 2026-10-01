@@ -152,9 +152,10 @@
   (testing "and so does an all-unknown-valued one"
     (is (= "[(map-get (map-new :a (+ 1 1) :b (* 2 3)) :b 0)]"
            (lowered-body ":i64" "(get {:a (+ 1 1) :b (* 2 3)} :b 0)"))))
-  (testing "and the empty literal"
-    (is (= "[(map-get (map-new) :a 0)]"
-           (lowered-body ":i64" "(get {} :a 0)")))))
+  (testing "and the empty literal is refused: it has no row to extend (ADR 0353 :empty-map-literal)"
+    (is (thrown-with-msg? #?(:clj clojure.lang.ExceptionInfo :cljs :default)
+                          #"an empty map literal \{\} has no row to extend"
+                          (lowered-body ":i64" "(get {} :a 0)")))))
 
 ;; --- 4. refusals by name -----------------------------------------------------
 

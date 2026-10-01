@@ -98,8 +98,8 @@
   ;; two key types a literal may carry are retyped.
   (is (= 10 (run "(get (assoc {} 1 10) 1 0)")))
   (is (= 10 (run "(get (assoc {} \"k\" 10) \"k\" 0)")))
-  (testing "a keyword first key stays on the legacy map"
-    (is (= 10 (run "(map-get (assoc {} :a 10) :a 0)")))))
+  (testing "a keyword first key makes the record of its keys (ADR 0353 :empty-map-literal)"
+    (is (= 10 (run "(:a (assoc {} :a 10))")))))
 
 (deftest the-write-half-now-reaches-a-keyword-keyed-typed-map-too
   ;; This is the half that had never worked for ANY key type: `assoc` on a

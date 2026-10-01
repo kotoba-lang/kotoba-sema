@@ -216,16 +216,14 @@
       (is (= {:message expected :phase :subset :code :kotoba.error/subset-reject}
              (outcome body))
           body)))
-  (testing "the empty literal is the same decision, and the sentence stays true of it"
-    ;; ADR 0012 decision 3: `{}` has no key type of its own, so it is legacy
-    ;; whatever the program goes on to put in it. The message must not claim
-    ;; this literal had KEYWORD keys -- it has none.
-    (is (= (str "this value is the legacy pair-map, whose type is `map` and not "
-                "[:map :i64 :i64]. A map literal keeps the legacy "
-                "representation when its keys are keywords and when it is empty; "
-                "only :i64 and :string literals are retyped. Read and write it "
-                "through get / assoc / contains? / dissoc, or build the typed map "
-                "with (typed-map-new [:map :i64 :i64] ...)")
+  (testing "the empty literal is not the legacy map at all (ADR 0353 :empty-map-literal)"
+    ;; `{}` has no row of its own, and the keyword->i64 map it used to be is
+    ;; retired: with nothing to type it, it is refused by its own name.
+    (is (= (str "an empty map literal {} has no row to extend: it is not a "
+                "keyword->i64 map any more, and nothing here says its type. "
+                "assoc keys into it ((assoc {} :a 1) is the record {:a 1}), "
+                "write the literal with its fields, or give it a record or "
+                "[:map K V] type from context")
            (:message (outcome "(let [m {}] (typed-map-count [:map :i64 :i64] m))"))))))
 
 (deftest an-integer-keyed-literal-is-still-the-typed-map
