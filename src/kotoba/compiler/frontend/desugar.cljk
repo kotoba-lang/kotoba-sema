@@ -12,7 +12,7 @@
             #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? kw-text parametric-result-type? record-type? schema-ref-type? structured-type? typed-set-type? variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
-            #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol?]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol? max-typed-set-items]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
             #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [kw-head? record-field-type]]] :default [[kotoba.compiler.frontend.infer :refer [record-field-type #?@(:kotoba [kw-head?])]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.record-projection :refer [doc-nth-helper-name f32-literal-bits! match-has-marker]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
@@ -8352,6 +8352,13 @@
 ;; ---- quoted symbol data: validate.cljk `quoted-symbol-datum-kind`, `quoted-text-abbrev`, `reject-quoted-symbol-datum!` ----
 ;; every key of a Form map (the even positions) from I is a symbol
 #?(:kotoba
+   (defn quoted-all-symbols? [xs [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of xs))
+       true
+       (and (form/is-symbol? (form/nth-of xs i)) (quoted-all-symbols? xs (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
    (defn quoted-key-symbols? [m [:ref :form/r] i :i64] :bool
      (if (>= (+ i 1) (form/count-of m))
        true
@@ -8457,6 +8464,9 @@
      (let [datum (form/nth-of form 1)
            spelled (quoted-text-abbrev form)]
        (cond
+         (and (form/is-set? datum) (> (form/count-of datum) (max-typed-set-items)) (quoted-all-symbols? datum 0))
+         (string-concat "quoted set has too many entries: "
+           (string-concat spelled " -- a symbol set ([:set :symbol]) holds at most 32 entries; split it into several smaller sets (each of 32 entries or fewer)"))
          (form/is-set? datum)
          (string-concat "quoted set mixes symbols with other kinds: "
            (string-concat spelled " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword"))

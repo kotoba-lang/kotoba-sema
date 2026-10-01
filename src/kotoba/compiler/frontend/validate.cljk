@@ -320,6 +320,10 @@
      (let [datum (form/nth-of form 1)
            spelled (quoted-datum-text form)]
        (cond
+         (and (form/is-set? datum) (> (form/count-of datum) (max-typed-set-items)) (qd-all-symbols? datum 0 1))
+         (throw (fe-reject (str "quoted set has too many entries: " spelled
+                                " -- a symbol set ([:set :symbol]) holds at most 32 entries; split it into several smaller sets (each of 32 entries or fewer)")
+                           "kotoba.error/subset-reject" form))
          (form/is-set? datum)
          (throw (fe-reject (str "quoted set mixes symbols with other kinds: " spelled
                                 " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword")
@@ -592,6 +596,10 @@
   (let [datum (second form)
         spelled (quoted-datum-text form)]
     (cond
+      (and (set? datum) (> (count datum) max-typed-set-items) (every? symbol? datum))
+      (reject! (str "quoted set has too many entries: " spelled
+                    " -- a symbol set ([:set :symbol]) holds at most 32 entries; split it into several smaller sets (each of 32 entries or fewer)")
+               form :kotoba.error/subset-reject)
       (set? datum)
       (reject! (str "quoted set mixes symbols with other kinds: " spelled
                     " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword")

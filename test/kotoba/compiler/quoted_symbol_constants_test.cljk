@@ -136,6 +136,21 @@
   (is (= "quoted set mixes symbols with other kinds: (quote #{[b] a}) -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword"
          (:message (refusal "(def ops '#{a [b]})" ":i64" "0")))))
 
+(deftest an-oversized-quoted-symbol-set-is-refused-for-its-size
+  (let [syms (fn [n] (clojure.string/join " " (map #(str "a" %) (range n))))
+        mixed (str "(def ops '#{" (syms 33) " :k})")]
+    ;; 33 plain symbols: the bound is the cause, not a mix of kinds
+    (let [{:keys [message code]} (refusal (str "(def ops '#{" (syms 33) "})") ":i64" "0")]
+      (is (= :kotoba.error/subset-reject code))
+      (is (re-find #"^quoted set has too many entries: " message))
+      (is (re-find #"at most 32 entries; split it into several" message))
+      (is (not (re-find #"mixes" message))))
+    ;; 32 is still admitted
+    (is (some? (sema/analyze (module (str "(def ops '#{" (syms 32) "})") ":i64" "(count ops)"))))
+    ;; an oversized set that really mixes kinds keeps the mix sentence
+    (is (re-find #"^quoted set mixes symbols with other kinds: "
+                 (:message (refusal mixed ":i64" "0"))))))
+
 (deftest a-mixed-quoted-map-is-refused-by-name
   (is (= "quoted map mixes symbol keys with other key kinds: (quote {:b 2, a 1}) -- a symbol-key map ([:map :symbol V]) holds symbol keys only; spell every key as a symbol, or every key as a keyword"
          (:message (refusal "(def m '{a 1 :b 2})" ":i64" "0"))))
