@@ -26,7 +26,7 @@
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
                                  :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
-                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool]]]
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
@@ -49,7 +49,8 @@
                  (form/nil-form) false "" (form/nil-form) (form/nil-form)
                  (form/form-vec (form/no-forms)) (form/form-map (form/no-forms)) 0 (form/form-vec (form/no-forms))
                  (form/nil-form) (form/nil-form)
-                 (form/form-set (form/no-forms)) false false))
+                 (form/form-set (form/no-forms)) false false
+                 (form/form-map (form/no-forms))))
    :default nil)
 
 ;; the list of the call's arguments from index I as a Form seq (the host's `(rest form)` / `args`)
