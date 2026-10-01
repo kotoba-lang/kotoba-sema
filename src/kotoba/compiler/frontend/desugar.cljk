@@ -6,10 +6,10 @@
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
-            #?@(:kotoba [[kotoba.form :as form]])
-            #?@(:kotoba [[kotoba.compiler.frontend.base :refer [dr env-counter synthetic]]] :default [[kotoba.compiler.frontend.base :refer [capability-registry capability-wire-id effect-capability-id first-truthy form-span if-parts refuse-reader-tagged-host-literal! reject! reject-operation-arity! synthetic try-clause-parts #?@(:kotoba [dr])]]])
+            #?@(:kotoba [[kotoba.form :as form] [kotoba.artifact.core :as artifact] [kotoba.compiler.value-type :as vt]])
+            #?@(:kotoba [[kotoba.compiler.frontend.base :refer [dr env-counter form->document synthetic]]] :default [[kotoba.compiler.frontend.base :refer [capability-registry capability-wire-id effect-capability-id first-truthy form-span if-parts refuse-reader-tagged-host-literal! reject! reject-operation-arity! synthetic try-clause-parts #?@(:kotoba [dr])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? head-is? map-literal-record-type sym-is?]]] :default [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [head-is? sym-is?])]]])
-            #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? invoke-dispatcher-name kw-text parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? kw-text parametric-result-type? record-type? schema-ref-type? structured-type? typed-set-type? variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol?]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
@@ -506,7 +506,8 @@
 #?(:kotoba
    (defn desugar-call [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
      (if (= 0 (form/count-of form))
-       (throw (fe-unported "empty list" form))
+       ;; `()`: the host takes `(first form)` = nil as the head and the call falls through to an ordinary call of nil: `(nil)`
+       (dr env (form/form-seq (form/one-form (form/nil-form))))
        (let [op (form/nth-of form 0)]
          (cond
            (form/is-keyword? op)
@@ -2227,13 +2228,64 @@
                               (form/vec3 result (form/int-form arity) ptypes)))))
    :default nil)
 
-;; `request-invoke-dispatcher` with the clause's parameter types (nil-form: none): register the family and answer its name (closure-types'
-;; `invoke-dispatcher-name`: spelled for a flat result type, a digest for a structured one, a digest of the parameter types for typed parameters)
+;; Two aborting functions of closure-types, as module-local copies. An aborting function IMPORTED from another module is typed [:result T E] at the call and
+;; its abort does not propagate through a plain call (the language's abort ability does not cross a module boundary yet; closure-types keeps its own `require-k` for the
+;; same reason), so a refusal raised there would be dropped. The differential pins each to the host's function.
+;; `validate-value-type!` of closure-types: the value-type descriptor check, as a refusal
+#?(:kotoba
+   (defn type-valid! [type [:ref :form/r]] :i64
+     (let [r (vt/validate-type type 0 0)]
+       (if (vt/outcome-ok? r)
+         (vt/outcome-nodes r)
+         (throw (fe-reject (vt/outcome-msg r) (vt/outcome-code r) type)))))
+   :default nil)
+
+;; the name of a keyword type, namespace off (`(name result-type)`)
+#?(:kotoba
+   (defn dn-keyword-name [k [:ref :form/r]] :string
+     (let [body (string-substring (kw-text k) 1 (string-length (kw-text k)))
+           slash (string-find-byte body 47 0)]
+       (if (< slash 0) body (string-substring body (+ slash 1) (string-length body)))))
+   :default nil)
+
+#?(:kotoba
+   (defn dn-result-label [result-type [:ref :form/r]] :string
+     (if (form/is-keyword? result-type)
+       (dn-keyword-name result-type)
+       (string-concat "t_" (artifact/sha256 (form->document result-type)))))
+   :default nil)
+
+;; the name segment a typed-parameter family carries, "" for the all-`:i64` family
+#?(:kotoba
+   (defn dn-parameter-label [ptypes [:ref :form/r]] :string
+     (if (i64-types? ptypes 0)
+       ""
+       (string-concat "p_" (artifact/sha256 (form->document (form/form-vec (form/kids-of ptypes)))))))
+   :default nil)
+
+;; `invoke-dispatcher-name` of closure-types: spelled for a flat result type, a digest of the descriptor for a structured one, a digest of the parameter types
+;; for typed parameters (one digest of the whole signature when the result is structured too: the 128-character symbol bound)
+#?(:kotoba
+   (defn dispatcher-name-for [rt [:ref :form/r] arity :i64 ptypes [:ref :form/r]] [:ref :form/r]
+     (let [_ (require-k (or (schema-ref-type? rt) (closure-result-type? rt)) "closure result type is outside the admitted dispatcher profile"
+                        "kotoba.error/subset-reject" rt)
+           plabel (dn-parameter-label ptypes)
+           labelled? (not (string=? plabel ""))
+           structured? (not (form/is-keyword? rt))
+           middle (if (and labelled? structured?)
+                    (string-concat "_pt_" (artifact/sha256 (form->document (form/form-vec (form/two-forms (form/form-vec (form/kids-of ptypes)) rt)))))
+                    (string-concat (if labelled? (string-concat "_" plabel) "")
+                                   (if (form/eq rt (form/keyword-form :i64)) "" (string-concat "_" (dn-result-label rt)))))]
+       (form/symbol-form (string-concat "__kotoba_invoke" (string-concat middle (string-concat "$arity" (string-from-i64 arity)))))))
+   :default nil)
+
+;; `request-invoke-dispatcher` with the clause's parameter types (nil-form: none): register the family and answer its name (`dispatcher-name-for`, the module-local copy of closure-types'
+;; `invoke-dispatcher-name`)
 #?(:kotoba
    (defn request-dispatcher-p [env [:ref :fe/env] result [:ref :form/r] arity :i64 ptypes [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
      (let [rt (canonical-closure-result-type env result)
            env1 (with-dispatcher env rt arity ptypes)
-           name (invoke-dispatcher-name rt arity ptypes)]
+           name (dispatcher-name-for rt arity ptypes)]
        (dr env1 name)))
    :default nil)
 
@@ -5078,10 +5130,9 @@
 ;; `(when (some? error-type) (validate-value-type! error-type))`
 #?(:kotoba
    (defn desugar-validate-error-type [error-type [:ref :form/r]] :i64
-     ;; the imported aborting function answers a :result across the module boundary: its value is not used, the call is a let statement
      (if (form/is-nil? error-type)
        0
-       (let [_ (validate-value-type! error-type)] 0)))
+       (type-valid! error-type)))
    :default nil)
 
 #?(:kotoba
