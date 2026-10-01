@@ -328,12 +328,17 @@
 
 #?(:kotoba
    (defn read-forms [source :string] [:list [:ref :form/r]]
-     ;; The Kotoba route reads the bounded EDN subset (form/edn-form: lists, vectors, maps,
-     ;; sets, strings, keywords, symbols, decimal integers, 'quote). The full reader
-     ;; (reader conditionals, #() literals, character and regex tokens) is kotoba-reader's port.
+     ;; The Kotoba route reads with kotoba-reader's guest twin (lang/compat/kotoba/
+     ;; compiler/kotoba_reader.kotoba): the whole .kotoba grammar (reader conditionals,
+     ;; #() literals, character and regex tokens, ^meta, ::kw, large integers), every node
+     ;; carrying its line * 2^32 + column span. The host arm below reads the same grammar
+     ;; with the .cljk reader; scripts/reader-twin-diff in kotoba-lang is their differential.
      (let [_ (require-read (<= (string-byte-length source) 8388608) "source exceeds 8 MiB admission limit")
            _ (check-reader-depth! source)
-           out (form/kids-of (form/edn-form (string-concat "[" (string-concat source "]"))))
+           rd (kr/read-forms source)
+           err (record-get [:ref :kotoba.reader/out] rd :err)
+           _ (require-read (= (string-byte-length err) 0) "source reader rejected input")
+           out (record-get [:ref :kotoba.reader/out] rd :forms)
            _ (require-read (<= (vector-count out) 10000) "too many top-level forms")]
        out))
    :default
