@@ -2547,7 +2547,10 @@
     (with-meta result m)
     result)))
 
-#?(:kotoba nil :default
+#?(:kotoba
+(defn state-rebuild-seq [form [:ref :form/r] items [:list [:ref :form/r]]] [:ref :form/r]
+  (fmeta-from form (form/form-seq items)))
+   :default
 (defn state-rebuild-seq [form items]
   (if (seq (meta form)) (with-meta (apply list items) (meta form)) (apply list items))))
 
