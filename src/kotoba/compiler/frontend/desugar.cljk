@@ -1,25 +1,27 @@
 (ns kotoba.compiler.frontend.desugar
   "Module `desugar` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (287 forms, 5768 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs, validate, infer, record-projection."
+  ;; the surface the other modules of the Kotoba route use (the analysis driver): the desugarer, the env accessors, the contract tables entry
+  #?(:kotoba {:kotoba/export [desugar-expr desugar-result-expr put2 char-helper-name doc-append-from-helper-name lazy-drop-helper-name lazy-take-helper-name string-from-i64-helper-name expression-callable-contract with-contract-tables with-con env-con with-result with-lexical with-types with-options with-none with-abort-ctx with-loop-counter with-lambdas env-result env-lexical env-types env-options env-none? env-arities env-docfns env-abort-ctx env-loop-counter env-helpers env-shapes env-lambdas env-dispatchers env-uses-apply? env-uses-lazy? drs drs-env drs-forms dr-env dr-form]})
   (:require [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [capability-registry capability-wire-id effect-capability-id first-truthy form-span if-parts refuse-reader-tagged-host-literal! reject! reject-operation-arity! synthetic try-clause-parts #?@(:kotoba [dr])]]
-            [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [head-is? sym-is?])]]
-            [kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]
-            [kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]
-            [kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]
-            [kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]
-            [kotoba.compiler.frontend.infer :refer [record-field-type #?@(:kotoba [kw-head?])]]
-            [kotoba.compiler.frontend.record-projection :refer [doc-nth-helper-name f32-literal-bits! match-has-marker]])
+            #?@(:kotoba [[kotoba.compiler.frontend.base :refer [dr env-counter synthetic]]] :default [[kotoba.compiler.frontend.base :refer [capability-registry capability-wire-id effect-capability-id first-truthy form-span if-parts refuse-reader-tagged-host-literal! reject! reject-operation-arity! synthetic try-clause-parts #?@(:kotoba [dr])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? head-is? map-literal-record-type sym-is?]]] :default [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [head-is? sym-is?])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? invoke-dispatcher-name kw-text parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
+            #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol?]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [kw-head? record-field-type]]] :default [[kotoba.compiler.frontend.infer :refer [record-field-type #?@(:kotoba [kw-head?])]]])
+            #?@(:kotoba [] :default [[kotoba.compiler.frontend.record-projection :refer [doc-nth-helper-name f32-literal-bits! match-has-marker]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
                                  :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
-                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool]]]
+                                 :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
 
@@ -48,7 +50,7 @@
 
 
 ;; forward references inside this module (the cut keeps the original form order)
-(declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*)
+#?(:kotoba nil :default (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*))
 
 
 ;; Dataspace v1 is a language-owned typed capability contract. These
@@ -56,20 +58,20 @@
 ;; the source sugar here means HIR/KIR/backends only see ordinary closed
 ;; record/variant construction plus typed-cap-call; there is no second runtime
 ;; or authority path for coordination forms.
-(def dataspace-assert-type
-  [:record :kotoba.dataspace/assert [[:assertion :document] [:facet :i64]]])
-(def dataspace-retract-type
-  [:record :kotoba.dataspace/retract [[:assertion :document] [:facet :i64]]])
-(def dataspace-observe-type
-  [:record :kotoba.dataspace/observe [[:pattern :document] [:facet :i64]]])
-(def dataspace-request-type
+#?(:kotoba nil :default (def dataspace-assert-type
+  [:record :kotoba.dataspace/assert [[:assertion :document] [:facet :i64]]]))
+#?(:kotoba nil :default (def dataspace-retract-type
+  [:record :kotoba.dataspace/retract [[:assertion :document] [:facet :i64]]]))
+#?(:kotoba nil :default (def dataspace-observe-type
+  [:record :kotoba.dataspace/observe [[:pattern :document] [:facet :i64]]]))
+#?(:kotoba nil :default (def dataspace-request-type
   [:variant :kotoba.dataspace/request
    [[:assert dataspace-assert-type]
     [:retract dataspace-retract-type]
     [:observe dataspace-observe-type]
     [:facet-enter :bool]
-    [:facet-leave :i64]]])
-(def dataspace-result-type
+    [:facet-leave :i64]]]))
+#?(:kotoba nil :default (def dataspace-result-type
   [:variant :kotoba.dataspace/result
    [[:asserted [:record :kotoba.dataspace/asserted
                 [[:count :i64] [:notices :document]]]]
@@ -78,7 +80,7 @@
                [[:bindings :document] [:notices :document]]]]
     [:facet [:record :kotoba.dataspace/facet [[:id :i64]]]]
     [:error [:record :kotoba.dataspace/error
-             [[:code :keyword] [:message :string]]]]]])
+             [[:code :keyword] [:message :string]]]]]]))
 
 #?(:kotoba
    (defn env-result [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :result))
@@ -884,6 +886,7 @@
        (let [pattern (form/nth-of bindings i)
              value (form/nth-of bindings (+ i 1))
              types (env-types env)
+             value-contract (expression-callable-contract env value)
              document? (and (form/is-symbol? pattern) (guess-document-form? env value))
              v (desugar-expr env value)
              expanded (destructure-expand (dr-env v) pattern (dr-form v))
@@ -893,7 +896,10 @@
                           document? (types-assoc types pattern (form/keyword-form :document))
                           integer? (types-assoc types pattern (form/keyword-form :i64))
                           :else types)
-             env2 (with-types (with-lexical (dr-env expanded) (lexical-add-pairs (env-lexical (dr-env expanded)) pairs 0)) next-types)]
+             env1 (with-types (with-lexical (dr-env expanded) (lexical-add-pairs (env-lexical (dr-env expanded)) pairs 0)) next-types)
+             env2 (if (and (form/is-symbol? pattern) (not (form/is-nil? value-contract)))
+                    (with-con env1 :lexical (types-assoc (env-con env1 :lexical) pattern value-contract))
+                    env1)]
          (lower-let-bindings env2 bindings (+ i 2) (form/append-many acc (flatten-pairs pairs 0 (form/no-forms)))))))
    :default nil)
 
@@ -903,10 +909,11 @@
        (if (and (form/is-vec? bindings) (= 0 (rem (form/count-of bindings) 2)))
          (let [saved (env-lexical env)
                saved-types (env-types env)
+               saved-contracts (env-con env :lexical)
                lowered (lower-let-bindings env bindings 0 (form/no-forms))
                body (desugar-tail-expressions (drs-env lowered) ctx form 2 (form/no-forms))
                sb (sequenced-body (drs-forms body) form "let")]
-           (dr (with-types (with-lexical (drs-env body) saved) saved-types)
+           (dr (with-con (with-types (with-lexical (drs-env body) saved) saved-types) :lexical saved-contracts)
                (form/call2 "let" (form/form-vec (drs-forms lowered)) sb)))
          (let [r (desugar-each env form 2 (form/no-forms))]
            (dr (drs-env r) (form/form-seq (form/cons-onto (form/symbol-form "let") (form/cons-onto bindings (drs-forms r)))))))))
@@ -2148,32 +2155,91 @@
    (defn with-uses-apply [env [:ref :fe/env]] [:ref :fe/env] (record-assoc [:ref :fe/env] env :uses-apply true))
    :default nil)
 
-;; `(vswap! *required-closure-dispatchers* conj [result arity])`
+;; ---- callable contracts (ADR 0353) and the closure dispatcher families ----
+;; The host keeps the four contract tables in dynamic vars (`*lexical-callable-contracts*`, `*function-callable-result-contracts*`,
+;; `*function-callable-param-contracts*`, `*expected-callable-contract*`); on this route they are the entries :lexical, :results, :params
+;; and :expected of the Form map in the env field `contracts`, set and restored for the extent of a call exactly as `binding` does.
 #?(:kotoba
-   (defn with-dispatcher [env [:ref :fe/env] result [:ref :form/r] arity :i64] [:ref :fe/env]
+   (defn env-con [env [:ref :fe/env] key :keyword] [:ref :form/r]
+     (form/form-get (record-get [:ref :fe/env] env :contracts) (form/keyword-form key)))
+   :default nil)
+
+#?(:kotoba
+   (defn with-con [env [:ref :fe/env] key :keyword v [:ref :form/r]] [:ref :fe/env]
+     (record-assoc [:ref :fe/env] env :contracts
+                   (form/assoc-form (record-get [:ref :fe/env] env :contracts) (form/keyword-form key) v)))
+   :default nil)
+
+;; the analysis driver's entry: the four tables for one function (`analyze` binds the dynamic vars per defn): its parameters' contracts by symbol,
+;; the module's declared result contracts by [name arity], its contract-typed parameter positions by [name arity] -> {index contract}, and
+;; the function's own declared result contract (nil-form for none)
+#?(:kotoba
+   (defn with-contract-tables [env [:ref :fe/env] lexical [:ref :form/r] results [:ref :form/r] params [:ref :form/r] expected [:ref :form/r]] [:ref :fe/env]
+     (with-con (with-con (with-con (with-con env :lexical lexical) :results results) :params params) :expected expected))
+   :default nil)
+
+;; every parameter type of the Form vector PS (from I) is :i64 (the closure ABI before typed parameters; nil-form is the same shape)
+#?(:kotoba
+   (defn i64-types? [ps [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of ps))
+       true
+       (and (form/eq (form/nth-of ps i) (form/keyword-form :i64)) (i64-types? ps (+ i 1)))))
+   :default nil)
+
+;; some clause of the contract names a parameter type other than :i64 (the contract reaches a call's argument only then)
+#?(:kotoba
+   (defn contract-typed-params? [clauses [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of clauses))
+       false
+       (or (not (i64-types? (form/nth-of (form/nth-of clauses i) 0) 0))
+           (contract-typed-params? clauses (+ i 1)))))
+   :default nil)
+
+;; the clause of the contract with ARITY parameters (host `callable-clause-for-arity`)
+#?(:kotoba
+   (defn contract-clause-at [clauses [:ref :form/r] arity :i64 i :i64 form [:ref :form/r]] [:ref :form/r]
+     (if (>= i (form/count-of clauses))
+       (throw (fe-reject "callable contract does not admit this arity" "kotoba.error/callable-arity" form))
+       (if (= arity (form/count-of (form/nth-of (form/nth-of clauses i) 0)))
+         (form/nth-of clauses i)
+         (contract-clause-at clauses arity (+ i 1) form))))
+   :default nil)
+
+;; the contract of an expression: a local closure's, or the declared result contract of the module function it calls
+#?(:kotoba
+   (defn expression-callable-contract [env [:ref :fe/env] form [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-symbol? form) (form/form-get (env-con env :lexical) form)
+       (form/is-seq? form)
+       (let [table (env-con env :results)
+             by-arity (form/form-get table (form/vec2 (form/nth-of form 0) (form/int-form (- (form/count-of form) 1))))]
+         (if (form/is-nil? by-arity) (form/form-get table (form/nth-of form 0)) by-arity))
+       :else (form/nil-form)))
+   :default nil)
+
+;; `(vswap! *required-closure-dispatchers* conj (dispatcher-key result arity parameter-types))`
+#?(:kotoba
+   (defn with-dispatcher [env [:ref :fe/env] result [:ref :form/r] arity :i64 ptypes [:ref :form/r]] [:ref :fe/env]
      (record-assoc [:ref :fe/env] env :dispatchers
-                   (set-add (record-get [:ref :fe/env] env :dispatchers) (form/vec2 result (form/int-form arity)))))
+                   (set-add (record-get [:ref :fe/env] env :dispatchers)
+                            (if (i64-types? ptypes 0)
+                              (form/vec2 result (form/int-form arity))
+                              (form/vec3 result (form/int-form arity) ptypes)))))
    :default nil)
 
-;; the name of the invoke dispatcher family for a flat result type
+;; `request-invoke-dispatcher` with the clause's parameter types (nil-form: none): register the family and answer its name (closure-types'
+;; `invoke-dispatcher-name`: spelled for a flat result type, a digest for a structured one, a digest of the parameter types for typed parameters)
 #?(:kotoba
-   (defn dispatcher-name-for [rt [:ref :form/r] arity :i64 form [:ref :form/r]] [:ref :form/r]
-     (if (form/is-keyword? rt)
-       (form/symbol-form
-        (string-concat "__kotoba_invoke"
-          (string-concat (if (form/eq rt (form/keyword-form :i64)) "" (string-concat "_" (string-substring (kw-text rt) 1 (string-byte-length (kw-text rt)))))
-            (string-concat "$arity" (string-from-i64 arity)))))
-       (throw (fe-unported "closure dispatcher over a structured result type" form))))
+   (defn request-dispatcher-p [env [:ref :fe/env] result [:ref :form/r] arity :i64 ptypes [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [rt (canonical-closure-result-type env result)
+           env1 (with-dispatcher env rt arity ptypes)
+           name (invoke-dispatcher-name rt arity ptypes)]
+       (dr env1 name)))
    :default nil)
 
-;; `request-invoke-dispatcher`: register the family and answer its name
 #?(:kotoba
    (defn request-dispatcher [env [:ref :fe/env] result [:ref :form/r] arity :i64 form [:ref :form/r]] [:ref :fe/dr]
-     (let [rt (canonical-closure-result-type env result)
-           env1 (with-dispatcher env rt arity)
-           _ (require-k (closure-result-type? rt) "closure result type is outside the admitted dispatcher profile" "kotoba.error/subset-reject" rt)
-           name (dispatcher-name-for rt arity form)]
-       (dr env1 name)))
+     (request-dispatcher-p env result arity (form/nil-form) form))
    :default nil)
 
 ;; the stored-callback call head of map / map-indexed
@@ -2390,17 +2456,46 @@
               (clauses-valid? cs (+ i 1))))))
    :default nil)
 
-;; the body of one clause desugared in the fn scope (its params lexical, the abort context :fn); absence per the expected result
+;; the typed parameters of a contract clause are locals of their type inside the body (a record-field projection reads them), and an option-typed one
+;; is a local option type: the host's `*local-types*` / `*local-option-types*` bindings of `lift-lambda`
 #?(:kotoba
-   (defn lambda-clause-body [env [:ref :fe/env] c [:ref :form/r]] [:ref :fe/dr]
+   (defn with-options [env [:ref :fe/env] t [:ref :form/r]] [:ref :fe/env]
+     (record-assoc [:ref :fe/env] env :options t))
+   :default nil)
+
+#?(:kotoba
+   (defn env-options [env [:ref :fe/env]] [:ref :form/r] (record-get [:ref :fe/env] env :options))
+   :default nil)
+
+#?(:kotoba
+   (defn lambda-param-types [env [:ref :fe/env] params [:ref :form/r] ptypes [:ref :form/r] i :i64] [:ref :fe/env]
+     (if (>= i (form/count-of params))
+       env
+       (let [p (form/nth-of params i)
+             t (form/nth-of ptypes i)
+             env1 (with-types env (types-assoc (env-types env) p t))
+             env2 (if (generic-option-type? t) (with-options env1 (types-assoc (env-options env1) p t)) env1)]
+         (lambda-param-types env2 params ptypes (+ i 1)))))
+   :default nil)
+
+;; the body of one clause desugared in the fn scope (its params lexical, the abort context :fn); the result is the contract clause's when the
+;; expected contract names one for this arity, else the contextual closure result; absence per that result
+#?(:kotoba
+   (defn lambda-clause-body [env [:ref :fe/env] c [:ref :form/r] results [:ref :form/r] cparams [:ref :form/r]] [:ref :fe/dr]
      (let [params (form/nth-of c 0)
-           expected (env-result env)
+           cres (form/form-get results (form/int-form (form/count-of params)))
+           cpar (form/form-get cparams (form/int-form (form/count-of params)))
+           expected (if (form/is-nil? cres) (env-result env) cres)
            saved-lex (env-lexical env)
            saved-ctx (env-abort-ctx env)
            saved-none (env-none? env)
-           scoped (with-none (with-abort-ctx (with-lexical env (lex-add-vec saved-lex params 0)) "fn") (form/is-nil? expected))
+           saved-types (env-types env)
+           saved-opts (env-options env)
+           scoped0 (with-none (with-abort-ctx (with-lexical env (lex-add-vec saved-lex params 0)) "fn") (form/is-nil? expected))
+           scoped (if (form/is-nil? cpar) scoped0 (lambda-param-types scoped0 params cpar 0))
            r (lambda-body-expr scoped expected (form/nth-of c 1))]
-       (dr (with-none (with-abort-ctx (with-lexical (dr-env r) saved-lex) saved-ctx) saved-none) (dr-form r))))
+       (dr (with-options (with-types (with-none (with-abort-ctx (with-lexical (dr-env r) saved-lex) saved-ctx) saved-none) saved-types) saved-opts)
+           (dr-form r))))
    :default nil)
 
 #?(:kotoba
@@ -2412,12 +2507,16 @@
 
 ;; the bodies lowered, in clause order: a Form vector of [params lowered-body]
 #?(:kotoba
-   (defn lambda-lower-clauses [env [:ref :fe/env] cs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+   (defn lambda-lower-clauses [env [:ref :fe/env] cs [:list [:ref :form/r]] results [:ref :form/r] cparams [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
      (if (>= i (vector-count cs))
        (drs env acc)
        (let [c (typed-list-nth [:list [:ref :form/r]] cs i)
-             r (lambda-clause-body env c)]
-         (lambda-lower-clauses (dr-env r) cs (+ i 1) (form/append-form acc (form/vec2 (form/nth-of c 0) (dr-form r)))))))
+             r (lambda-clause-body env c results cparams)
+             n (form/count-of (form/nth-of c 0))]
+         (lambda-lower-clauses (dr-env r) cs results cparams (+ i 1)
+                               (form/append-form acc (form/vec4 (form/nth-of c 0) (dr-form r)
+                                                                (form/form-get results (form/int-form n))
+                                                                (form/form-get cparams (form/int-form n))))))))
    :default nil)
 
 ;; the free symbols of every lowered body (params bound), as a set
@@ -2438,31 +2537,44 @@
            (lambda-too-wide lowered captures (+ i 1)))))
    :default nil)
 
-;; the lifted infos {:id :arity :captures :helper {...}} of the clauses
+;; N copies of :i64 appended to the Form list ACC
 #?(:kotoba
-   (defn lambda-info [id :i64 captures [:list [:ref :form/r]] params [:ref :form/r] body [:ref :form/r] lazy? :bool] [:ref :form/r]
+   (defn i64-types-n [n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (<= n 0) acc (i64-types-n (- n 1) (form/append-form acc (form/keyword-form :i64)))))
+   :default nil)
+
+;; the lifted infos {:id :arity :captures :helper {...}} of the clauses; a contract clause adds :contract-result / :parameter-types and the
+;; helper's :param-types (the captures stay the i64 pair-chain words they are read out of, only the clause's own parameters carry the types)
+#?(:kotoba
+   (defn lambda-info [id :i64 captures [:list [:ref :form/r]] params [:ref :form/r] body [:ref :form/r] lazy? :bool cres [:ref :form/r] cpar [:ref :form/r]] [:ref :form/r]
      (let [arity (form/count-of params)
            helper (form/symbol-form (string-concat "__kotoba_lambda_" (string-concat (string-from-i64 id) (string-concat "_arity" (string-from-i64 arity)))))
-           hmap (form/assoc-form
-                 (form/assoc-form
+           hmap0 (form/assoc-form
                   (form/assoc-form
                    (form/assoc-form
                     (form/assoc-form
                      (form/assoc-form
-                      (form/assoc-form (form/form-map (form/no-forms)) (form/keyword-form :name) helper)
-                      (form/keyword-form :params) (form/form-vec (form/append-many captures (form/kids-of params))))
-                     (form/keyword-form :result) (form/keyword-form :i64))
-                    (form/keyword-form :result-inferred?) (form/bool-form true))
-                   (form/keyword-form :effects) (form/form-set (form/no-forms)))
-                  (form/keyword-form :body) body)
-                 (form/keyword-form :lazy-thunk?) (form/bool-form lazy?))]
-       (form/assoc-form
-        (form/assoc-form
-         (form/assoc-form
-          (form/assoc-form (form/form-map (form/no-forms)) (form/keyword-form :id) (form/int-form id))
-          (form/keyword-form :arity) (form/int-form arity))
-         (form/keyword-form :captures) (form/form-vec captures))
-        (form/keyword-form :helper) hmap)))
+                      (form/assoc-form
+                       (form/assoc-form (form/form-map (form/no-forms)) (form/keyword-form :name) helper)
+                       (form/keyword-form :params) (form/form-vec (form/append-many captures (form/kids-of params))))
+                      (form/keyword-form :result) (form/keyword-form :i64))
+                     (form/keyword-form :result-inferred?) (form/bool-form true))
+                    (form/keyword-form :effects) (form/form-set (form/no-forms)))
+                   (form/keyword-form :body) body)
+                  (form/keyword-form :lazy-thunk?) (form/bool-form lazy?))
+           hmap (if (form/is-nil? cpar)
+                  hmap0
+                  (form/assoc-form hmap0 (form/keyword-form :param-types)
+                                   (form/form-vec (form/append-many (i64-types-n (vector-count captures) (form/no-forms)) (form/kids-of cpar)))))
+           info0 (form/assoc-form
+                  (form/assoc-form
+                   (form/assoc-form
+                    (form/assoc-form (form/form-map (form/no-forms)) (form/keyword-form :id) (form/int-form id))
+                    (form/keyword-form :arity) (form/int-form arity))
+                   (form/keyword-form :captures) (form/form-vec captures))
+                  (form/keyword-form :helper) hmap)
+           info1 (if (form/is-nil? cres) info0 (form/assoc-form info0 (form/keyword-form :contract-result) cres))]
+       (if (form/is-nil? cpar) info1 (form/assoc-form info1 (form/keyword-form :parameter-types) cpar))))
    :default nil)
 
 #?(:kotoba
@@ -2470,19 +2582,60 @@
      (if (>= i (vector-count lowered))
        acc
        (let [c (typed-list-nth [:list [:ref :form/r]] lowered i)]
-         (lambda-infos id captures lowered lazy? (+ i 1) (form/append-form acc (lambda-info id captures (form/nth-of c 0) (form/nth-of c 1) lazy?))))))
+         (lambda-infos id captures lowered lazy? (+ i 1)
+                       (form/append-form acc (lambda-info id captures (form/nth-of c 0) (form/nth-of c 1) lazy? (form/nth-of c 2) (form/nth-of c 3)))))))
    :default nil)
 
 ;; (fn [params] body) / (fn ([p] b) ...) lifted to top-level helpers `__kotoba_lambda_ID_arityN` and replaced by `(pair ID captures)`
+;; the expected contract's result type by arity ({arity result}) and its non-i64 parameter types by arity ({arity [types]})
+#?(:kotoba
+   (defn contract-results-map [cclauses [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (>= i (form/count-of cclauses))
+       acc
+       (let [c (form/nth-of cclauses i)]
+         (contract-results-map cclauses (+ i 1) (form/assoc-form acc (form/int-form (form/count-of (form/nth-of c 0))) (form/nth-of c 1))))))
+   :default nil)
+
+#?(:kotoba
+   (defn contract-params-map [cclauses [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+     (if (>= i (form/count-of cclauses))
+       acc
+       (let [c (form/nth-of cclauses i)
+             ps (form/nth-of c 0)]
+         (contract-params-map cclauses (+ i 1)
+                              (if (i64-types? ps 0) acc (form/assoc-form acc (form/int-form (form/count-of ps)) ps))))))
+   :default nil)
+
+;; every clause arity is an arity of the contract
+#?(:kotoba
+   (defn contract-arities-in? [clauses [:list [:ref :form/r]] i :i64 cres [:ref :form/r]] :bool
+     (if (>= i (vector-count clauses))
+       true
+       (and (form/form-has? cres (form/int-form (form/count-of (form/nth-of (typed-list-nth [:list [:ref :form/r]] clauses i) 0))))
+            (contract-arities-in? clauses (+ i 1) cres))))
+   :default nil)
+
+;; the clause arities and the contract's arities are the same set (the clauses have unique arities)
+#?(:kotoba
+   (defn contract-arities-match? [clauses [:list [:ref :form/r]] cres [:ref :form/r]] :bool
+     (and (= (vector-count clauses) (quot (form/count-of cres) 2)) (contract-arities-in? clauses 0 cres)))
+   :default nil)
+
 #?(:kotoba
    (defn lift-lambda-k [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
      (let [raw (lambda-clauses-of form)
            clauses (lambda-expand-clauses raw form)
+           expected-contract (env-con env :expected)
+           cclauses (callable-clauses expected-contract)
+           cres (contract-results-map cclauses 0 (form/form-map (form/no-forms)))
+           cparams (contract-params-map cclauses 0 (form/form-map (form/no-forms)))
+           _ (require-k (or (form/is-nil? expected-contract) (contract-arities-match? clauses cres))
+                        "fn arities do not match the declared callable result contract" "kotoba.error/callable-result-arity" form)
            _ (require-k (and (> (vector-count clauses) 0) (clauses-valid? clauses 0))
                         "fn value requires unique arities with zero to four unique parameters" "kotoba.error/subset-reject" form)
            _ (require-k (not (and (form/is-vec? (if (> (form/count-of form) 1) (form/nth-of form 1) (form/nil-form))) (= 2 (form/count-of form))))
                         "single-arity fn value requires exactly one body" "kotoba.error/subset-reject" form)
-           lowered (lambda-lower-clauses env clauses 0 (form/no-forms))
+           lowered (lambda-lower-clauses env clauses cres cparams 0 (form/no-forms))
            lenv (drs-env lowered)
            lforms (drs-forms lowered)
            free (lambda-captures lforms 0 (form/form-set (form/no-forms)))
@@ -2675,14 +2828,38 @@
    :default nil)
 
 ;; ---- lexical calls, lazy sequences (take, drop, lazy-cons/first/rest/empty?), char, string-join ----
-;; The Kotoba route has no callable contracts (`*lexical-callable-contracts*`), so a call of a local closure always takes the
-;; contract-free path of `desugar-lexical-call`: the dispatcher family is the contextual result type (i64 when there is none).
+#?(:kotoba
+   (defn lexical-call-clause [contract [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+     (if (form/is-nil? contract)
+       (form/nil-form)
+       (contract-clause-at (callable-clauses contract) (argc form) 0 form)))
+   :default nil)
+
+;; the arguments of a call of a local closure under a contract clause: an :i64 parameter desugars as ever, any other under its type
+#?(:kotoba
+   (defn lexical-call-args [env [:ref :fe/env] form [:ref :form/r] i :i64 ptypes [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [wanted (form/nth-of ptypes (- i 1))
+             a (if (form/eq wanted (form/keyword-form :i64))
+                 (desugar-expr env (form/nth-of form i))
+                 (desugar-expected-value env wanted (form/nth-of form i)))]
+         (lexical-call-args (dr-env a) form (+ i 1) ptypes (form/append-form acc (dr-form a))))))
+   :default nil)
+
+;; a call of a local closure: with a contract (`*lexical-callable-contracts*`) the clause of that arity gives the parameter types, which select the
+;; dispatcher family, and the result type; without one the family is the contextual result type (i64 when there is none)
 #?(:kotoba
    (defn desugar-lexical-call-k [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
      (let [_ (require-k (<= (argc form) 4) "direct closure call exceeds ABI arity four" "kotoba.error/subset-reject" form)
-           rt (if (form/is-nil? ctx) (form/keyword-form :i64) ctx)
-           name (request-dispatcher env rt (argc form) form)
-           args (desugar-each (dr-env name) form 1 (form/no-forms))]
+           clause (lexical-call-clause (form/form-get (env-con env :lexical) op) form)
+           ptypes (form/nth-of clause 0)
+           cres (form/nth-of clause 1)
+           rt (if (form/is-nil? cres) (if (form/is-nil? ctx) (form/keyword-form :i64) ctx) cres)
+           name (request-dispatcher-p env rt (argc form) ptypes form)
+           args (if (form/is-nil? ptypes)
+                  (desugar-each (dr-env name) form 1 (form/no-forms))
+                  (lexical-call-args (dr-env name) form 1 ptypes (form/no-forms)))]
        (dr (drs-env args) (head-call (dr-form name) (form/cons-onto op (drs-forms args))))))
    :default nil)
 
@@ -4129,10 +4306,43 @@
    :default nil)
 
 ;; a floating literal is its bits
+;; The binary32 bit pattern of an f64 literal written in an `:f32` context (host `f32-literal-bits!`, record_projection.cljk): the narrowing is
+;; exact-or-refused, so the literal is admitted when widening its binary32 rounding gives back the same f64 bits. -1 << 40 when it is not exact.
+#?(:kotoba
+   (defn f32-literal-bits-or-none [b :i64] :i64
+     (let [n (f64-to-f32-rounded (f64-from-bits b))]
+       (if (= (f64-to-bits (f32-to-f64-exact n)) b) (f32-to-bits n) -1099511627776)))
+   :default nil)
+
+;; a NaN or an infinity (the exponent field all ones), spelled as `pr-str` spells it
+#?(:kotoba
+   (defn f64-nonfinite-text [b :i64] :string
+     (if (= (bit-and b 9218868437227405312) 9218868437227405312)
+       (if (= (bit-and b 4503599627370495) 0)
+         (if (< b 0) "##-Inf" "##Inf")
+         "##NaN")
+       ""))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-f32-literal [env [:ref :fe/env] f [:ref :form/r]] [:ref :fe/dr]
+     (let [b (form/bits-of f)
+           nf (f64-nonfinite-text b)
+           _ (require-k (= (string-length nf) 0)
+                        (string-concat "f32 literal must be a finite decimal: "
+                                       (string-concat nf " -- write (f32-from-bits <i32>) for a NaN or an infinity"))
+                        "kotoba.error/f32-literal-not-finite" f)
+           r (f32-literal-bits-or-none b)]
+       ;; the inexact refusal prints the literal with `pr-str` (the shortest decimal that reads back as these bits), which is not ported
+       (if (= r -1099511627776)
+         (throw (fe-unported "f32 literal that is not exactly representable in binary32" f))
+         (dr env (form/call1 "f32-from-bits" (form/int-form r))))))
+   :default nil)
+
 #?(:kotoba
    (defn desugar-f64-literal [env [:ref :fe/env] f [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
      (if (form/eq ctx (form/keyword-form :f32))
-       (throw (fe-unported "f32 literal" f))
+       (desugar-f32-literal env f)
        (dr env (form/call1 "f64-from-bits" (form/int-form (form/bits-of f))))))
    :default nil)
 
@@ -4868,9 +5078,10 @@
 ;; `(when (some? error-type) (validate-value-type! error-type))`
 #?(:kotoba
    (defn desugar-validate-error-type [error-type [:ref :form/r]] :i64
+     ;; the imported aborting function answers a :result across the module boundary: its value is not used, the call is a let statement
      (if (form/is-nil? error-type)
        0
-       (validate-value-type! error-type)))
+       (let [_ (validate-value-type! error-type)] 0)))
    :default nil)
 
 #?(:kotoba
@@ -5123,7 +5334,7 @@
 ;; afterward" pattern `map-get-helper`/`uses-map-get?` already established,
 ;; generalized to support MULTIPLE, uniquely-named helpers per defn (one
 ;; per `loop` occurrence) rather than one fixed shared name.
-(def ^:dynamic *pending-loop-helpers* nil)
+#?(:kotoba nil :default (def ^:dynamic *pending-loop-helpers* nil))
 
 ;; ADR 0027: helper name -> {:bindings n :declared-result t-or-nil} for every
 ;; synthesized loop-helper, bound ONCE per `analyze` beside `*loop-counter*`.
@@ -5134,7 +5345,7 @@
 ;; value in it changing. Byte-identical output for an unchanged program is the
 ;; measurement this pass had to keep, so what the passes need travels here and
 ;; the function map is left exactly as it was.
-(def ^:dynamic *loop-helper-shapes* nil)
+#?(:kotoba nil :default (def ^:dynamic *loop-helper-shapes* nil))
 
 ;; Optional override for the synthesized loop-helper's return type.
 ;;
@@ -5151,7 +5362,7 @@
 ;; `(vector-i64)` and their sole exit is that accumulator), and
 ;; `infer-loop-helper-results` refuses a declared result its exits disagree
 ;; with, so the two cannot drift apart silently.
-(def ^:dynamic *loop-result-type* nil)
+#?(:kotoba nil :default (def ^:dynamic *loop-result-type* nil))
 
 ;; Known types for a synthesized loop-helper's bindings and captured outer
 ;; variables. T4.5 map/filter/reduce know the source is `:vector-i64` (or a
@@ -5161,7 +5372,7 @@
 ;; argument types. Without this overlay the helper is typed `:i64` for
 ;; `__kotoba_map_source_*` and `vector-count` / `vector-at` refuse the
 ;; binding the author never wrote -- the stdlib-core-oracle cascade.
-(def ^:dynamic *loop-known-types* nil)
+#?(:kotoba nil :default (def ^:dynamic *loop-known-types* nil))
 
 ;; ADR-2607150000: loop-helper names are NOT `gensym` -- unlike and/or's
 ;; gensym'd `let`-local temp names (erased into numeric WASM local indices,
@@ -5179,29 +5390,29 @@
 ;; bound ONCE per `analyze` call (not per-defn) so the same source always
 ;; encounters `loop` forms in the same left-to-right desugaring order and
 ;; always assigns the same names.
-(def ^:dynamic *loop-counter* nil)
-(def ^:dynamic *function-arities* {})
-(def ^:dynamic *document-functions*
+#?(:kotoba nil :default (def ^:dynamic *loop-counter* nil))
+#?(:kotoba nil :default (def ^:dynamic *function-arities* {}))
+#?(:kotoba nil :default (def ^:dynamic *document-functions*
   "Source names of the module's functions whose DECLARED result is `:document`.
   `reduce`/`map`/`filter` choose between the vector-i64 and document lowerings
   while desugaring, when a call's result type is not inferred yet; a declared
   `:document` result is what lets `(merge (base) x)` or `(vals (f))` be read as a
   document."
-  #{})
-(def ^:dynamic *lambda-counter* nil)
-(def ^:dynamic *pending-lambdas* nil)
-(def ^:dynamic *uses-apply?* nil)
-(def ^:dynamic *uses-lazy?* nil)
-(def ^:dynamic *lifting-lazy-thunk?* false)
+  #{}))
+#?(:kotoba nil :default (def ^:dynamic *lambda-counter* nil))
+#?(:kotoba nil :default (def ^:dynamic *pending-lambdas* nil))
+#?(:kotoba nil :default (def ^:dynamic *uses-apply?* nil))
+#?(:kotoba nil :default (def ^:dynamic *uses-lazy?* nil))
+#?(:kotoba nil :default (def ^:dynamic *lifting-lazy-thunk?* false))
 
 ;; Abort ability, slice 1 (kotoba-lang `lang/abort-ability.edn`). `throw` is
 ;; refused inside the lexical contexts whose unwind is not checked yet -- a
 ;; loop/doseq/dotimes body (which becomes a synthesized helper function), a
 ;; lazy thunk, a fn literal. Bound to the context's tag while its body is
 ;; desugared so the refusal can name it and cite the precondition it waits on.
-(def ^:dynamic *abort-lexical-context* nil)
+#?(:kotoba nil :default (def ^:dynamic *abort-lexical-context* nil))
 
-(defn abort-lexical-context
+#?(:kotoba nil :default (defn abort-lexical-context
   "The description of the lexical context that refuses `throw`, or nil."
   []
   ;; A loop/doseq/dotimes body is NOT here since 2026-09-25 (superproject
@@ -5215,10 +5426,10 @@
   ;; after, or outside, the scope that wrote it) and stay refused.
   (cond
     *lifting-lazy-thunk?* "a lazy thunk"
-    (= :fn *abort-lexical-context*) "a fn literal"))
-(def ^:dynamic *lexical-bindings* #{})
-(def ^:dynamic *lexical-callable-contracts* {})
-(def ^:dynamic *function-callable-result-contracts* {})
+    (= :fn *abort-lexical-context*) "a fn literal")))
+#?(:kotoba nil :default (def ^:dynamic *lexical-bindings* #{}))
+#?(:kotoba nil :default (def ^:dynamic *lexical-callable-contracts* {}))
+#?(:kotoba nil :default (def ^:dynamic *function-callable-result-contracts* {}))
 ;; `[source-name arity]` -> `{parameter-index callable-contract}` for every
 ;; defn clause whose parameter vector names a `[:fn ...]` type. Read at an
 ;; ordinary call so a `fn` written in that argument position is lifted under
@@ -5226,51 +5437,51 @@
 ;; is (2026-09-12): its parameters take the clause's types and it joins the
 ;; dispatcher family of that signature. A lambda written anywhere else keeps
 ;; i64 parameters.
-(def ^:dynamic *function-callable-param-contracts* {})
-(def ^:dynamic *expected-callable-contract* nil)
-(def ^:dynamic *contextual-closure-result-type* nil)
-(def ^:dynamic *required-closure-dispatchers* nil)
+#?(:kotoba nil :default (def ^:dynamic *function-callable-param-contracts* {}))
+#?(:kotoba nil :default (def ^:dynamic *expected-callable-contract* nil))
+#?(:kotoba nil :default (def ^:dynamic *contextual-closure-result-type* nil))
+#?(:kotoba nil :default (def ^:dynamic *required-closure-dispatchers* nil))
 
-(defn dispatcher-key
+#?(:kotoba nil :default (defn dispatcher-key
   "The key a dispatcher family is requested and built under. `[result arity]`
   for the all-`:i64` parameter shape -- every key that existed before typed
   parameters is unchanged -- and `[result arity parameter-types]` otherwise."
   [result-type arity parameter-types]
   (if (i64-parameter-types? parameter-types)
     [result-type arity]
-    [result-type arity (vec parameter-types)]))
+    [result-type arity (vec parameter-types)])))
 
-(defn request-invoke-dispatcher
+#?(:kotoba nil :default (defn request-invoke-dispatcher
   ([result-type arity] (request-invoke-dispatcher result-type arity nil))
   ([result-type arity parameter-types]
    (let [result-type (canonical-closure-result-type result-type)]
      (when *required-closure-dispatchers*
        (vswap! *required-closure-dispatchers* conj
                (dispatcher-key result-type arity parameter-types)))
-     (invoke-dispatcher-name result-type arity parameter-types))))
+     (invoke-dispatcher-name result-type arity parameter-types)))))
 
 #?(:kotoba nil :default (def non-shadowable-special-heads tables/non-shadowable-special-heads))
 
-(defn lexical-call-form? [form]
+#?(:kotoba nil :default (defn lexical-call-form? [form]
   (and (seq? form)
        (symbol? (first form))
        (contains? *lexical-bindings* (first form))
-       (not (contains? non-shadowable-special-heads (first form)))))
+       (not (contains? non-shadowable-special-heads (first form))))))
 
-(defn callable-clause-for-arity [contract arity form]
+#?(:kotoba nil :default (defn callable-clause-for-arity [contract arity form]
   (or (first-truthy #(when (= arity (count (first %))) %) (callable-clauses contract))
       (reject! "callable contract does not admit this arity"
-               form :kotoba.error/callable-arity)))
+               form :kotoba.error/callable-arity))))
 
-(defn expression-callable-contract [form]
+#?(:kotoba nil :default (defn expression-callable-contract [form]
   (cond
     (symbol? form) (get *lexical-callable-contracts* form)
     (seq? form) (or (get *function-callable-result-contracts*
                          [(first form) (dec (count form))])
                     (get *function-callable-result-contracts* (first form)))
-    :else nil))
+    :else nil)))
 
-(defn desugar-lexical-call [result-type form]
+#?(:kotoba nil :default (defn desugar-lexical-call [result-type form]
   (let [closure (fe-nth form 0) args (fe-nthnext form 1)]
     (let [_ #?(:kotoba (require-k (not (> (count args) 4)) "direct closure call exceeds ABI arity four" "kotoba.error/subset-reject" form) :default (when (> (count args) 4)
       (reject! "direct closure call exceeds ABI arity four" form)))]
@@ -5295,7 +5506,7 @@
                         (desugar-expr argument)
                         (desugar-expected-value wanted argument)))
                     args parameter-types)
-               (map desugar-expr args)))))))
+               (map desugar-expr args))))))))
 
 #?(:kotoba
    (defn desugar-result-expr [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
@@ -5350,11 +5561,18 @@
   (desugar-result-expr :bool form)))
 
 #?(:kotoba
+   (defn desugar-under-contract [env [:ref :fe/env] contract [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [saved (env-con env :expected)
+           r (desugar-expr (with-con env :expected contract) form)]
+       (dr (with-con (dr-env r) :expected saved) (dr-form r))))
+   :default nil)
+
+#?(:kotoba
    (defn desugar-expected-value [env [:ref :fe/env] result-type [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
      (let [rt (canonical-closure-result-type env result-type)]
        (cond
          (closure-result-type? rt) (desugar-result-expr env rt form)
-         (and (callable-type? rt) (head-is? form "fn")) (throw (fe-unported "function value under a callable contract" form))
+         (and (callable-type? rt) (head-is? form "fn")) (desugar-under-contract env rt form)
          :else (desugar-expr env form))))
    :default
 (defn desugar-expected-value [result-type form]
@@ -5468,12 +5686,12 @@
         :else nil))
     :else nil)))
 
-(def ^:dynamic *absence-mode*
+#?(:kotoba nil :default (def ^:dynamic *absence-mode*
   "Which marker a missing else writes: :none in a function whose result is
   inferred (an unannotated `defn`, a `fn` literal with no declared result),
   :legacy where the author declared the result -- there a missing else beside
   an :i64 is still the 0 it always was (`absence-type`)."
-  :legacy)
+  :legacy))
 
 #?(:kotoba
    (defn absence-marker-form [env [:ref :fe/env]] [:ref :form/r]
@@ -5487,7 +5705,7 @@
   (if (= :none *absence-mode*) '(__kotoba_absent :none) '(__kotoba_absent))))
 
 
-(defn realized-lowering
+#?(:kotoba nil :default (defn realized-lowering
   "Realize every lazy seq inside a lowered form, and answer the form.
 
   Desugaring builds its output with `map` / `map-indexed` under `list*` in
@@ -5502,9 +5720,9 @@
   own. Every body is realized where it was desugared, once, here."
   [form]
   (dorun (tree-seq coll? seq form))
-  form)
+  form))
 
-(defn lift-lambda [form]
+#?(:kotoba nil :default (defn lift-lambda [form]
   (let [expected-result *contextual-closure-result-type*
         expected-contract *expected-callable-contract*
         params-or-clause (fe-nth form 1) tail (fe-nthnext form 2)
@@ -5737,7 +5955,7 @@
       ;; when the lambda's result is a canonical `[:list T]` value.
       (list 'pair id
             (binding [*contextual-closure-result-type* nil]
-              (desugar-list captures form))))))))
+              (desugar-list captures form)))))))))
 
 #?(:kotoba
    (defn lazy-take-helper-name [] [:ref :form/r]
@@ -5760,20 +5978,20 @@
 ;; direct unit-test call to `desugar-expr`) means "don't track," not "reject
 ;; every keyword": tracking is a purely additional ns-level lint, never part
 ;; of resolving the keyword to its id.
-(def ^:dynamic *used-capability-keywords* nil)
+#?(:kotoba nil :default (def ^:dynamic *used-capability-keywords* nil))
 
 ;; Product Value ABI v1 / pure-product: local option types for if-some/when-some.
 ;; Bound during analyze while desugaring a typed defn body so
 ;; `(if-some [x opt-param] …)` can lower to option-match with the real
 ;; `[:option T]` instead of hardcoding `[:option :i64]` (which broke
 ;; `[:option :string]` and other payloads).
-(def ^:dynamic *local-option-types* nil)
+#?(:kotoba nil :default (def ^:dynamic *local-option-types* nil))
 ;; All typed params + namespace `:schemas` so
 ;; `(if-some [v (record-get rec :opt-field)] …)` recovers `[:option T]`
 ;; from the record descriptor (T5.2 option-string-in-record gap).
-(def ^:dynamic *local-types* nil)
+#?(:kotoba nil :default (def ^:dynamic *local-types* nil))
 
-(defn resolve-capability-keyword!
+#?(:kotoba nil :default (defn resolve-capability-keyword!
   "Resolve a `cap-call` NAME argument (a namespaced keyword, e.g.
   `:identity/sign`) against `capability-registry` to its [0,255] int id, at
   desugar time -- strictly before HIR/KIR construction, so every downstream
@@ -5790,16 +6008,16 @@
   (let [id (capability-wire-id kw form)]
     (when *used-capability-keywords*
       (vswap! *used-capability-keywords* conj kw))
-    (effect-capability-id id)))
+    (effect-capability-id id))))
 
-(defn capability-keyword-for-symbol
+#?(:kotoba nil :default (defn capability-keyword-for-symbol
   "Map a namespaced call head `clock/now` to registered keyword `:clock/now`."
   [op]
   (when (and (symbol? op) (namespace op))
     (let [kw (keyword (namespace op) (name op))]
-      (when (contains? capability-registry kw) kw))))
+      (when (contains? capability-registry kw) kw)))))
 
-(defn attach-source-operation
+#?(:kotoba nil :default (defn attach-source-operation
   "Preserve reader span and the authored operation name on elaborated forms."
   [form elaborated source-operation]
   (let [location (select-keys (meta form)
@@ -5811,7 +6029,7 @@
             (meta form) (merge (meta form)))]
     (if (or (coll? elaborated) (symbol? elaborated))
       (with-meta elaborated (merge (meta elaborated) m))
-      elaborated)))
+      elaborated))))
 
 #?(:kotoba nil :default (def str-integer-heads tables/str-integer-heads))
 
@@ -5848,7 +6066,7 @@
     (list string-from-i64-helper-name (desugar-expr part))
     (desugar-result-expr :string part))))
 
-(defn elaborate-named-operation
+#?(:kotoba nil :default (defn elaborate-named-operation
   "W1 safety elaboration validates an ordinary namespaced operation and keeps
   it named until parameter/result types are available. The later contextual
   elaboration pass lowers it to `typed-cap-call`; authors never write numeric
@@ -5861,9 +6079,9 @@
              form)))]
   (let [_ (resolve-capability-keyword! kw form)
         elaborated (list op (desugar-expr (first args)))]
-    (attach-source-operation form elaborated kw))))
+    (attach-source-operation form elaborated kw)))))
 
-(defn desugar-list [args form]
+#?(:kotoba nil :default (defn desugar-list [args form]
   (let [_ #?(:kotoba (require-k (not (> (count args) max-list-items)) "list item count exceeds admission limit" "kotoba.error/subset-reject" form) :default (when (> (count args) max-list-items)
     (reject! "list item count exceeds admission limit" form)))]
   (if (canonical-list-type? *contextual-closure-result-type*)
@@ -5872,7 +6090,7 @@
       (apply list 'typed-list-new type
              (map #(desugar-expected-value item-type %) args)))
     #?(:kotoba (let [fe-lc__234992 (form/kids-of (reverse args)) fe-ln__234992 (vector-count fe-lc__234992)] (loop [fe-li__234992 0 tail 0] (if (>= fe-li__234992 fe-ln__234992) tail (recur (+ fe-li__234992 1) (let [item (typed-list-nth [:list [:ref :form/r]] fe-lc__234992 fe-li__234992)] (list 'pair (desugar-expr item) tail)))))) :default (reduce (fn [tail item] (list 'pair (desugar-expr item) tail))
-            0 (reverse args))))))
+            0 (reverse args)))))))
 
 ;; Synthesized `let` temporaries for `and` / `or` / comparison chains.
 ;;
@@ -6058,16 +6276,16 @@
 
 #?(:kotoba
    (defn desugar-dotimes [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
-     (let [binding (if (> (argc form) 0) (arg form 0) (form/nil-form))
-           _ (require-k (and (form/is-vec? binding) (= 2 (form/count-of binding)) (simple-symbol-form? (form/nth-of binding 0)))
+     (let [bform (if (> (argc form) 0) (arg form 0) (form/nil-form))
+           _ (require-k (and (form/is-vec? bform) (= 2 (form/count-of bform)) (simple-symbol-form? (form/nth-of bform 0)))
                         "dotimes requires [unqualified-symbol count]" "kotoba.error/subset-reject" form)
-           index (form/nth-of binding 0)
+           index (form/nth-of bform 0)
            s (synthetic env "dotimes-limit")
            limit (dr-form s)
            iteration (head-call (form/symbol-form "do")
                                 (form/append-form (args-from form 2) (form/call1 "recur" (form/call2 "+" index (form/int-form 1)))))]
        (desugar-expr-in-loop (dr-env s)
-                     (form/call2 "let" (form/vec2 limit (form/nth-of binding 1))
+                     (form/call2 "let" (form/vec2 limit (form/nth-of bform 1))
                                  (form/call2 "loop" (form/vec2 index (form/int-form 0))
                                              (form/call3 "if" (form/call2 "<" index limit) iteration (form/int-form 0)))))))
    :default
@@ -6277,9 +6495,9 @@
 
 #?(:kotoba
    (defn desugar-doseq [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
-     (let [binding (if (> (argc form) 0) (arg form 0) (form/nil-form))
-           _ (require-k (form/is-vec? binding) "doseq requires a binding vector" "kotoba.error/subset-reject" form)
-           groups (doseq-groups form binding 0 (form/form-vec (form/no-forms)) (form/nil-form))
+     (let [bform (if (> (argc form) 0) (arg form 0) (form/nil-form))
+           _ (require-k (form/is-vec? bform) "doseq requires a binding vector" "kotoba.error/subset-reject" form)
+           groups (doseq-groups form bform 0 (form/form-vec (form/no-forms)) (form/nil-form))
            _ (require-k (and (<= 1 (form/count-of groups)) (<= (form/count-of groups) 4))
                         "doseq supports at most four collection bindings" "kotoba.error/subset-reject" form)
            lowered (doseq-lower-groups env groups (- (form/count-of groups) 1)
@@ -6603,21 +6821,21 @@
 
 #?(:kotoba
    (defn desugar-binding-if [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :fe/dr]
-     (let [binding (arg form 0)
+     (let [bform (arg form 0)
            nb (- (form/count-of form) 2)
-           _ (require-k (and (form/is-vec? binding) (= 2 (form/count-of binding)))
+           _ (require-k (and (form/is-vec? bform) (= 2 (form/count-of bform)))
                         (if when? "when-let requires one binding pair" "if-let requires one binding pair")
                         "kotoba.error/subset-reject" form)
            _ (require-k (if when? (> nb 0) (and (<= 1 nb) (<= nb 2)))
                         (if when? "when-let requires at least one body expression"
                             "if-let requires then and optional else expressions")
                         "kotoba.error/subset-reject" form)
-           pattern (form/nth-of binding 0)
+           pattern (form/nth-of bform 0)
            t (synthetic env "binding-if")
            tmp (dr-form t)
            then-form (binding-if-then form when?)
            else-form (binding-if-else env form when?)
-           v (desugar-bool-expr (dr-env t) (form/nth-of binding 1))]
+           v (desugar-bool-expr (dr-env t) (form/nth-of bform 1))]
        (desugar-expr (dr-env v)
                      (form/call2 "let" (form/vec2 tmp (dr-form v))
                                  (form/call3 "if" tmp
@@ -6652,17 +6870,17 @@
 
 #?(:kotoba
    (defn desugar-binding-some [env [:ref :fe/env] form [:ref :form/r] when? :bool] [:ref :fe/dr]
-     (let [binding (arg form 0)
+     (let [bform (arg form 0)
            nb (- (form/count-of form) 2)
-           _ (require-k (and (form/is-vec? binding) (= 2 (form/count-of binding)))
+           _ (require-k (and (form/is-vec? bform) (= 2 (form/count-of bform)))
                         (if when? "when-some requires one binding pair" "if-some requires one binding pair")
                         "kotoba.error/subset-reject" form)
            _ (require-k (if when? (> nb 0) (and (<= 1 nb) (<= nb 2)))
                         (if when? "when-some requires at least one body expression"
                             "if-some requires then and optional else expressions")
                         "kotoba.error/subset-reject" form)
-           pattern (form/nth-of binding 0)
-           value (form/nth-of binding 1)
+           pattern (form/nth-of bform 0)
+           value (form/nth-of bform 1)
            t (synthetic env "binding-some")
            tmp (dr-form t)
            found (resolve-option-type (dr-env t) value)
@@ -6816,17 +7034,17 @@
             (list 'let [tmp (desugar-expr (first args))]
                   (desugar-do (rest args)))))))
 
-(defn f64-literal-key?
+#?(:kotoba nil :default (defn f64-literal-key?
   "A floating literal in either of its two read forms: a host double on `:clj`,
   and the JVM-free reader's exact-bits `(f64-from-bits <i64>)` on `:cljs`."
   [form]
   (or (value/f64-value? form)
       (and (seq? form)
-           (true? (:kotoba.reader/f64-literal (meta form))))))
+           (true? (:kotoba.reader/f64-literal (meta form)))))))
 
 #?(:kotoba nil :default (def map-literal-value-constructors tables/map-literal-value-constructors))
 
-(defn map-literal-value-type
+#?(:kotoba nil :default (defn map-literal-value-type
   "The value type a literal's VALUE expression determines ON ITS OWN, or `nil`
   when it is an arbitrary expression whose type only inference can know.
 
@@ -6853,17 +7071,17 @@
           (when (and declared (vector? descriptor) (seq descriptor)
                      (= declared (first descriptor)))
             descriptor))))
-    :else nil))
+    :else nil)))
 
-(defn map-literal-type-description
+#?(:kotoba nil :default (defn map-literal-type-description
   "A value type said the way the SOURCE says it, for a refusal message --
   `:string`, not `string`. The refusal names `typed-map-new` as the way to
   write the map the program wanted, and a reader has to be able to paste the
   type into it; `(name :string)` would print a descriptor that does not read."
   [type]
-  (pr-str type))
+  (pr-str type)))
 
-(defn map-literal-key-description-for-message
+#?(:kotoba nil :default (defn map-literal-key-description-for-message
   "Which ENTRY a refusal is about. A Clojure map literal has no positions, so
   the entry is named by its key -- which is what the reader wrote, and what
   the canonical order is keyed on.
@@ -6876,15 +7094,15 @@
   things on the two runtimes this file claims. A string key keeps `pr-str`,
   which is what puts the quotes on."
   [key]
-  (if (kotoba-integer? key) (str key) (pr-str key)))
+  (if (kotoba-integer? key) (str key) (pr-str key))))
 
-(defn map-literal-key-kind [key]
+#?(:kotoba nil :default (defn map-literal-key-kind [key]
   (cond (keyword? key) :keyword
         (kotoba-integer? key) :i64
         (string? key) :string
-        :else nil))
+        :else nil)))
 
-(defn map-literal-key-description
+#?(:kotoba nil :default (defn map-literal-key-description
   "What a refused key IS, said in source terms. `(pr-str key)` alone would
   print `1.5` for a JVM double and `(f64-from-bits …)` for the same literal
   read JVM-free, so the KIND is named rather than the value shown."
@@ -6897,9 +7115,9 @@
         (map? key) "map"
         (set? key) "set"
         (nil? key) "nil"
-        :else "unrecognized"))
+        :else "unrecognized")))
 
-(defn map-literal-item-type
+#?(:kotoba nil :default (defn map-literal-item-type
   "The VALUE type of a bounded map literal, read off its own value expressions.
 
   A literal carries no annotation, so this is the only place the value half
@@ -6965,9 +7183,9 @@
                       " is " (map-literal-type-description other-type))
                  entries :kotoba.error/map-literal-value))
         first-type)
-      :i64)))
+      :i64))))
 
-(defn map-literal-record-field-type
+#?(:kotoba nil :default (defn map-literal-record-field-type
   "The field type ONE value of a keyword-keyed literal determines on its own,
   or `nil` for an expression whose type only inference can know.
 
@@ -6979,9 +7197,9 @@
   (cond
     (map? form) (map-literal-lowered-type form)
     (vector? form) (closed-vector-literal-type form)
-    :else (map-literal-value-type form)))
+    :else (map-literal-value-type form))))
 
-(defn keyword-map-literal-record-fields
+#?(:kotoba nil :default (defn keyword-map-literal-record-fields
   "The fields of the closed record a keyword-keyed literal lowers to, or
   `nil` when the literal stays the legacy untagged pair map.
 
@@ -7025,9 +7243,9 @@
                       "to a closed record and exceeds the record field limit: "
                       (count entries) " entries, at most " max-record-fields)
                  form :kotoba.error/map-literal-value)))]
-      #?(:kotoba (let [fe-lc__299697 (form/kids-of typed) fe-ln__299697 (vector-count fe-lc__299697)] (form/form-vec (loop [fe-li__299697 0 fe-la__299697 (form/no-forms)] (if (>= fe-li__299697 fe-ln__299697) fe-la__299697 (recur (+ fe-li__299697 1) (form/append-form fe-la__299697 (let [dd__294720_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__299697 fe-li__299697)] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])))))))) :default (mapv (fn [dd__294720_1] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])) typed))))))
+      #?(:kotoba (let [fe-lc__299697 (form/kids-of typed) fe-ln__299697 (vector-count fe-lc__299697)] (form/form-vec (loop [fe-li__299697 0 fe-la__299697 (form/no-forms)] (if (>= fe-li__299697 fe-ln__299697) fe-la__299697 (recur (+ fe-li__299697 1) (form/append-form fe-la__299697 (let [dd__294720_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__299697 fe-li__299697)] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])))))))) :default (mapv (fn [dd__294720_1] (let [k (fe-nth dd__294720_1 0) t (fe-nth dd__294720_1 1)] [k (or t :i64)])) typed)))))))
 
-(defn map-literal-lowered-type
+#?(:kotoba nil :default (defn map-literal-lowered-type
   "The type a map literal will lower to, read off its source alone -- what a
   NESTED literal contributes as a record field type. `nil` when the key set
   is not one admitted kind; the nested literal's own `desugar-map` then
@@ -7041,9 +7259,9 @@
           (if-let [fields (keyword-map-literal-record-fields form entries)]
             (map-literal-record-type fields)
             :map)
-          [:map kind (map-literal-item-type kind entries)])))))
+          [:map kind (map-literal-item-type kind entries)]))))))
 
-(defn desugar-map-against-record
+#?(:kotoba nil :default (defn desugar-map-against-record
   "ADR 0353 floor :absence (narrows ADR 0028's \"no truthiness\" to presence).
   A keyword-keyed literal whose context already names a record lowers to THAT
   record, in its field order, instead of an anonymous one read off the
@@ -7092,9 +7310,9 @@
                                       "; only an [:option T] field is absent")
                                  form :kotoba.error/map-literal-value))
                       (desugar-expected-value field-type value)))))
-                fields)))))
+                fields))))))
 
-(defn desugar-map
+#?(:kotoba nil :default (defn desugar-map
   "Lower a bounded literal into an owned map KIR operation.
 
   KEYWORD keys keep the legacy untagged pair-map (`map-new`) they have always
@@ -7202,12 +7420,12 @@
                             " keys exceeds the typed map entry limit")
                        form :kotoba.error/map-literal-key)))]
             (apply list 'typed-map-new [:map kind item-type]
-                   (mapcat (fn [dd__303450_1] (let [k (fe-nth dd__303450_1 0) v (fe-nth dd__303450_1 1)] [k (desugar-expr v)])) entries)))))))))))
+                   (mapcat (fn [dd__303450_1] (let [k (fe-nth dd__303450_1 0) v (fe-nth dd__303450_1 1)] [k (desugar-expr v)])) entries))))))))))))
 
-(defn document-literal-key-frame [text]
-  (str (count text) ":" text))
+#?(:kotoba nil :default (defn document-literal-key-frame [text]
+  (str (count text) ":" text)))
 
-(defn document-literal-sort-key
+#?(:kotoba nil :default (defn document-literal-sort-key
   "Stable, host-independent ordering used only to make elaborated KIR
   reproducible. Runtime document constructors still own canonical EDN order."
   [form]
@@ -7252,16 +7470,16 @@
                                    (document-literal-sort-key %))
                                  form))
                      ")")
-    :else (str "99:" (pr-str form))))
+    :else (str "99:" (pr-str form)))))
 
-(defn attach-literal-location [literal elaborated]
+#?(:kotoba nil :default (defn attach-literal-location [literal elaborated]
   (let [location (select-keys (meta literal)
                               [:line :column :end-line :end-column :offset :end-offset])]
     (if (and (seq location) (coll? elaborated))
       (with-meta elaborated (merge (meta elaborated) location))
-      elaborated)))
+      elaborated))))
 
-(defn elaborate-document-literal
+#?(:kotoba nil :default (defn elaborate-document-literal
   "Elaborate one closed EDN-shaped tree into the existing document
   constructors. Nothing below `(document ...)` is evaluated as Kotoba code."
   [literal]
@@ -7310,9 +7528,9 @@
                        (reject! "document list literal exceeds item limit" form)))]
                      (list* 'document-list (map #(walk % (inc depth)) form))))
                  :else (reject! "document requires a closed EDN literal tree" form))))]
-      (walk literal 0))))
+      (walk literal 0)))))
 
-(defn contextual-document-literal?
+#?(:kotoba nil :default (defn contextual-document-literal?
   "True only for syntax that is unambiguously a closed document value.
 
   Simple symbols and lists remain expressions: a document-typed parameter must
@@ -7337,7 +7555,7 @@
                             (and (contextual-document-literal? key)
                                (contextual-document-literal? item))))
                         form)
-    :else false))
+    :else false)))
 
 #?(:kotoba
    (defn string-from-i64-helper-name [] [:ref :form/r]
@@ -7408,7 +7626,7 @@
           (and (= 'reduce op) (= 3 (count args)) (guess-document-form? (second args)))))
     :else false)))
 
-(defn document-callback-call
+#?(:kotoba nil :default (defn document-callback-call
   "The source form applying callback F-FORM to the symbol X: an inline `fn`
   binds its parameter (or destructures it) to X, a keyword looks itself up, and
   anything else is called."
@@ -7423,9 +7641,9 @@
 
     (keyword? f-form) (list 'get x f-form '(document-null))
 
-    :else (list f-form x)))
+    :else (list f-form x))))
 
-(defn document-hof->reduce
+#?(:kotoba nil :default (defn document-hof->reduce
   "`(map f doc)` / `(filter p doc)` / `(remove p doc)` (and the -v spellings) as
   the `reduce` over a document that builds a document vector. The result is a
   `:document`, so a chain of them and `keys`/`vals`/`rest` stays in documents."
@@ -7437,7 +7655,7 @@
                (map mapv) (list 'document-vector-conj acc (list '__kotoba_document_of call))
                (filter filterv) (list 'if call (list 'document-vector-conj acc x) acc)
                remove (list 'if call acc (list 'document-vector-conj acc x)))]
-    (list 'reduce (list 'fn [acc x] step) '(document-vector) coll-form)))
+    (list 'reduce (list 'fn [acc x] step) '(document-vector) coll-form))))
 
 #?(:kotoba nil :default (def document-head-set tables/document-head-set))
 
@@ -7450,7 +7668,7 @@
   [op args]
   (if (contains? '#{some every? keep} op) (second args) (first args))))
 
-(defn document-head->form
+#?(:kotoba nil :default (defn document-head->form
   "OP applied to a document, as source built from primitives the frontend already
   has: nested `get`/`assoc` for paths, `document-merge`, and `reduce` for the
   collection folds. Paths must be literal vectors of keys; a callback is an
@@ -7542,15 +7760,15 @@
                                      (list doc-nth-helper-name x 0)
                                      (list doc-nth-helper-name x 1))
                                (list 'document-vector-conj acc x)))
-                   to coll)))))
+                   to coll))))))
 
-(def max-match-arms 32)
-(def max-match-pattern-keys 8)
+#?(:kotoba nil :default (def max-match-arms 32))
+#?(:kotoba nil :default (def max-match-pattern-keys 8))
 
-(defn match-literal-pattern? [value]
-  (or (kotoba-integer? value) (keyword? value) (boolean? value) (string? value)))
+#?(:kotoba nil :default (defn match-literal-pattern? [value]
+  (or (kotoba-integer? value) (keyword? value) (boolean? value) (string? value))))
 
-(defn match-pattern-plan
+#?(:kotoba nil :default (defn match-pattern-plan
   "Compile ONE pattern against SUBJECT (a symbol already bound to the value
   being tested) into `{:temps [[sym expr] ...] :tests [...] :binds [[sym expr] ...]}`.
 
@@ -7648,9 +7866,9 @@
                   "pattern") "kotoba.error/subset-reject" form)) :default (reject! (str "match admits `_`, an unqualified symbol, a bounded integer, "
                   "keyword, boolean or string literal, and a keyword-keyed map "
                   "pattern")
-             form))))
+             form)))))
 
-(defn match-conjunction
+#?(:kotoba nil :default (defn match-conjunction
   "Nested `if` rather than `and` so the emitted KIR carries no chain temps and
   stays gensym-stable for the drift gate.
 
@@ -7662,9 +7880,9 @@
   (cond
     (empty? tests) true
     (empty? (rest tests)) (first tests)
-    :else (list 'if (first tests) (match-conjunction (rest tests)) false)))
+    :else (list 'if (first tests) (match-conjunction (rest tests)) false))))
 
-(defn match-arm
+#?(:kotoba nil :default (defn match-arm
   "One arm, with FALLBACK (the whole rest of the match) appearing exactly once."
   [{:keys [temps tests binds]} result fallback]
   (let [matched (if (seq binds)
@@ -7675,9 +7893,9 @@
                  (list 'if (match-conjunction tests) matched fallback))]
     (if (seq temps)
       (list 'let (vec (apply concat temps)) chosen)
-      chosen)))
+      chosen))))
 
-(defn desugar-match
+#?(:kotoba nil :default (defn desugar-match
   "`(match scrutinee pattern result ... :else default?)` -> a single binding of
   the scrutinee followed by left-to-right nested `let`/`if` tests.
 
@@ -7731,9 +7949,9 @@
                               result (fe-nth dd__326627_2 1)]
                           (match-arm plan (desugar-expr result) fallback)))
                       (desugar-expr default)
-                      (reverse (map vector plans arms)))))))))))))))
+                      (reverse (map vector plans arms))))))))))))))))
 
-(defn destructure-binding
+#?(:kotoba nil :default (defn destructure-binding
   "Expands ONE `[pattern value-expr]` `let`/`defn`-param binding into a flat
   seq of `[symbol expr]` pairs (ADR-2607150000/ADR 0207). PATTERN is a plain
   symbol, a positional vector `[a [b c] & rest]`, or a map using `:keys`,
@@ -7856,9 +8074,9 @@
                          (when as-name [[as-name tmp]]))))))
 
               :else (reject! "unsupported destructuring pattern" candidate)))]
-    (expand pattern value-expr)))
+    (expand pattern value-expr))))
 
-(defn form-free-symbols
+#?(:kotoba nil :default (defn form-free-symbols
   "Symbols FORM references as VALUES (never call-heads) that aren't in
   BOUND -- a purely syntactic free-variable scan for `loop`'s closure
   conversion (see desugar-expr's `loop` case). Operates on an ALREADY
@@ -7887,9 +8105,9 @@
                      (form-free-symbols handler (conj bound binder))))
         (apply set/union #{} (map #(form-free-symbols % bound) args))))
     (coll? form) (apply set/union #{} (map #(form-free-symbols % bound) form))
-    :else #{}))
+    :else #{})))
 
-(defn replace-recur
+#?(:kotoba nil :default (defn replace-recur
   "Walks the already-desugared loop BODY, replacing every `(recur a b ...)`
   with a call to HELPER-NAME carrying the new loop-binding values (A/B/...)
   followed by CAPTURED's outer-variable values UNCHANGED (they never vary
@@ -7906,7 +8124,7 @@
               (reject! "recur argument count must match loop bindings" form)))]
             (list* helper-name (concat args captured))))
         (cons op (map #(replace-recur % helper-name loop-names captured) args))))
-    :else form))
+    :else form)))
 
 #?(:kotoba
    (defn top-level-function-symbol? [env [:ref :fe/env] v [:ref :form/r]] :bool
@@ -7920,7 +8138,7 @@
        (not (contains? *lexical-bindings* value))
        (contains? *function-arities* value))))
 
-(defn callback-supported-arities [callback]
+#?(:kotoba nil :default (defn callback-supported-arities [callback]
   (cond
     (top-level-function-symbol? callback)
     (get *function-arities* callback)
@@ -7944,18 +8162,18 @@
                           #{(count params)})))
                     clauses)))))
 
-    :else nil))
+    :else nil)))
 
-(defn callback-closure [kind callback arity]
+#?(:kotoba nil :default (defn callback-closure [kind callback arity]
   (when-let [arities (callback-supported-arities callback)]
     (when-not (contains? arities arity)
       (reject! (str (name kind) " callback does not provide arity " arity)
                callback)))
   (if (top-level-function-symbol? callback)
     (desugar-expr (list 'fn-ref callback))
-    (desugar-expr callback)))
+    (desugar-expr callback))))
 
-(defn synthesize-lazy-map [callback colls form]
+#?(:kotoba nil :default (defn synthesize-lazy-map [callback colls form]
   (let [arity (count colls)
         helper-name (synthetic "lazy_map")
         callback-param (symbol (str helper-name "_callback"))
@@ -7982,9 +8200,9 @@
       (reject! "lazy-map callback plus sources exceed ABI-supported arity" form)))]
     (when *pending-loop-helpers*
       (swap! *pending-loop-helpers* conj helper))
-    (apply list helper-name callback-value (map desugar-expr colls)))))
+    (apply list helper-name callback-value (map desugar-expr colls))))))
 
-(defn synthesize-lazy-filter [callback coll]
+#?(:kotoba nil :default (defn synthesize-lazy-filter [callback coll]
   (let [helper-name (synthetic "lazy_filter")
         callback-param (symbol (str helper-name "_callback"))
         coll-param (symbol (str helper-name "_coll"))
@@ -8028,9 +8246,9 @@
                 :result :i64 :effects #{} :body resolver}]
     (when *pending-loop-helpers*
       (swap! *pending-loop-helpers* conj helper))
-    (list helper-name callback-value (desugar-expr coll))))
+    (list helper-name callback-value (desugar-expr coll)))))
 
-(defn desugar-dataspace-form
+#?(:kotoba nil :default (defn desugar-dataspace-form
   "Lower one source coordination form to the existing typed capability
   kernel. Assertion/pattern values are inert documents; facet 0 is the
   provider-owned root facet. The named capability resolver both seals wire id
@@ -8075,10 +8293,197 @@
                       (resolve-capability-keyword! :dataspace/transact form)
                       dataspace-request-type dataspace-result-type
                       (desugar-expected-value dataspace-request-type request))]
-    (attach-source-operation form lowered :dataspace/transact)))
+    (attach-source-operation form lowered :dataspace/transact))))
 
-(defn symbol-literal-form [sym]
-  (list 'symbol (str sym)))
+#?(:kotoba nil :default (defn symbol-literal-form [sym]
+  (list 'symbol (str sym))))
+
+;; ---- quoted symbol data: validate.cljk `quoted-symbol-datum-kind`, `quoted-text-abbrev`, `reject-quoted-symbol-datum!` ----
+;; every key of a Form map (the even positions) from I is a symbol
+#?(:kotoba
+   (defn quoted-key-symbols? [m [:ref :form/r] i :i64] :bool
+     (if (>= (+ i 1) (form/count-of m))
+       true
+       (and (form/is-symbol? (form/nth-of m i)) (quoted-key-symbols? m (+ i 2)))))
+   :default nil)
+
+;; the value type of a scalar inside a quoted symbol-key map, or nil-form
+#?(:kotoba
+   (defn quoted-scalar-kind [v [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-int? v) (form/keyword-form :i64)
+       (form/is-string? v) (form/keyword-form :string)
+       (form/is-keyword? v) (form/keyword-form :keyword)
+       (form/is-bool? v) (form/keyword-form :bool)
+       :else (form/nil-form)))
+   :default nil)
+
+;; every value of the map from position I (odd) has the scalar type T
+#?(:kotoba
+   (defn quoted-values-type? [m [:ref :form/r] i :i64 t [:ref :form/r]] :bool
+     (if (>= i (form/count-of m))
+       true
+       (and (form/eq (quoted-scalar-kind (form/nth-of m i)) t) (quoted-values-type? m (+ i 2) t))))
+   :default nil)
+
+;; the one value type of a symbol-key map's values, or nil-form (none or mixed)
+#?(:kotoba
+   (defn quoted-map-value-type [m [:ref :form/r]] [:ref :form/r]
+     (let [t (quoted-scalar-kind (form/nth-of m 1))]
+       (if (and (not (form/is-nil? t)) (quoted-values-type? m 1 t)) t (form/nil-form))))
+   :default nil)
+
+;; the kind of admitted symbol data (host `quoted-symbol-datum-kind`): :symbol :symbol-set :symbol-key-map :symbol-vector, or :none
+#?(:kotoba
+   (defn quoted-kind [datum [:ref :form/r]] :keyword
+     (cond
+       (form/is-symbol? datum) :symbol
+       (and (form/is-set? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) 32) (all-symbols? datum 0)) :symbol-set
+       (and (form/is-map? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) 62) (quoted-key-symbols? datum 0))
+       (if (form/is-nil? (quoted-map-value-type datum)) :none :symbol-key-map)
+       (and (form/is-vec? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) 128) (all-symbols? datum 0)) :symbol-vector
+       :else :none))
+   :default nil)
+
+;; the [key value] pairs of the Form map M ordered by the printed key (stable), as a Form vector of 2-vectors
+#?(:kotoba
+   (defn quoted-entry-position [sorted [:list [:ref :form/r]] key :string i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (string-compare (pr-form (form/nth-of (typed-list-nth [:list [:ref :form/r]] sorted i) 0)) key) 0)
+         i
+         (quoted-entry-position sorted key (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-sorted-entries [m [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :form/r]
+     (if (>= (+ i 1) (form/count-of m))
+       (form/form-vec acc)
+       (let [p (quoted-entry-position acc (pr-form (form/nth-of m i)) 0)]
+         (quoted-sorted-entries m (+ i 2)
+                                (slice-forms acc p (vector-count acc)
+                                             (form/append-form (slice-forms acc 0 p (form/no-forms))
+                                                               (form/vec2 (form/nth-of m i) (form/nth-of m (+ i 1)))))))))
+   :default nil)
+
+;; `pr-str` of a quoted datum as validate.cljk's `quoted-text-abbrev` prints it: sets and maps ordered by the printed member / key
+#?(:kotoba
+   (defn quoted-text [f [:ref :form/r]] :string
+     (cond
+       (form/is-seq? f) (string-concat "(" (string-concat (quoted-text-kids f 0 "") ")"))
+       (form/is-vec? f) (string-concat "[" (string-concat (quoted-text-kids f 0 "") "]"))
+       (form/is-set? f) (string-concat "#{" (string-concat (quoted-text-kids (form/form-seq (set-sorted-members f 0 (form/no-forms))) 0 "") "}"))
+       (form/is-map? f) (string-concat "{" (string-concat (quoted-text-entries (quoted-sorted-entries f 0 (form/no-forms)) 0 "") "}"))
+       :else (pr-form f)))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-text-kids [f [:ref :form/r] i :i64 acc :string] :string
+     (if (>= i (form/count-of f))
+       acc
+       (quoted-text-kids f (+ i 1) (string-concat (if (> i 0) (string-concat acc " ") acc) (quoted-text (form/nth-of f i))))))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-text-entries [entries [:ref :form/r] i :i64 acc :string] :string
+     (if (>= i (form/count-of entries))
+       acc
+       (let [e (form/nth-of entries i)]
+         (quoted-text-entries entries (+ i 1)
+                              (string-concat (if (> i 0) (string-concat acc ", ") acc)
+                                             (string-concat (quoted-text (form/nth-of e 0)) (string-concat " " (quoted-text (form/nth-of e 1)))))))))
+   :default nil)
+
+;; the abbreviated text of the datum (80 characters at most, as the host)
+#?(:kotoba
+   (defn quoted-text-abbrev [datum [:ref :form/r]] :string
+     (let [t (quoted-text datum)]
+       (if (> (string-length t) 80) (string-concat (string-substring t 0 77) "...") t)))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-refusal-message [form [:ref :form/r]] :string
+     (let [datum (form/nth-of form 1)
+           spelled (quoted-text-abbrev form)]
+       (cond
+         (form/is-set? datum)
+         (string-concat "quoted set mixes symbols with other kinds: "
+           (string-concat spelled " -- a symbol set ([:set :symbol]) holds symbols only; spell every entry as a symbol, or every entry as a keyword"))
+         (form/is-vec? datum)
+         (string-concat "quoted vector mixes symbols with other kinds: "
+           (string-concat spelled " -- a symbol vector ([:vector [:symbol ...]]) holds symbols only; spell every item as a symbol"))
+         (and (form/is-map? datum) (not (quoted-key-symbols? datum 0)))
+         (string-concat "quoted map mixes symbol keys with other key kinds: "
+           (string-concat spelled " -- a symbol-key map ([:map :symbol V]) holds symbol keys only; spell every key as a symbol, or every key as a keyword"))
+         (form/is-map? datum)
+         (string-concat "quoted symbol-key map values are not one scalar kind: "
+           (string-concat spelled " -- a symbol-key map is [:map :symbol V] for one V of integer / string / keyword / boolean; a symbol or a collection is not a value it holds"))
+         (form/is-seq? datum)
+         (string-concat "quoted list has no literal spelling: "
+           (string-concat spelled " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector; a list is a heap value built with list"))
+         :else
+         (string-concat "quoted data is outside the admitted symbol kinds: "
+           (string-concat spelled " -- quote admits a symbol, a symbol set, a symbol-key map or a symbol vector")))))
+   :default nil)
+
+;; a float anywhere in the datum (its `pr-str` is the host printer's, which a Form cannot reproduce)
+#?(:kotoba
+   (defn quoted-has-f64? [f [:ref :form/r] i :i64] :bool
+     (if (form/is-f64? f)
+       true
+       (if (>= i (form/count-of f))
+         false
+         (or (quoted-has-f64? (form/nth-of f i) 0) (quoted-has-f64? f (+ i 1))))))
+   :default nil)
+
+;; the by-name refusal of a `(quote datum)` that is not one of the four admitted kinds (host `reject-quoted-symbol-datum!`)
+#?(:kotoba
+   (defn quoted-refusal [form [:ref :form/r]] [:ref :fe/err]
+     (if (quoted-has-f64? (form/nth-of form 1) 0)
+       (fe-unported "quoted datum holding a float" form)
+       (fe-reject (quoted-refusal-message form) "kotoba.error/subset-reject" form)))
+   :default nil)
+
+;; `(symbol "name")` for a symbol datum
+#?(:kotoba
+   (defn symbol-literal [s [:ref :form/r]] [:ref :form/r]
+     (form/call1 "symbol" (form/string-form (form/symbol-value s))))
+   :default nil)
+
+#?(:kotoba
+   (defn symbol-literal-members [members [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count members))
+       acc
+       (symbol-literal-members members (+ i 1) (form/append-form acc (symbol-literal (typed-list-nth [:list [:ref :form/r]] members i))))))
+   :default nil)
+
+;; the typed-map entries `symbol value ...` of the sorted entries, each value desugared under the value type, the counter threaded
+#?(:kotoba
+   (defn quoted-map-entries [env [:ref :fe/env] entries [:ref :form/r] i :i64 vt [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of entries))
+       (drs env acc)
+       (let [e (form/nth-of entries i)
+             v (desugar-expected-value env vt (form/nth-of e 1))]
+         (quoted-map-entries (dr-env v) entries (+ i 1) vt
+                             (form/append-form (form/append-form acc (symbol-literal (form/nth-of e 0))) (dr-form v))))))
+   :default nil)
+
+;; a quoted symbol set / symbol-key map as its typed constructor
+#?(:kotoba
+   (defn quoted-symbol-set [env [:ref :fe/env] datum [:ref :form/r]] [:ref :fe/dr]
+     (dr env (head-call (form/symbol-form "typed-set-new")
+                        (form/cons-onto (form/vec2 (form/keyword-form :set) (form/keyword-form :symbol))
+                                        (symbol-literal-members (set-sorted-members datum 0 (form/no-forms)) 0 (form/no-forms))))))
+   :default nil)
+
+#?(:kotoba
+   (defn quoted-symbol-key-map [env [:ref :fe/env] datum [:ref :form/r]] [:ref :fe/dr]
+     (let [vt (quoted-map-value-type datum)
+           es (quoted-map-entries env (quoted-sorted-entries datum 0 (form/no-forms)) 0 vt (form/no-forms))]
+       (dr (drs-env es)
+           (head-call (form/symbol-form "typed-map-new")
+                      (form/cons-onto (form/vec3 (form/keyword-form :map) (form/keyword-form :symbol) vt) (drs-forms es))))))
+   :default nil)
 
 #?(:kotoba
    (defn desugar-quoted-datum [env [:ref :fe/env] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
@@ -8086,14 +8491,16 @@
        (cond
          (not (holds-symbol? datum))
          (if (form/is-seq? datum)
-           (throw (fe-unported "quoted list refusal" form))
+           (throw (quoted-refusal form))
            (desugar-expr* (with-result env (form/nil-form)) datum ctx))
-         (form/is-symbol? datum) (dr env (form/call1 "symbol" (form/string-form (form/symbol-value datum))))
-         (and (form/is-vec? datum) (> (form/count-of datum) 0) (<= (form/count-of datum) 128) (all-symbols? datum 0))
+         (form/is-symbol? datum) (dr env (symbol-literal datum))
+         (= (quoted-kind datum) :symbol-vector)
          (dr env (head-call (form/symbol-form "hetero-vector-new")
                             (form/cons-onto (form/vec2 (form/keyword-form :vector) (form/form-vec (symbol-type-list (form/count-of datum) (form/no-forms))))
                                             (symbol-literal-forms datum 0 (form/no-forms)))))
-         :else (throw (fe-unported "quoted symbol set, map or refusal" form)))))
+         (= (quoted-kind datum) :symbol-set) (quoted-symbol-set env datum)
+         (= (quoted-kind datum) :symbol-key-map) (quoted-symbol-key-map env datum)
+         :else (throw (quoted-refusal form)))))
    :default
 (defn desugar-quoted-datum
   "`(quote datum)` as an expression. Symbol data lowers to the same forms
@@ -10075,10 +10482,24 @@
                        form)))
             (desugar-ordinary-call op args)))))))))
 
-;; `(op args...)` of a module function: the arguments desugared in order (no callable contracts on this route yet)
+;; the arguments of a call of a module function, in order; each `fn` (or `fn-ref`) written in a contract-typed parameter position is lifted under
+;; that contract (`*function-callable-param-contracts*`: only a contract naming a non-i64 parameter type reaches the argument)
+#?(:kotoba
+   (defn desugar-call-args [env [:ref :fe/env] contracts [:ref :form/r] form [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of form))
+       (drs env acc)
+       (let [contract (form/form-get contracts (form/int-form (- i 1)))
+             a (if (and (not (form/is-nil? contract)) (contract-typed-params? (callable-clauses contract) 0))
+                 (desugar-under-contract env contract (form/nth-of form i))
+                 (desugar-expr env (form/nth-of form i)))]
+         (desugar-call-args (dr-env a) contracts form (+ i 1) (form/append-form acc (dr-form a))))))
+   :default nil)
+
+;; `(op args...)` of a module function: the arguments desugared in order, under the parameter contracts of the module function
 #?(:kotoba
    (defn desugar-ordinary-call [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
-     (let [r (desugar-each env form 1 (form/no-forms))]
+     (let [contracts (form/form-get (env-con env :params) (form/vec2 op (form/int-form (argc form))))
+           r (desugar-call-args env contracts form 1 (form/no-forms))]
        (dr (drs-env r) (head-call op (drs-forms r)))))
    :default
 (defn desugar-ordinary-call
@@ -10113,7 +10534,7 @@
 
 #?(:kotoba nil :default (def i64-answer-predicates tables/i64-answer-predicates))
 
-(defn bool-predicate-answer
+#?(:kotoba nil :default (defn bool-predicate-answer
   "Wraps a desugared 0/1 predicate operation as `(= op 1)`, exactly once.
   The head symbol is marked (`::i64-answer`): symbol meta is what survives the
   later passes, and a form whose source head already carries the mark is a
@@ -10126,7 +10547,7 @@
                (::i64-answer (meta (first form))))
         marked
         (list '= marked 1)))
-    result))
+    result)))
 
 #?(:kotoba
    (defn desugar-expr [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
