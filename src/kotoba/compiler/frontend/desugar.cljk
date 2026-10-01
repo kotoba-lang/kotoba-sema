@@ -19,7 +19,7 @@
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
-                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string] [:data [:ref :form/r]]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
                                  :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
@@ -149,7 +149,7 @@
 ;; a refusal with a stable code (the host `reject!`'s :kotoba.error/code, spelled as its text)
 #?(:kotoba
    (defn fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
-     (record-new [:ref :fe/err] msg code form "subset"))
+     (record-new [:ref :fe/err] msg code form "subset" (form/nil-form)))
    :default nil)
 
 ;; `(when-not ok (reject! msg form code))` as an aborting function: bind it in a `let`
@@ -161,7 +161,7 @@
 ;; the Kotoba route has not ported this shape yet: the differential counts these, it does not compare them
 #?(:kotoba
    (defn fe-unported [what :string form [:ref :form/r]] [:ref :fe/err]
-     (record-new [:ref :fe/err] (string-concat "unported desugar form: " what) "kotoba.fe/unported" form "desugar"))
+     (record-new [:ref :fe/err] (string-concat "unported desugar form: " what) "kotoba.fe/unported" form "desugar" (form/nil-form)))
    :default nil)
 
 ;; `(simple-symbol? f)`: a symbol with no namespace (the lone `/` is one)

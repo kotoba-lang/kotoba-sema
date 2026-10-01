@@ -5,33 +5,43 @@
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
-            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts #?@(:kotoba [] :default [first-truthy *synthetic-counter*])]]
+            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts #?@(:kotoba [fe-reject fe-reject-data form-text pr-form ascii-digit-code? simple-symbol-form? fput fget ftruthy? fsource-head fl-has? fl-nth fl-slice] :default [first-truthy *synthetic-counter*])]]
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [] :default [kernel-memory-operations])]]
             [kotoba.compiler.frontend.closure-types :refer [callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [] :default [*schemas*])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
-            [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids])]])
+            [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids unbound-symbol-error unknown-operation-error])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
-                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string] [:data [:ref :form/r]]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
                                  :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
-                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]})))
+                                 :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]
+                                 ;; the inference context: the host's dynamic vars of infer.cljk, threaded by value
+                                 :ie/ctx [:record :ie/ctx [[:schemas [:ref :form/r]] [:row-schemas [:ref :form/r]] [:handlers [:ref :form/r]] [:final :bool] [:tail :bool] [:names [:ref :form/r]] [:recording :bool] [:recorded [:ref :form/r]] [:collect :bool] [:throws [:list [:ref :form/r]]] [:known [:ref :form/r]] [:tbl [:ref :form/r]]]]
+                                 :ie/r [:record :ie/r [[:type [:ref :form/r]] [:ctx [:ref :ie/ctx]]]]})))
 
 ;; forward references inside this module (the cut keeps the original form order)
-(declare same-expression-type? infer-expression-type use-site-text infer-call-type-impl infer-expression-type-impl)
+#?(:kotoba
+(defn same-expression-type? [actual [:ref :form/r] expected [:ref :form/r]] :bool
+  (or (form/eq actual expected)
+      (and (or (schema-ref-type? actual) (schema-ref-type? expected))
+           (form/eq (nominal-type-identity actual) (nominal-type-identity expected))
+           (not (form/is-nil? (nominal-type-identity actual))))))
+   :default
+(declare same-expression-type? infer-expression-type use-site-text infer-call-type-impl infer-expression-type-impl))
 
 
 #?(:kotoba nil :default (def named-operation-default-results tables/named-operation-default-results))
 #?(:kotoba nil :default (def float-arithmetic-resolution tables/float-arithmetic-resolution))
 #?(:kotoba nil :default (def explicit-numeric-conversions tables/explicit-numeric-conversions))
 
-(def ^:dynamic *state-handlers*
+#?(:kotoba nil :default (def ^:dynamic *state-handlers*
   "The module's state handlers, `{handler-keyword {:name :state-type
   :clauses}}`, in a volatile bound per analysis. Read by inference to type the
-  resolved state heads.")
+  resolved state heads."))
 
 ;; A synthesized loop-helper carries no param-type annotations (its captured
 ;; outer variables have types only knowable at its call site). During the
@@ -40,8 +50,8 @@
 ;; call, RECORDS the argument types instead of type-checking the arguments
 ;; against the (placeholder) declared param-types. Both nil in the normal
 ;; check-value-types! pass, so ordinary type-checking is unchanged.
-(def ^:dynamic *loop-helper-names* nil)
-(def ^:dynamic *loop-helper-recorder* nil)
+#?(:kotoba nil :default (def ^:dynamic *loop-helper-names* nil))
+#?(:kotoba nil :default (def ^:dynamic *loop-helper-recorder* nil))
 
 ;; Bound to a volatile vector by whatever wants the types of the `throw`s a
 ;; form can reach WITHOUT crossing a try body. `infer-expression-type`'s `try`
@@ -49,23 +59,78 @@
 ;; that try and never reaches the outer collector; a throw in the handler is
 ;; outside the body and does reach it. Unbound (nil) everywhere else, where a
 ;; throw is typed and not recorded.
-(def ^:dynamic *abort-throw-types* nil)
+#?(:kotoba nil :default (def ^:dynamic *abort-throw-types* nil))
 
 ;; Function name -> the error type it aborts with, for the functions that do.
 ;; Bound while the abort passes and their inference run; empty elsewhere.
-(def ^:dynamic *abort-error-types* {})
+#?(:kotoba nil :default (def ^:dynamic *abort-error-types* {}))
 
 ;; The static type of `(throw e)`: it has no value, so it unifies with either
 ;; branch of an `if`. It never reaches HIR -- an aborting function is lowered
 ;; to `[:result T E]` before any pass that writes HIR sees it.
-(def abort-bottom :kotoba.abort/bottom)
+#?(:kotoba
+(defn abort-bottom-form [] [:ref :form/r] (form/keyword-form :kotoba.abort/bottom))
+   :default
+(def abort-bottom :kotoba.abort/bottom))
 
 ;; The catch binder's provisional type while a callee's error type is not yet
 ;; known (the abort passes iterate to a fixed point). Nothing unifies with it,
 ;; so a handler that reads the binder before its type is known refuses -- and
 ;; the fixed point retries -- rather than reading it as anything.
-(def abort-unknown-error :kotoba.abort/unknown-error)
+#?(:kotoba
+(defn abort-unknown-error-form [] [:ref :form/r] (form/keyword-form :kotoba.abort/unknown-error))
+   :default
+(def abort-unknown-error :kotoba.abort/unknown-error))
 
+#?(:kotoba
+(defn sym-is? [x [:ref :form/r] name :string] :bool
+  (and (form/is-symbol? x) (string=? (form/symbol-value x) name)))
+   :default nil)
+
+#?(:kotoba
+(defn form-list-has? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] :bool
+  (if (>= i (vector-count xs))
+    false
+    (if (form/eq (typed-list-nth [:list [:ref :form/r]] xs i) x)
+      true
+      (form-list-has? xs x (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn abort-add [op [:ref :form/r] known [:ref :form/r] out [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (let [t (form/form-get known op)]
+    (if (form/is-nil? t)
+      out
+      (if (form-list-has? out (form/vec2 op t) 0)
+        out
+        (form/append-form out (form/vec2 op t))))))
+   :default nil)
+
+#?(:kotoba
+(defn abort-walk-kids [x [:ref :form/r] i :i64 known [:ref :form/r] out [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of x))
+    out
+    (abort-walk-kids x (+ i 1) known (abort-walk (form/nth-of x i) known out))))
+   :default nil)
+
+#?(:kotoba
+(defn abort-walk [x [:ref :form/r] known [:ref :form/r] out [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (cond
+    (form/is-seq? x)
+    (if (= 0 (form/count-of x))
+      out
+      (cond
+        (sym-is? (form/nth-of x 0) "fn") out
+        (sym-is? (form/nth-of x 0) "try") (abort-walk (form/last-of (form/nth-of x 2)) known out)
+        :else (abort-walk-kids x 1 known (abort-add (form/nth-of x 0) known out))))
+    (or (form/is-vec? x) (form/is-set? x) (form/is-map? x)) (abort-walk-kids x 0 known out)
+    :else out))
+   :default nil)
+
+#?(:kotoba
+(defn abort-callee-sites [form [:ref :form/r] known [:ref :form/r]] [:list [:ref :form/r]]
+  (abort-walk form known (form/no-forms)))
+   :default
 (defn abort-callee-sites
   "`[[callee error-type] ...]`, in source order, for the aborting functions
   FORM calls with no try body in between. A try's handler is walked -- what it
@@ -89,13 +154,34 @@
                         (doseq [arg args] (walk arg)))))
                 (coll? x) (doseq [item x] (walk item))))]
       (walk form)
-      (distinct @out))))
+      (distinct @out)))))
 
+#?(:kotoba
+(defn error-types-from [sites [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count sites))
+    acc
+    (let [t (form/nth-of (typed-list-nth [:list [:ref :form/r]] sites i) 1)]
+      (error-types-from sites (+ i 1) (if (form-list-has? acc t 0) acc (form/append-form acc t))))))
+   :default nil)
+
+#?(:kotoba
+(defn abort-callee-error-types [form [:ref :form/r] known [:ref :form/r]] [:list [:ref :form/r]]
+  (error-types-from (abort-callee-sites form known) 0 (form/no-forms)))
+   :default
 (defn abort-callee-error-types
   "The error types of `abort-callee-sites`, deduplicated in source order."
   [form]
-  (distinct (map second (abort-callee-sites form))))
+  (distinct (map second (abort-callee-sites form)))))
 
+#?(:kotoba
+(defn bounded-vector-source-binding? [name [:ref :form/r]] :bool
+  (let [s (form-text name)]
+    (or (and (str/starts-with? s "__kotoba_map_source_")
+             (not (str/starts-with? s "__kotoba_map_sources_")))
+        (str/starts-with? s "__kotoba_filter_v_")
+        (str/starts-with? s "__kotoba_reduce_v_")
+        (str/starts-with? s "__kotoba_mapindexed_v_"))))
+   :default
 (defn bounded-vector-source-binding?
   "True for the synthetic collection binding T4.5 map/filter/reduce emit.
 
@@ -109,18 +195,55 @@
              (not (str/starts-with? s "__kotoba_map_sources_")))
         (str/starts-with? s "__kotoba_filter_v_")
         (str/starts-with? s "__kotoba_reduce_v_")
-        (str/starts-with? s "__kotoba_mapindexed_v_"))))
+        (str/starts-with? s "__kotoba_mapindexed_v_")))))
 
 ;; Absence markers (gap 1 of the selfhost foundation): see `absence-type`.
-(def absent-kind :kotoba.absence/absent)
-(def none-kind :kotoba.absence/none)
-(def nil-kind :kotoba.absence/nil)
+#?(:kotoba
+(defn absent-kind-form [] [:ref :form/r] (form/keyword-form :kotoba.absence/absent))
+   :default
+(def absent-kind :kotoba.absence/absent))
+#?(:kotoba
+(defn none-kind-form [] [:ref :form/r] (form/keyword-form :kotoba.absence/none))
+   :default
+(def none-kind :kotoba.absence/none))
+#?(:kotoba
+(defn nil-kind-form [] [:ref :form/r] (form/keyword-form :kotoba.absence/nil))
+   :default
+(def nil-kind :kotoba.absence/nil))
 
+#?(:kotoba
+(defn kw-form-is? [t [:ref :form/r] k :keyword] :bool
+  (form/eq t (form/keyword-form k)))
+   :default nil)
+
+#?(:kotoba
+(defn absence-kind-mode [kind [:ref :form/r]] [:ref :form/r]
+  (cond
+    (form/eq kind (absent-kind-form)) (form/keyword-form :legacy)
+    (form/eq kind (none-kind-form)) (form/keyword-form :none)
+    (form/eq kind (nil-kind-form)) (form/keyword-form :nil)
+    :else (form/nil-form)))
+   :default
 (defn absence-kind-mode [kind]
-  (get {absent-kind :legacy none-kind :none nil-kind :nil} kind))
+  (get {absent-kind :legacy none-kind :none nil-kind :nil} kind)))
 
-(defn absence-kind? [type] (contains? #{absent-kind none-kind nil-kind} type))
+#?(:kotoba
+(defn absence-kind? [type [:ref :form/r]] :bool
+  (or (form/eq type (absent-kind-form)) (form/eq type (none-kind-form)) (form/eq type (nil-kind-form))))
+   :default
+(defn absence-kind? [type] (contains? #{absent-kind none-kind nil-kind} type)))
 
+#?(:kotoba
+(defn absence-in-tail? [form [:ref :form/r]] :bool
+  (cond
+    (absence-marker? form) true
+    (not (form/is-seq? form)) false
+    (and (sym-is? (form/nth-of form 0) "if") (= 4 (form/count-of form)))
+    (or (absence-in-tail? (form/nth-of form 2)) (absence-in-tail? (form/nth-of form 3)))
+    (and (sym-is? (form/nth-of form 0) "let") (<= 3 (form/count-of form))) (absence-in-tail? (form/last-of form))
+    (and (sym-is? (form/nth-of form 0) "do") (<= 2 (form/count-of form))) (absence-in-tail? (form/last-of form))
+    :else false))
+   :default
 (defn absence-in-tail?
   "A marker in a tail position of FORM (through `if`, `let`, `do`)."
   [form]
@@ -131,12 +254,18 @@
     (or (absence-in-tail? (nth form 2)) (absence-in-tail? (nth form 3)))
     (and (= 'let (first form)) (<= 3 (count form))) (absence-in-tail? (last form))
     (and (= 'do (first form)) (<= 2 (count form))) (absence-in-tail? (last form))
-    :else false))
+    :else false)))
 
+#?(:kotoba
+(defn legacy-absence [marker [:ref :form/r]] [:ref :form/r]
+  (if (form/eq (form/nth-of marker 1) (form/keyword-form :nil))
+    (form/call0 "option-none")
+    (form/int-form 0)))
+   :default
 (defn legacy-absence
   "What the desugar wrote before markers existed."
   [marker]
-  (if (= :nil (second marker)) '(option-none) 0))
+  (if (= :nil (second marker)) '(option-none) 0)))
 
 ;; the vector's first element is the keyword NAME
 #?(:kotoba
@@ -231,6 +360,26 @@
 ;; When nothing can type the present branch the marker becomes exactly what
 ;; the desugar used to write (0, or `(option-none)` for a literal nil), so a
 ;; program this change cannot type means what it meant before.
+#?(:kotoba
+(defn option-of [t [:ref :form/r]] [:ref :form/r]
+  (form/vec2 (form/keyword-form :option) t))
+   :default nil)
+
+#?(:kotoba
+(defn absence-type [present [:ref :form/r] mode [:ref :form/r]] [:ref :form/r]
+  (cond
+    (or (form/is-nil? present) (absence-kind? present) (form/eq present (abort-bottom-form)))
+    (if (or (form/eq mode (form/keyword-form :nil)) (form/eq present (nil-kind-form)))
+      (form/keyword-form :option-i64)
+      (if (or (form/eq mode (form/keyword-form :none)) (form/eq present (none-kind-form)))
+        (option-of (form/keyword-form :i64))
+        (form/keyword-form :i64)))
+    (form/eq present (form/keyword-form :i64))
+    (if (form/eq mode (form/keyword-form :legacy)) (form/keyword-form :i64) (option-of (form/keyword-form :i64)))
+    (form/eq present (form/keyword-form :bool)) (form/keyword-form :bool)
+    (or (option-vector-type? present) (form/eq present (form/keyword-form :option-i64))) present
+    :else (option-of present)))
+   :default
 (defn absence-type
   "The type of an `if` whose one path is absent and whose other path has type
   PRESENT. MODE is the marker's: :legacy, :none or :nil (`absence-marker`)."
@@ -242,8 +391,15 @@
     (= :i64 present) (if (= :legacy mode) :i64 [:option :i64])
     (= :bool present) :bool
     (or (option-vector-type? present) (= :option-i64 present)) present
-    :else [:option present]))
+    :else [:option present])))
 
+#?(:kotoba
+(defn lenient-branch-join [a [:ref :form/r] b [:ref :form/r]] [:ref :form/r]
+  (cond
+    (and (option-vector-type? b) (form/eq a (form/nth-of b 1))) b
+    (and (option-vector-type? a) (form/eq b (form/nth-of a 1))) a
+    :else (form/nil-form)))
+   :default
 (defn lenient-branch-join
   "Inside the present branch of an absence, `(if c v (recur ...))` joins a
   value of type T with the loop's [:option T] answer: the value is the
@@ -253,8 +409,37 @@
   (cond
     (and (option-vector-type? b) (= a (second b))) b
     (and (option-vector-type? a) (= b (second a))) a
-    :else nil))
+    :else nil)))
 
+#?(:kotoba
+(defn digits-end [s :string i :i64] :i64
+  (if (and (< i (string-length s)) (ascii-digit-code? (string-code-point-at s i)))
+    (digits-end s (+ i 1))
+    i))
+   :default nil)
+
+#?(:kotoba
+(defn cell-parts-scan [rest-text :string] [:ref :form/r]
+  (let [n (string-length rest-text)
+        a (digits-end rest-text 0)]
+    (if (or (= a 0) (>= a n) (not (= 95 (string-code-point-at rest-text a))))
+      (form/nil-form)
+      (let [b (digits-end rest-text (+ a 1))]
+        (if (or (= b (+ a 1)) (>= (+ b 1) n) (not (= 95 (string-code-point-at rest-text b))))
+          (form/nil-form)
+          (form/vec2 (form/string-form (string-substring rest-text 0 a))
+                     (form/string-form (string-substring rest-text (+ b 1) n))))))))
+   :default nil)
+
+#?(:kotoba
+(defn local-state-cell-parts [value [:ref :form/r]] [:ref :form/r]
+  (if (simple-symbol-form? value)
+    (let [text (form/symbol-value value)]
+      (if (str/starts-with? text "__kotoba_cell_")
+        (cell-parts-scan (string-substring text 14 (string-length text)))
+        (form/nil-form)))
+    (form/nil-form)))
+   :default
 (defn local-state-cell-parts
   "`[cell-id source-name]` for a cell binding symbol, else nil."
   [value]
@@ -262,11 +447,48 @@
     (let [text (name value)]
       (when (str/starts-with? text "__kotoba_cell_")
         (let [m (re-matches #"(\d+)_(\d+)_(.+)" (subs text (count "__kotoba_cell_")))]
-          (when m [(nth m 1) (nth m 3)]))))))
+          (when m [(nth m 1) (nth m 3)])))))))
 
+#?(:kotoba
+(defn kw-name [k [:ref :form/r]] :string
+  (let [txt (form-text k)
+        body (string-substring txt 1 (string-length txt))
+        slash (string-find-byte body 47 0)]
+    (if (< slash 0) body (string-substring body (+ slash 1) (string-length body)))))
+   :default nil)
+
+#?(:kotoba
+(defn type-text [t [:ref :form/r]] :string
+  (if (form/is-keyword? t) (kw-name t) (pr-form t)))
+   :default nil)
+
+#?(:kotoba
+(defn local-state-type-text [type [:ref :form/r]] :string
+  (type-text type))
+   :default
 (defn local-state-type-text [type]
-  (if (keyword? type) (name type) (pr-str type)))
+  (if (keyword? type) (name type) (pr-str type))))
 
+#?(:kotoba
+(defn cell-type-mismatch! [cell-name [:ref :form/r] known [:ref :form/r] type [:ref :form/r] form [:ref :form/r]] :i64
+  (if (and (not (form/is-nil? known)) (not (same-expression-type? known type)))
+    (throw (fe-reject (str "atom `" (form/string-value cell-name) "` is " (local-state-type-text known)
+                           "; this rebinding is " (local-state-type-text type)
+                           " (atom slice 1 requires one type per cell)")
+                      "kotoba.error/local-state-cell-type" form))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn local-state-check-cell-type! [name [:ref :form/r] type [:ref :form/r] locals [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+  (let [parts (local-state-cell-parts name)]
+    (if (form/is-nil? parts)
+      locals
+      (let [key (form/symbol-form (str "__kotoba_cellty_" (form/string-value (form/nth-of parts 0))))
+            known (form/form-get locals key)
+            _ (cell-type-mismatch! (form/nth-of parts 1) known type form)]
+        (form/assoc-form locals key (if (form/is-nil? known) type known))))))
+   :default
 (defn local-state-check-cell-type!
   "Tie every rebinding of one cell to the type its `(atom init)` gave it.
 
@@ -284,15 +506,22 @@
                       " (atom slice 1 requires one type per cell)")
                  form :kotoba.error/local-state-cell-type))
       (assoc locals key (or known type)))
-    locals))
+    locals)))
 
+#?(:kotoba
+(defn nominal-type-identity [type [:ref :form/r]] [:ref :form/r]
+  (cond
+    (schema-ref-type? type) (form/nth-of type 1)
+    (or (record-type? type) (variant-type? type)) (form/nth-of type 1)
+    :else (form/nil-form)))
+   :default
 (defn nominal-type-identity [type]
   (cond
     (schema-ref-type? type) (second type)
     (or (record-type? type) (variant-type? type)) (second type)
-    :else nil))
+    :else nil)))
 
-(defn same-expression-type?
+#?(:kotoba nil :default (defn same-expression-type?
   "Exact structural equality remains the default. A closed-schema reference
   and its fully declared nominal descriptor are interchangeable only by the
   same qualified identity; analyze verifies every inline descriptor carrying
@@ -302,8 +531,56 @@
       (and (or (schema-ref-type? actual) (schema-ref-type? expected))
            (= (nominal-type-identity actual)
               (nominal-type-identity expected))
-           (some? (nominal-type-identity actual)))))
+           (some? (nominal-type-identity actual))))))
 
+#?(:kotoba
+(defn map2 [k1 [:ref :form/r] v1 [:ref :form/r] k2 [:ref :form/r] v2 [:ref :form/r]] [:ref :form/r]
+  (form/form-map (form/append-form (form/append-form (form/append-form (form/append-form (form/no-forms) k1) v1) k2) v2)))
+   :default nil)
+
+#?(:kotoba
+(defn expected-actual-data [expected [:ref :form/r] actual [:ref :form/r]] [:ref :form/r]
+  (map2 (form/keyword-form :kotoba.error/expected) expected (form/keyword-form :kotoba.error/actual) actual))
+   :default nil)
+
+#?(:kotoba
+(defn require-not-bottom! [actual [:ref :form/r] form [:ref :form/r]] :i64
+  (if (form/eq actual (abort-bottom-form))
+    (throw (fe-reject (str "abort slice 1 admits throw and calls to aborting functions "
+                           "only in tail position or as a let binding value; the throw is in neither")
+                      "kotoba.error/abort-position" form))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn require-not-legacy-map! [actual [:ref :form/r] expected [:ref :form/r] form [:ref :form/r]] :i64
+  (if (and (form/eq actual (form/keyword-form :map)) (canonical-typed-map-type? expected))
+    (throw (fe-reject-data (str "this value is the legacy pair-map, whose type is `map` and not "
+                                (pr-form expected)
+                                ". A map literal keeps the legacy representation when its keys are "
+                                "keywords and when it is empty; only :i64 and :string literals are "
+                                "retyped. Read and write it through get / assoc / contains? / dissoc, "
+                                "or build the typed map with (typed-map-new " (pr-form expected) " ...)")
+                           "kotoba.error/subset-reject" form (expected-actual-data expected actual)))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn require-same-type! [actual [:ref :form/r] expected [:ref :form/r] form [:ref :form/r]] :i64
+  (if (same-expression-type? actual expected)
+    0
+    (throw (fe-reject-data (str "expression type mismatch: expected " (type-text expected)
+                                ", got " (type-text actual))
+                           "kotoba.error/subset-reject" form (expected-actual-data expected actual)))))
+   :default nil)
+
+#?(:kotoba
+(defn require-expression-type! [actual [:ref :form/r] expected [:ref :form/r] form [:ref :form/r]] :i64
+  (let [_ (require-not-bottom! actual form)
+        _ (require-not-legacy-map! actual expected form)
+        _ (require-same-type! actual expected form)]
+    0))
+   :default
 (defn require-expression-type! [actual expected form]
   ;; Bottom is only ever the type of a `throw`, and a throw whose value is
   ;; REQUIRED to be something is a throw in a position slice 1 does not
@@ -344,25 +621,36 @@
       (reject! (str "expression type mismatch: expected " (type-text expected)
                     ", got " (type-text actual))
                form :kotoba.error/subset-reject
-               {:kotoba.error/expected expected :kotoba.error/actual actual}))))
+               {:kotoba.error/expected expected :kotoba.error/actual actual})))))
 
+#?(:kotoba
+(defn closure-literal-form? [form [:ref :form/r]] :bool
+  (and (form/is-seq? form) (sym-is? (form/nth-of form 0) "pair") (= 3 (form/count-of form))
+       (kotoba-integer? (form/nth-of form 1))))
+   :default
 (defn closure-literal-form?
   "The shape a lifted `fn` lowers to, `(pair <lambda-id> <captures>)`. Only
   the shape: `infer-closure-refinements`, which knows the module's lambda
   ids, refuses a `[:fn ...]` field given anything that is not a closure."
   [form]
   (and (seq? form) (= 'pair (first form)) (= 3 (count form))
-       (kotoba-integer? (second form))))
+       (kotoba-integer? (second form)))))
 
+#?(:kotoba
+(defn require-field-value-type! [actual [:ref :form/r] expected [:ref :form/r] item [:ref :form/r] form [:ref :form/r]] :i64
+  (if (and (callable-type? expected) (form/eq actual (form/keyword-form :i64)) (closure-literal-form? item))
+    0
+    (require-expression-type! actual expected form)))
+   :default
 (defn require-field-value-type!
   "A record field's value against the field's declared type. A `[:fn ...]`
   field takes a fn literal, whose word is the i64 closure handle (ADR 0353
   floor :function-values)."
   [actual expected item form]
   (when-not (and (callable-type? expected) (= :i64 actual) (closure-literal-form? item))
-    (require-expression-type! actual expected form)))
+    (require-expression-type! actual expected form))))
 
-(def ^:dynamic *numeric-resolution-final*
+#?(:kotoba nil :default (def ^:dynamic *numeric-resolution-final*
   "True only inside `check-value-types!`. Before that pass, a plain numeric
   operator on float operands TYPES as the float (that is what lets an
   unannotated parameter be refined to `:f64` from `(+ p 1.5)`, and a result be
@@ -371,19 +659,100 @@
   operator that still has float operands is one the rewrite could not see the
   types of in time; typing it as f64 there would let KIR execute i64 `+` on a
   double. Fail closed instead."
-  false)
+  false))
 
+#?(:kotoba
+(defn spell-conversions [names [:ref :form/r] i :i64 acc :string] :string
+  (if (>= i (form/count-of names))
+    acc
+    (spell-conversions names (+ i 1)
+                       (str acc (if (> i 0) " or " "") "(" (form-text (form/nth-of names i)) " x)"))))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-conversion-spelling [from [:ref :form/r] to [:ref :form/r]] :string
+  (spell-conversions (form/form-get (tables/explicit-numeric-conversions) (form/vec2 from to)) 0 ""))
+   :default
 (defn numeric-conversion-spelling [from to]
-  (str/join " or " (map #(str "(" % " x)") (get explicit-numeric-conversions [from to]))))
+  (str/join " or " (map #(str "(" % " x)") (get explicit-numeric-conversions [from to])))))
 
+#?(:kotoba
+(defn mixed-numeric-message [op [:ref :form/r] dominant [:ref :form/r] other [:ref :form/r]] :string
+  (str (form-text op) " operands must share one numeric type; got " (kw-name dominant) " and "
+       (kw-name other) " -- there is no implicit conversion: write "
+       (numeric-conversion-spelling other dominant) " to convert the "
+       (kw-name other) " into " (kw-name dominant) ", or "
+       (numeric-conversion-spelling dominant other) " to convert the "
+       (kw-name dominant) " into " (kw-name other)))
+   :default
 (defn mixed-numeric-message [op dominant other]
   (str op " operands must share one numeric type; got " (name dominant) " and "
        (name other) " -- there is no implicit conversion: write "
        (numeric-conversion-spelling other dominant) " to convert the "
        (name other) " into " (name dominant) ", or "
        (numeric-conversion-spelling dominant other) " to convert the "
-       (name dominant) " into " (name other)))
+       (name dominant) " into " (name other))))
 
+#?(:kotoba
+(defn first-float-type [types [:ref :form/r] i :i64] [:ref :form/r]
+  (if (>= i (form/count-of types))
+    (form/nil-form)
+    (let [t (form/nth-of types i)]
+      (if (or (form/eq t (form/keyword-form :f64)) (form/eq t (form/keyword-form :f32)))
+        t
+        (first-float-type types (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-i64-each! [args [:ref :form/r] types [:ref :form/r] i :i64] :i64
+  (if (or (>= i (form/count-of args)) (>= i (form/count-of types)))
+    0
+    (let [_ (require-expression-type! (form/nth-of types i) (form/keyword-form :i64) (form/nth-of args i))]
+      (numeric-i64-each! args types (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-mixed-one! [op [:ref :form/r] float-type [:ref :form/r] type [:ref :form/r] arg [:ref :form/r]] :i64
+  (if (form/eq type float-type)
+    0
+    (if (or (form/eq type (form/keyword-form :i64)) (form/eq type (form/keyword-form :f32)) (form/eq type (form/keyword-form :f64)))
+      (throw (fe-reject-data (mixed-numeric-message op float-type type) "kotoba.error/numeric-type-mismatch" arg
+                             (expected-actual-data float-type type)))
+      (require-expression-type! type float-type arg))))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-float-each! [op [:ref :form/r] float-type [:ref :form/r] args [:ref :form/r] types [:ref :form/r] i :i64] :i64
+  (if (or (>= i (form/count-of args)) (>= i (form/count-of types)))
+    0
+    (let [_ (numeric-mixed-one! op float-type (form/nth-of types i) (form/nth-of args i))]
+      (numeric-float-each! op float-type args types (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-final! [op [:ref :form/r] float-type [:ref :form/r] args [:ref :form/r] final :bool] :i64
+  (if final
+    (throw (fe-reject (str (form-text op) " on " (kw-name float-type) " operands was not resolved to "
+                           (form-text (form/form-get (form/form-get (tables/float-arithmetic-resolution) float-type) op))
+                           " before the final type check -- the operand types were"
+                           " not statically known when the type-directed rewrite"
+                           " ran; bind the operands with let, or write the typed"
+                           " operation directly")
+                      "kotoba.error/numeric-resolution-unresolved"
+                      (form/form-seq (form/cons-onto op (form/kids-of args)))))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn numeric-operand-type! [op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] final :bool] [:ref :form/r]
+  (let [float-type (first-float-type types 0)]
+    (if (form/is-nil? float-type)
+      (let [_ (numeric-i64-each! args types 0)]
+        (form/keyword-form :i64))
+      (let [_ (numeric-float-each! op float-type args types 0)
+            _ (numeric-final! op float-type args final)]
+        float-type))))
+   :default
 (defn numeric-operand-type!
   "The one numeric type every operand of the plain operator OP shares.
 
@@ -416,8 +785,1605 @@
                           " ran; bind the operands with let, or write the typed"
                           " operation directly")
                      (cons op args) :kotoba.error/numeric-resolution-unresolved))
-          float-type))))
+          float-type)))))
 
+#?(:kotoba
+(defn ty? [x [:ref :form/r] k :keyword] :bool
+  (form/eq x (form/keyword-form k)))
+   :default nil)
+
+#?(:kotoba
+(defn tk [k :keyword] [:ref :form/r]
+  (form/keyword-form k))
+   :default nil)
+
+#?(:kotoba
+(defn ie-r [type [:ref :form/r] ctx [:ref :ie/ctx]] [:ref :ie/r]
+  (record-new [:ref :ie/r] type ctx))
+   :default nil)
+
+#?(:kotoba
+(defn ie-type [r [:ref :ie/r]] [:ref :form/r]
+  (record-get [:ref :ie/r] r :type))
+   :default nil)
+
+#?(:kotoba
+(defn ie-ctx [r [:ref :ie/r]] [:ref :ie/ctx]
+  (record-get [:ref :ie/r] r :ctx))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-tail? [c [:ref :ie/ctx]] :bool
+  (record-get [:ref :ie/ctx] c :tail))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-tail [c [:ref :ie/ctx] tail :bool] [:ref :ie/ctx]
+  (record-assoc [:ref :ie/ctx] c :tail (if tail true false)))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-final? [c [:ref :ie/ctx]] :bool
+  (record-get [:ref :ie/ctx] c :final))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-schemas [c [:ref :ie/ctx]] [:ref :form/r]
+  (record-get [:ref :ie/ctx] c :schemas))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-row-schemas [c [:ref :ie/ctx]] [:ref :form/r]
+  (record-get [:ref :ie/ctx] c :row-schemas))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-handlers [c [:ref :ie/ctx]] [:ref :form/r]
+  (record-get [:ref :ie/ctx] c :handlers))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-tbl [c [:ref :ie/ctx]] [:ref :form/r]
+  (record-get [:ref :ie/ctx] c :tbl))
+   :default nil)
+
+#?(:kotoba
+(defn ie-tbl-has? [c [:ref :ie/ctx] k :keyword x [:ref :form/r]] :bool
+  (tables/table-has? (form/form-get (ctx-tbl c) (form/keyword-form k)) x))
+   :default nil)
+
+#?(:kotoba
+(defn ie-tbl-get [c [:ref :ie/ctx] k :keyword x [:ref :form/r]] [:ref :form/r]
+  (tables/table-get (form/form-get (ctx-tbl c) (form/keyword-form k)) x))
+   :default nil)
+
+#?(:kotoba
+(defn tput [acc [:list [:ref :form/r]] k :keyword v [:ref :form/r]] [:list [:ref :form/r]]
+  (form/append-form (form/append-form acc (form/keyword-form k)) v))
+   :default nil)
+
+#?(:kotoba
+(defn ie-tables [] [:ref :form/r]
+  (let [m1 (form/no-forms)
+        m2 (tput m1 :arithmetic (tables/arithmetic))
+        m3 (tput m2 :float-division-heads (tables/float-division-heads))
+        m4 (tput m3 :i64-operations (tables/i64-operations))
+        m5 (tput m4 :i32-operations (tables/i32-operations))
+        m6 (tput m5 :comparisons (tables/comparisons))
+        m7 (tput m6 :heap-operations (tables/heap-operations))
+        m8 (tput m7 :kgraph-operations (tables/kgraph-operations))
+        m9 (tput m8 :kernel-memory-operations (tables/kernel-memory-operations))
+        m10 (tput m9 :kernel-privileged-operations (tables/kernel-privileged-operations))
+        m11 (tput m10 :rodata-literal-operations (tables/rodata-literal-operations))
+        m12 (tput m11 :set-operations (tables/set-operations))
+        m13 (tput m12 :named-operation-default-results (tables/named-operation-default-results))
+        m14 (tput m13 :library-predicate-heads (tables/library-predicate-heads))
+        m15 (tput m14 :row-operation-heads (tables/row-operation-heads))
+        m16 (tput m15 :document-of-constructors (tables/document-of-constructors))
+        m17 (tput m16 :float-arithmetic-resolution (tables/float-arithmetic-resolution))
+        m18 (tput m17 :explicit-numeric-conversions (tables/explicit-numeric-conversions))
+        m19 (tput m18 :arm-specs (form/edn-form "{bytes-empty [[] :bytes] bytes-count [[:bytes] :i64] bytes-at [[:bytes :i64] :i64] bytes-slice [[:bytes :i64 :i64] :bytes] bytes-concat [[:bytes :bytes] :bytes] bytes-from-vector-i64 [[:vector-i64] :bytes] vector-i64-from-bytes [[:bytes] :vector-i64] string-from-utf8 [[:bytes] :string] kernel-function-address [[] :i64]}"))
+        m20 (tput m19 :specs (form/edn-form "[{bool-not [[[0 :bool]] :bool] option-some [[[0 :i64]] :option-i64]} {option-some? [[[0 :option-i64]] :bool] option-value [[[0 :option-i64] [1 :i64]] :i64] result-ok [[[0 :i64]] :result-i64] result-err [[[0 :i64]] :result-i64] result-ok? [[[0 :result-i64]] :bool] result-value [[[0 :result-i64] [1 :i64]] :i64] result-error [[[0 :result-i64] [1 :i64]] :i64] vector-alloc [[[0 :i64]] :vector-i64] vector-new [[[:all 0 :i64]] :vector-i64]} {vector-get [[[0 :vector-i64] [1 :i64] [2 :i64]] :i64] vector-at [[[0 :vector-i64] [1 :i64]] :i64] vector-drop [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-take [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-assoc [[[0 :vector-i64] [1 :i64] [2 :i64]] :vector-i64] vector-assoc! [[[0 :vector-i64] [1 :i64] [2 :i64]] :vector-i64] vector-conj [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-f64-new [[[:all 0 :f64]] :vector-f64] vector-f64-count [[[0 :vector-f64]] :i64] vector-f64-get [[[0 :vector-f64] [1 :i64] [2 :f64]] :f64] vector-f64-at [[[0 :vector-f64] [1 :i64]] :f64] vector-f64-drop [[[0 :vector-f64] [1 :i64]] :vector-f64] vector-f64-take [[[0 :vector-f64] [1 :i64]] :vector-f64] vector-f64-assoc [[[0 :vector-f64] [1 :i64] [2 :f64]] :vector-f64] vector-f64-conj [[[0 :vector-f64] [1 :f64]] :vector-f64]} {string-index-count [[[0 :string-index]] :i64] string-index-contains [[[0 :string-index] [1 :string]] :bool] string-index-get [[[0 :string-index] [1 :string]] [:option :i64]] string-index-assoc [[[0 :string-index] [1 :string] [2 :i64]] :string-index] disjoint-set-i64-new [[[0 :i64]] :disjoint-set-i64] disjoint-set-i64-count [[[0 :disjoint-set-i64]] :i64] disjoint-set-i64-union [[[0 :disjoint-set-i64] [1 :i64] [2 :i64]] [:option :disjoint-set-i64]]} {document-bool [[[0 :bool]] :document] document-i64 [[[0 :i64]] :document] document-f64 [[[0 :f64]] :document] document-string [[[0 :string]] :document] document-keyword [[[0 :keyword]] :document] document-symbol [[[0 :symbol]] :document] document-vector [[[:all 0 :document]] :document] document-list [[[:all 0 :document]] :document] document-set [[[:all 0 :document]] :document]} {document-count [[[0 :document]] :i64] document-kind [[[0 :document]] :keyword] document-sha256 [[[0 :document]] :string] document-print [[[0 :document]] :string] document-read [[[0 :string]] :document] document-edn-print [[[0 :document]] :string] document-edn-read [[[0 :string]] :document] document-vector-at [[[0 :document] [1 :i64]] [:option :document]] document-list-at [[[0 :document] [1 :i64]] [:option :document]] document-map-entry-at [[[0 :document] [1 :i64]] [:option :document]] document-vector-assoc [[[0 :document] [1 :i64] [2 :document]] :document] document-vector-conj [[[0 :document] [1 :document]] :document] document-vector-drop [[[0 :document] [1 :i64]] :document] document-vector-remove [[[0 :document] [1 :i64]] :document] document-vector-sort [[[0 :document]] :document]} {document-equal? [[[0 :document] [1 :document]] :bool] document-set-contains? [[[0 :document] [1 :document]] :bool]} {document-merge [[[:all 0 :document]] :document] document-string-value [[[0 :document]] [:option :string]] document-keyword-value [[[0 :document]] [:option :keyword]] document-symbol-value [[[0 :document]] [:option :symbol]] document-bool-value [[[0 :document]] [:option :bool]] document-i64-value [[[0 :document]] [:option :i64]] document-f64-value [[[0 :document]] [:option :f64]]} {cap-call [[[1 :i64]] :i64] string-byte-length [[[0 :string]] :i64] string-length [[[0 :string]] :i64] string-from-i64 [[[0 :i64]] :string]} {bytes-task-byte-count [[[0 [:task [:stream :bytes]]]] :i64] task-ready? [[[0 [:task [:stream :bytes]]]] :i64]} {bool-result [[[0 :bool]] :i64]} {string=? [[[:all 0 :string]] :bool] string-concat [[[:all 0 :string]] :string] string-substring [[[0 :string] [:all 1 :i64]] :string] string-replace-all [[[:all 0 :string]] :string] string-contains? [[[:all 0 :string]] :bool] string-index-of [[[0 :string] [1 :string]] :i64] string-split-count [[[:all 0 :string]] :i64] string-compare [[[0 :string] [1 :string]] :i64] string-fold-ascii [[[0 :string]] :string] string-find-blank [[[0 :string] [1 :i64]] :i64] string-skip-blank [[[0 :string] [1 :i64]] :i64] string-index-of-from [[[0 :string] [1 :string] [2 :i64]] :i64] string-compare-lines [[[0 :string] [1 :i64] [2 :string] [3 :i64]] :i64] string-find-byte [[[0 :string] [1 :i64] [2 :i64]] :i64] string-append-range [[[0 :string] [1 :string] [2 :i64] [3 :i64]] :string]} {string-code-point-at [[[0 :string] [1 :i64]] :i64] string-fold-case [[[0 :string]] :string] string-upper [[[0 :string]] :string] keyword-from-string [[[0 :string]] :keyword] keyword-name [[[0 :keyword]] :string] symbol [[[0 :string]] :symbol] xml-path-count [[[:all 0 :string]] :i64] xml-name-count [[[:all 0 :string]] :i64] xml-name-text [[[0 :string] [1 :string] [2 :i64]] [:option :string]] xml-path-text [[[0 :string] [1 :string] [2 :i64]] [:option :string]] xml-path-attr [[[0 :string] [1 :string] [2 :i64] [3 :string]] [:option :string]] decimal-f64-parse [[[0 :string]] [:option :f64]] decimal-f64x3-parse [[[0 :string]] [:option [:vector [:f64 :f64 :f64]]]] f64-to-bits [[[0 :f64]] :i64] f64-from-bits [[[0 :i64]] :f64] i64-to-f64-checked [[[0 :i64]] :f64] i64-to-f64-rounded [[[0 :i64]] :f64] f64-to-i64-checked [[[0 :f64]] :i64] f64-to-i64-truncating [[[0 :f64]] :i64] f64-add [[[:all 0 :f64]] :f64] f64-sub [[[:all 0 :f64]] :f64] f64-mul [[[:all 0 :f64]] :f64] f64-div [[[:all 0 :f64]] :f64] f64-min [[[:all 0 :f64]] :f64] f64-max [[[:all 0 :f64]] :f64] f64-neg [[[0 :f64]] :f64] f64-abs [[[0 :f64]] :f64] f64-sqrt [[[0 :f64]] :f64] f64-sin-quarter-turn [[[0 :f64]] :f64] f64-cos-quarter-turn [[[0 :f64]] :f64] f64-sin-bounded [[[0 :f64]] :f64] f64-cos-bounded [[[0 :f64]] :f64] f64-exp-near-zero [[[0 :f64]] :f64] f64-log-near-one [[[0 :f64]] :f64] f64-atan2-bounded [[[:all 0 :f64]] :f64] f64-exp-bounded [[[0 :f64]] :f64] f64-log-bounded [[[0 :f64]] :f64] f64-eq [[[:all 0 :f64]] :bool] f64-lt [[[:all 0 :f64]] :bool] f64-le [[[:all 0 :f64]] :bool] f64-gt [[[:all 0 :f64]] :bool] f64-ge [[[:all 0 :f64]] :bool] f64-unordered [[[:all 0 :f64]] :bool] f32-to-bits [[[0 :f32]] :i64] f32-from-bits [[[0 :i64]] :f32] f64-to-f32-rounded [[[0 :f64]] :f32] f32-to-f64-exact [[[0 :f32]] :f64] i64-to-f32-checked [[[0 :i64]] :f32] i64-to-f32-rounded [[[0 :i64]] :f32] f32-to-i64-checked [[[0 :f32]] :i64] f32-to-i64-truncating [[[0 :f32]] :i64] f32-add [[[:all 0 :f32]] :f32] f32-sub [[[:all 0 :f32]] :f32] f32-mul [[[:all 0 :f32]] :f32] f32-div [[[:all 0 :f32]] :f32] f32-min [[[:all 0 :f32]] :f32] f32-max [[[:all 0 :f32]] :f32] f32-neg [[[0 :f32]] :f32] f32-abs [[[0 :f32]] :f32] f32-sqrt [[[0 :f32]] :f32] f32-eq [[[:all 0 :f32]] :bool] f32-lt [[[:all 0 :f32]] :bool] f32-le [[[:all 0 :f32]] :bool] f32-gt [[[:all 0 :f32]] :bool] f32-ge [[[:all 0 :f32]] :bool] f32-unordered [[[:all 0 :f32]] :bool]} {map-get [[[0 :map] [1 :keyword] [2 :i64]] :i64]}]"))]
+    (form/form-map m20)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-new-ctx [schemas [:ref :form/r] row-schemas [:ref :form/r] handlers [:ref :form/r]] [:ref :ie/ctx]
+  (record-new [:ref :ie/ctx] schemas row-schemas handlers false false (form/nil-form) false (form/nil-form)
+              false (form/no-forms) (form/nil-form) (ie-tables)))
+   :default nil)
+
+#?(:kotoba
+(defn call-form [op [:ref :form/r] args [:ref :form/r]] [:ref :form/r]
+  (form/form-seq (form/cons-onto op (form/kids-of args))))
+   :default nil)
+
+#?(:kotoba
+(defn type-valid! [type [:ref :form/r]] :i64
+  (let [r (vt/validate-type type 0 0)]
+    (if (vt/outcome-ok? r)
+      (vt/outcome-nodes r)
+      (throw (fe-reject (vt/outcome-msg r) (vt/outcome-code r) type)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-infer-t [ctx [:ref :ie/ctx] tail :bool form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (ie-infer (ctx-tail ctx tail) form locals sigs)]
+    (ie-r (ie-type r) (ctx-tail (ie-ctx r) (ctx-tail? ctx)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-expect [ctx [:ref :ie/ctx] x [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (let [r (ie-infer ctx x locals sigs)
+        _ (require-expression-type! (ie-type r) expected x)]
+    (ie-ctx r)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-infer-args [ctx [:ref :ie/ctx] args [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :ie/r]
+  (if (>= i (form/count-of args))
+    (ie-r (form/form-vec acc) ctx)
+    (let [r (ie-infer ctx (form/nth-of args i) locals sigs)]
+      (ie-infer-args (ie-ctx r) args (+ i 1) locals sigs (form/append-form acc (ie-type r))))))
+   :default nil)
+
+#?(:kotoba
+(defn vec-of [rest-from [:ref :form/r]] [:ref :form/r]
+  (form/form-vec (form/rest-list rest-from)))
+   :default nil)
+
+#?(:kotoba
+(defn use-site-kids [f [:ref :form/r] i :i64 acc :string] :string
+  (if (>= i (form/count-of f))
+    acc
+    (use-site-kids f (+ i 1) (str acc (if (> i 0) " " "") (use-site-text (form/nth-of f i))))))
+   :default nil)
+
+#?(:kotoba
+(defn form-text-any [f [:ref :form/r]] :string
+  (if (form/is-int? f) (string-from-i64 (form/int-value f)) (form/symbol-value f)))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-field-missing! [op :string type [:ref :form/r] fields [:ref :form/r] key [:ref :form/r] form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] :i64
+  (if (ftruthy? (row-op-field-type fields key 0))
+    0
+    (throw (fe-reject-data (str op " names field " (form-text key) ", which record "
+                                (form-text (row-op-name type schemas row-schemas))
+                                " does not have: a row shrinks only by fields it has")
+                           "kotoba.error/row-field-missing" form
+                           (map2 (form/keyword-form :kotoba.error/field) key (form/keyword-form :kotoba.error/actual) type)))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-literal-keys? [f [:ref :form/r] i :i64] :bool
+  (if (>= i (form/count-of f))
+    true
+    (and (form/is-keyword? (form/nth-of f i)) (row-op-literal-keys? f (+ i 2)))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-literal-pairs [f [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= (+ i 1) (form/count-of f))
+    acc
+    (row-op-literal-pairs f (+ i 2) (form/append-form acc (form/vec2 (form/nth-of f i) (form/nth-of f (+ i 1)))))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-keep? [field [:ref :form/r] keys [:ref :form/r]] :bool
+  (fl-has? (form/kids-of keys) (form/nth-of field 0) 0))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-filter [fields [:ref :form/r] keys [:ref :form/r] keep :bool i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of fields))
+    acc
+    (let [field (form/nth-of fields i)
+          hit (row-op-keep? field keys)]
+      (row-op-filter fields keys keep (+ i 1) (if (= hit keep) (form/append-form acc field) acc)))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-fields-each! [op :string receiver-type [:ref :form/r] fields [:ref :form/r] ks [:ref :form/r] i :i64 form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] :i64
+  (if (>= i (form/count-of ks))
+    0
+    (let [_ (row-op-field! op receiver-type fields (form/nth-of ks i) form schemas row-schemas)]
+      (row-op-fields-each! op receiver-type fields ks (+ i 1) form schemas row-schemas))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-nonempty! [op :string receiver-type [:ref :form/r] kept [:list [:ref :form/r]] form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] :i64
+  (if (> (vector-count kept) 0)
+    0
+    (throw (fe-reject (str op " leaves record " (form-text (row-op-name receiver-type schemas row-schemas))
+                           " with no field, and a record has at least one")
+                      "kotoba.error/row-operation-shape" form))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-assoc-entries! [receiver-type [:ref :form/r] args [:ref :form/r] types [:ref :form/r] i :i64 form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r] fields [:ref :form/r]] [:ref :form/r]
+  (if (>= (+ i 1) (form/count-of args))
+    fields
+    (let [key (form/nth-of args i)
+          value (form/nth-of args (+ i 1))
+          value-type (form/nth-of types (+ i 1))
+          _ (row-op-key! "assoc" receiver-type key form schemas row-schemas)
+          one (form/vec3 key value-type value)
+          next-fields (row-op-assoc-fields fields (form/form-vec (form/one-form one)) 0)]
+      (row-op-assoc-entries! receiver-type args types (+ i 2) form schemas row-schemas next-fields))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-merge-record! [receiver-type [:ref :form/r] arg [:ref :form/r] type [:ref :form/r] form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] [:ref :form/r]
+  (throw (fe-reject-data (str "merge onto record " (form-text (row-op-name receiver-type schemas row-schemas))
+                              " takes records and keyword-keyed map literals; "
+                              (use-site-text arg) " is " (type-text type))
+                         "kotoba.error/row-operation-shape" form
+                         (form/form-map (form/append-form (form/append-form (form/no-forms) (form/keyword-form :kotoba.error/actual)) type)))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-record-entries [rec-fields [:ref :form/r] arg [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of rec-fields))
+    acc
+    (let [pair (form/nth-of rec-fields i)]
+      (row-op-record-entries rec-fields arg (+ i 1) (form/append-form acc (form/vec3 (form/nth-of pair 0) (form/nth-of pair 1) arg))))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-literal-fields [ctx [:ref :ie/ctx] entries [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r] fields [:ref :form/r]] [:ref :ie/r]
+  (if (>= i (form/count-of entries))
+    (ie-r fields ctx)
+    (let [entry (form/nth-of entries i)
+          r (ie-infer ctx (form/nth-of entry 1) locals sigs)
+          next-fields (row-op-assoc-fields fields (form/form-vec (form/one-form (form/vec3 (form/nth-of entry 0) (ie-type r) (form/nth-of entry 1)))) 0)]
+      (row-op-literal-fields (ie-ctx r) entries (+ i 1) locals sigs next-fields))))
+   :default nil)
+
+#?(:kotoba
+(defn row-op-merge-args [ctx [:ref :ie/ctx] receiver-type [:ref :form/r] args [:ref :form/r] types [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r] form [:ref :form/r] fields [:ref :form/r]] [:ref :ie/r]
+  (if (>= i (form/count-of args))
+    (ie-r fields ctx)
+    (let [arg (form/nth-of args i)
+          type (form/nth-of types i)
+          entries (row-op-literal-entries arg)
+          record (row-op-record type (ctx-schemas ctx) (ctx-row-schemas ctx))]
+      (if (ftruthy? entries)
+        (let [r (row-op-literal-fields ctx entries 0 locals sigs fields)]
+          (row-op-merge-args (ie-ctx r) receiver-type args types (+ i 1) locals sigs form (ie-type r)))
+        (if (ftruthy? record)
+          (row-op-merge-args ctx receiver-type args types (+ i 1) locals sigs form
+                             (row-op-assoc-fields fields (form/form-vec (row-op-record-entries (form/nth-of record 2) arg 0 (form/no-forms))) 0))
+          (let [_ (row-op-merge-record! receiver-type arg type form (ctx-schemas ctx) (ctx-row-schemas ctx))]
+            (ie-r fields ctx)))))))
+   :default nil)
+
+#?(:kotoba
+(defn insert-by-key-text [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
+  (if (>= i (vector-count xs))
+    (form/append-form xs x)
+    (if (> (string-compare (form-text (form/nth-of (fl-nth xs i) 0)) (form-text (form/nth-of x 0))) 0)
+      (fl-slice xs i (vector-count xs) (form/append-form (fl-slice xs 0 i (form/no-forms)) x))
+      (insert-by-key-text xs x (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn sort-by-key-text [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of fields))
+    acc
+    (sort-by-key-text fields (+ i 1) (insert-by-key-text acc (form/nth-of fields i) 0))))
+   :default nil)
+
+#?(:kotoba
+(defn spec-key-op? [c [:ref :ie/ctx] run :i64 op [:ref :form/r]] :bool
+  (and (form/is-symbol? op) (form/form-has? (form/nth-of (form/form-get (ctx-tbl c) (form/keyword-form :specs)) run) op)))
+   :default nil)
+
+#?(:kotoba
+(defn spec-all! [from :i64 expected [:ref :form/r] args [:ref :form/r] types [:ref :form/r] i :i64] :i64
+  (if (or (>= i (form/count-of args)) (>= i (form/count-of types)))
+    0
+    (let [_ (if (>= i from)
+              (require-expression-type! (form/nth-of types i) expected (form/nth-of args i))
+              0)]
+      (spec-all! from expected args types (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn spec-checks! [checks [:ref :form/r] i :i64 args [:ref :form/r] types [:ref :form/r]] :i64
+  (if (>= i (form/count-of checks))
+    0
+    (let [check (form/nth-of checks i)
+          _ (if (form/is-keyword? (form/nth-of check 0))
+              (spec-all! (form/int-value (form/nth-of check 1)) (form/nth-of check 2) args types 0)
+              (require-expression-type! (form/nth-of types (form/int-value (form/nth-of check 0)))
+                                        (form/nth-of check 1)
+                                        (form/nth-of args (form/int-value (form/nth-of check 0)))))]
+      (spec-checks! checks (+ i 1) args types))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-spec [c [:ref :ie/ctx] run :i64 op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (let [entry (form/form-get (form/nth-of (form/form-get (ctx-tbl c) (form/keyword-form :specs)) run) op)
+        _ (spec-checks! (form/nth-of entry 0) 0 args types)]
+    (ie-r (form/nth-of entry 1) c)))
+   :default nil)
+
+#?(:kotoba
+(defn all-i64! [args [:ref :form/r] types [:ref :form/r]] :i64
+  (spec-all! 0 (tk :i64) args types 0))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-arith [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (if (or (sym-is? op "+") (sym-is? op "-") (sym-is? op "*"))
+    (let [t (numeric-operand-type! op args types (ctx-final? c))]
+      (ie-r t c))
+    (let [_ (all-i64! args types)]
+      (ie-r (tk :i64) c))))
+   :default nil)
+
+#?(:kotoba
+(defn fdiv-check! [t [:ref :form/r] op [:ref :form/r] args [:ref :form/r]] :i64
+  (if (ty? t :i64)
+    (throw (fe-reject "/ has no i64 reading -- integer division is quot; / resolves to f64-div or f32-div by operand type"
+                      "kotoba.error/numeric-type-mismatch" (call-form op args)))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-fdiv [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (let [t (numeric-operand-type! op args types (ctx-final? c))
+        _ (fdiv-check! t op args)]
+    (ie-r t c)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-all-i64 [c [:ref :ie/ctx] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (let [_ (all-i64! args types)]
+    (ie-r (tk :i64) c)))
+   :default nil)
+
+#?(:kotoba
+(defn float-in-types? [types [:ref :form/r]] :bool
+  (not (form/is-nil? (first-float-type types 0))))
+   :default nil)
+
+#?(:kotoba
+(defn eq-same-type! [args [:ref :form/r] types [:ref :form/r]] :i64
+  (if (form/eq (form/nth-of types 0) (form/nth-of types 1))
+    0
+    (throw (fe-reject "equality operands must have the same value type" "kotoba.error/subset-reject" args))))
+   :default nil)
+
+#?(:kotoba
+(defn eq-safe-profile! [args [:ref :form/r] types [:ref :form/r]] :i64
+  (let [t0 (form/nth-of types 0)]
+    (if (or (ty? t0 :i64) (ty? t0 :keyword) (ty? t0 :bool) (ty? t0 :option-i64) (ty? t0 :result-i64)
+            (ty? t0 :vector-i64) (ty? t0 :string) (parametric-result-type? t0))
+      0
+      (throw (fe-reject (str "equality type is outside the safe value profile"
+                             (if (ty? t0 :string) " -- use string=? for string equality" ""))
+                        "kotoba.error/subset-reject" args)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-eq [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (if (float-in-types? types)
+    (let [_ (numeric-operand-type! op args types (ctx-final? c))]
+      (ie-r (tk :bool) c))
+    (let [_ (eq-same-type! args types)
+          _ (eq-safe-profile! args types)]
+      (ie-r (tk :bool) c))))
+   :default nil)
+
+#?(:kotoba
+(defn vc-check! [t [:ref :form/r] arg [:ref :form/r]] :i64
+  (if (or (ty? t :vector-i64) (canonical-list-type? t))
+    0
+    (require-expression-type! t (tk :vector-i64) arg)))
+   :default nil)
+
+#?(:kotoba
+(defn doc-key-check! [key-type [:ref :form/r] key-form [:ref :form/r] message :string] :i64
+  (if (or (ty? key-type :keyword) (ty? key-type :document))
+    0
+    (throw (fe-reject message "kotoba.error/subset-reject" key-form))))
+   :default nil)
+
+#?(:kotoba
+(defn docmap-each! [args [:ref :form/r] types [:ref :form/r] i :i64] :i64
+  (if (>= (+ i 1) (form/count-of args))
+    0
+    (let [_ (doc-key-check! (form/nth-of types i) (form/nth-of args i) "document-map key must be keyword or document")
+          _ (require-expression-type! (form/nth-of types (+ i 1)) (tk :document) (form/nth-of args (+ i 1)))]
+      (docmap-each! args types (+ i 2)))))
+   :default nil)
+
+#?(:kotoba
+(defn pairs-each! [args [:ref :form/r] types [:ref :form/r] i :i64 kt [:ref :form/r] vt [:ref :form/r]] :i64
+  (if (>= (+ i 1) (form/count-of args))
+    0
+    (let [_ (require-expression-type! (form/nth-of types i) kt (form/nth-of args i))
+          _ (require-expression-type! (form/nth-of types (+ i 1)) vt (form/nth-of args (+ i 1)))]
+      (pairs-each! args types (+ i 2) kt vt))))
+   :default nil)
+
+#?(:kotoba
+(defn string-join-check! [args [:ref :form/r]] :i64
+  (if (= 0 (form/count-of args))
+    (throw (fe-reject "string-join requires a separator string" "kotoba.error/subset-reject" args))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn record-fields-of [descriptor [:ref :form/r]] [:ref :form/r]
+  (if (and (form/is-vec? descriptor) (> (form/count-of descriptor) 0) (ty? (form/nth-of descriptor 0) :record))
+    (form/nth-of descriptor 2)
+    (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+(defn cas-won-check! [fields [:ref :form/r] arg [:ref :form/r]] :i64
+  (if (and (> (form/count-of fields) 0) (ty? (form/nth-of (form/nth-of fields 0) 1) :bool))
+    0
+    (throw (fe-reject "object-cas-won requires a record whose first field is bool" "kotoba.error/subset-reject" arg))))
+   :default nil)
+
+#?(:kotoba
+(defn bytes-field-check! [o :string field [:ref :form/r] arg [:ref :form/r]] :i64
+  (if (ty? (form/nth-of field 1) :string)
+    0
+    (throw (fe-reject (str o " requires a record bytes field") "kotoba.error/subset-reject" arg))))
+   :default nil)
+
+#?(:kotoba
+(defn status-field-check! [fields [:ref :form/r] arg [:ref :form/r]] :i64
+  (if (ty? (form/nth-of (form/nth-of fields 0) 1) :i64)
+    0
+    (throw (fe-reject "http-response-status requires a record status field" "kotoba.error/subset-reject" arg))))
+   :default nil)
+
+#?(:kotoba
+(defn arena-scope-check! [type [:ref :form/r] op [:ref :form/r] args [:ref :form/r]] :i64
+  (if (or (ty? type :i64) (ty? type :bool) (ty? type :f64))
+    0
+    (throw (fe-reject (str "arena-scope body must be :i64, :bool or :f64, got " (pr-form type)
+                           ": a handle would escape the region it is released with")
+                      "kotoba.error/arena-scope-body-not-scalar" (call-form op args)))))
+   :default nil)
+
+#?(:kotoba
+(defn signature-checks! [args [:ref :form/r] types [:ref :form/r] expected [:ref :form/r] i :i64] :i64
+  (if (or (>= i (form/count-of args)) (>= i (form/count-of types)) (>= i (form/count-of expected)))
+    0
+    (let [_ (require-expression-type! (form/nth-of types i) (form/nth-of expected i) (form/nth-of args i))]
+      (signature-checks! args types expected (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-signature [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [sig (form/form-get sigs op)
+        expected (fget sig :param-types)
+        result (fget sig :result)]
+    (if (and (record-get [:ref :ie/ctx] c :recording) (fl-has? (form/kids-of (record-get [:ref :ie/ctx] c :names)) op 0))
+      (ie-r result (record-assoc [:ref :ie/ctx] c :recorded (form/assoc-form (record-get [:ref :ie/ctx] c :recorded) op types)))
+      (let [_ (signature-checks! args types expected 0)]
+        (ie-r result c)))))
+   :default nil)
+
+#?(:kotoba
+(defn conj-onto? [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] :bool
+  (and (ie-tbl-has? c :set-operations op)
+       (> (form/count-of args) 1)
+       (or (and (sym-is? op "conj") (or (ty? (form/nth-of types 0) :vector-i64) (ty? (form/nth-of types 0) :vector-f64)))
+           (typed-set-type? (form/nth-of types 0)))))
+   :default nil)
+
+#?(:kotoba
+(defn library-head-arity! [op [:ref :form/r] args [:ref :form/r]] :i64
+  (if (= 1 (form/count-of args))
+    0
+    (throw (fe-reject (str (form-text op) " requires exactly one operand") "kotoba.error/library-head-shape" (call-form op args)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-library [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r]] [:ref :ie/r]
+  (let [_ (library-head-arity! op args)
+        _ (library-predicate-answer! op (form/nth-of types 0) (form/nth-of args 0))]
+    (ie-r (tk :bool) c)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-row [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (row-op-fields c op args types locals sigs (call-form op args))]
+    (ie-r (row-op-result-type (form/nth-of types 0) (ie-type r) (ctx-schemas c) (ctx-row-schemas c)) (ie-ctx r))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-call-cond [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (cond
+    (ie-tbl-has? c :arithmetic op) (ie-call-arith c op args types)
+    (ie-tbl-has? c :float-division-heads op) (ie-call-fdiv c op args types)
+    (ie-tbl-has? c :i64-operations op) (ie-call-all-i64 c args types)
+    (ie-tbl-has? c :i32-operations op) (ie-call-all-i64 c args types)
+    (sym-is? op "=") (ie-call-eq c op args types)
+    (spec-key-op? c 0 op) (ie-call-spec c 0 op args types)
+    (sym-is? op "option-none") (ie-r (tk :option-i64) c)
+    (spec-key-op? c 1 op) (ie-call-spec c 1 op args types)
+    (sym-is? op "vector-count")
+    (let [_ (vc-check! (form/nth-of types 0) (form/nth-of args 0))]
+      (ie-r (tk :i64) c))
+    (spec-key-op? c 2 op) (ie-call-spec c 2 op args types)
+    (sym-is? op "string-index-new") (ie-r (tk :string-index) c)
+    (spec-key-op? c 3 op) (ie-call-spec c 3 op args types)
+    (sym-is? op "document-null") (ie-r (tk :document) c)
+    (spec-key-op? c 4 op) (ie-call-spec c 4 op args types)
+    (sym-is? op "document-map")
+    (let [_ (docmap-each! args types 0)]
+      (ie-r (tk :document) c))
+    (spec-key-op? c 5 op) (ie-call-spec c 5 op args types)
+    (sym-is? op "document-contains")
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :document) (form/nth-of args 0))
+          _ (doc-key-check! (form/nth-of types 1) (form/nth-of args 1) "document map key must be keyword or document")]
+      (ie-r (tk :bool) c))
+    (spec-key-op? c 6 op) (ie-call-spec c 6 op args types)
+    (sym-is? op "document-get")
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :document) (form/nth-of args 0))
+          _ (doc-key-check! (form/nth-of types 1) (form/nth-of args 1) "document map key must be keyword or document")]
+      (ie-r (option-of (tk :document)) c))
+    (sym-is? op "document-assoc")
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :document) (form/nth-of args 0))
+          _ (doc-key-check! (form/nth-of types 1) (form/nth-of args 1) "document map key must be keyword or document")
+          _ (require-expression-type! (form/nth-of types 2) (tk :document) (form/nth-of args 2))]
+      (ie-r (tk :document) c))
+    (sym-is? op "document-dissoc")
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :document) (form/nth-of args 0))
+          _ (doc-key-check! (form/nth-of types 1) (form/nth-of args 1) "document map key must be keyword or document")]
+      (ie-r (tk :document) c))
+    (spec-key-op? c 7 op) (ie-call-spec c 7 op args types)
+    (and (ie-tbl-has? c :comparisons op) (not (sym-is? op "=")))
+    (let [_ (numeric-operand-type! op args types (ctx-final? c))]
+      (ie-r (tk :bool) c))
+    (ie-tbl-has? c :heap-operations op) (ie-call-all-i64 c args types)
+    (ie-tbl-has? c :kgraph-operations op) (ie-call-all-i64 c args types)
+    (or (ie-tbl-has? c :kernel-memory-operations op) (ie-tbl-has? c :kernel-privileged-operations op)) (ie-call-all-i64 c args types)
+    (ie-tbl-has? c :rodata-literal-operations op)
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :string) (form/nth-of args 0))]
+      (ie-r (tk :i64) c))
+    (spec-key-op? c 8 op) (ie-call-spec c 8 op args types)
+    (sym-is? op "string-join")
+    (let [_ (string-join-check! args)
+          _ (spec-all! 0 (tk :string) args types 0)]
+      (ie-r (tk :string) c))
+    (spec-key-op? c 9 op) (ie-call-spec c 9 op args types)
+    (sym-is? op "object-cas-won")
+    (let [_ (cas-won-check! (record-fields-of (form/nth-of types 0)) (form/nth-of args 0))]
+      (ie-r (tk :i64) c))
+    (or (sym-is? op "bytes-response-byte-count") (sym-is? op "log-read-byte-count"))
+    (let [fields (record-fields-of (form/nth-of types 0))
+          field (if (sym-is? op "bytes-response-byte-count") (form/nth-of fields 0) (form/nth-of fields 1))
+          _ (bytes-field-check! (form-text op) field (form/nth-of args 0))]
+      (ie-r (tk :i64) c))
+    (spec-key-op? c 10 op) (ie-call-spec c 10 op args types)
+    (sym-is? op "http-response-status")
+    (let [_ (status-field-check! (record-fields-of (form/nth-of types 0)) (form/nth-of args 0))]
+      (ie-r (tk :i64) c))
+    (spec-key-op? c 11 op) (ie-call-spec c 11 op args types)
+    (sym-is? op "arena-scope")
+    (let [_ (arena-scope-check! (form/nth-of types 0) op args)]
+      (ie-r (form/nth-of types 0) c))
+    (spec-key-op? c 12 op) (ie-call-spec c 12 op args types)
+    (sym-is? op "map-new")
+    (let [_ (pairs-each! args types 0 (tk :keyword) (tk :i64))]
+      (ie-r (tk :map) c))
+    (spec-key-op? c 13 op) (ie-call-spec c 13 op args types)
+    (and (ie-tbl-has? c :row-operation-heads op)
+         (ftruthy? (row-op-record (form/nth-of types 0) (ctx-schemas c) (ctx-row-schemas c))))
+    (ie-call-row c op args types locals sigs)
+    (or (sym-is? op "select-keys") (sym-is? op "merge"))
+    (let [_ (row-op-not-record! (form-text op) (form/nth-of args 0) (form/nth-of types 0) (call-form op args))]
+      (ie-r (tk :map) c))
+    (and (sym-is? op "map-assoc") (ty? (form/nth-of types 0) :document)) (ie-r (tk :document) c)
+    (sym-is? op "map-assoc")
+    (let [_ (require-expression-type! (form/nth-of types 0) (tk :map) (form/nth-of args 0))
+          _ (pairs-each! args types 1 (tk :keyword) (tk :i64))]
+      (ie-r (tk :map) c))
+    (form/form-has? sigs op) (ie-call-signature c op args types sigs)
+    (conj-onto? c op args types) (ie-r (form/nth-of types 0) c)
+    (sym-is? op "__kotoba_document_of")
+    (let [_ (document-of-constructor! c (form/nth-of types 0) (form/nth-of args 0))]
+      (ie-r (tk :document) c))
+    (ie-tbl-has? c :library-predicate-heads op) (ie-call-library c op args types)
+    (ie-tbl-has? c :named-operation-default-results op) (ie-r (ie-tbl-get c :named-operation-default-results op) c)
+    :else (throw (unknown-operation-error op op sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn a [form [:ref :form/r] i :i64] [:ref :form/r]
+  (form/nth-of form (+ i 1)))
+   :default nil)
+
+#?(:kotoba
+(defn argc [form [:ref :form/r]] :i64
+  (- (form/count-of form) 1))
+   :default nil)
+
+#?(:kotoba
+(defn req! [ok :bool msg :string code :string form [:ref :form/r]] :i64
+  (if ok 0 (throw (fe-reject msg code form))))
+   :default nil)
+
+#?(:kotoba
+(defn canon-type [type [:ref :form/r] schemas [:ref :form/r]] [:ref :form/r]
+  (if (and (schema-ref-type? type) (form/is-map? schemas))
+    (let [r (form/form-get schemas (form/nth-of type 1))]
+      (if (form/is-nil? r) type r))
+    type))
+   :default nil)
+
+#?(:kotoba
+(defn hvi! [index [:ref :form/r] item-types [:ref :form/r] form [:ref :form/r]] :i64
+  (if (kotoba-integer? index)
+    (let [host-index (form/int-value index)]
+      (if (and (<= 0 host-index) (< host-index (form/count-of item-types)))
+        host-index
+        (throw (fe-reject "heterogeneous vector index must be in range" "kotoba.error/hetero-vector-index-range" form))))
+    (throw (fe-reject "heterogeneous vector index must be an integer literal" "kotoba.error/hetero-vector-index" form))))
+   :default nil)
+
+#?(:kotoba
+(defn tail-form? [form [:ref :form/r]] :bool
+  (and (form/is-seq? form)
+       (or (sym-is? (form/nth-of form 0) "if") (sym-is? (form/nth-of form 0) "let") (sym-is? (form/nth-of form 0) "do"))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-symbol [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [t (form/form-get locals form)]
+    (if (ftruthy? t)
+      (ie-r t ctx)
+      (throw (unbound-symbol-error "unbound symbol has no value type" form locals sigs)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-let-body [form [:ref :form/r]] [:ref :form/r]
+  (let [n (argc form)
+        bodies (if (> n 0) (- n 1) 0)
+        _ (req! (= bodies 1)
+                (str "let requires one result expression; got " (string-from-i64 bodies) " (sequence with `do`)")
+                "kotoba.error/let-body-multiple-forms" form)]
+    (a form 1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-let-type [type [:ref :form/r] name [:ref :form/r] value [:ref :form/r]] [:ref :form/r]
+  (if (bounded-vector-source-binding? name)
+    (if (or (canonical-list-type? type) (ty? type :document))
+      type
+      (let [_ (require-expression-type! type (tk :vector-i64) value)]
+        (tk :vector-i64)))
+    type))
+   :default nil)
+
+#?(:kotoba
+(defn ie-let-pairs [ctx [:ref :ie/ctx] bindings [:ref :form/r] i :i64 current [:ref :form/r] body [:ref :form/r] form [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (if (< (+ i 1) (form/count-of bindings))
+    (let [name (form/nth-of bindings i)
+          value (form/nth-of bindings (+ i 1))
+          r (ie-infer-t ctx false value current sigs)
+          type (ie-let-type (ie-type r) name value)
+          next-locals (local-state-check-cell-type! name type (form/assoc-form current name type) form)]
+      (ie-let-pairs (ie-ctx r) bindings (+ i 2) next-locals body form sigs))
+    (ie-infer ctx body current sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-let [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [body (ie-let-body form)]
+    (ie-let-pairs ctx (a form 0) 0 locals body form sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-absent [ctx [:ref :ie/ctx] form [:ref :form/r]] [:ref :ie/r]
+  (let [k (a form 0)]
+    (cond
+      (form/eq k (tk :nil)) (ie-r (nil-kind-form) ctx)
+      (form/eq k (tk :none)) (ie-r (none-kind-form) ctx)
+      :else (ie-r (absent-kind-form) ctx))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-present [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (ie-infer ctx (a form 0) locals sigs)
+        t (ie-type r)]
+    (cond
+      (option-vector-type? t) (ie-r (form/nth-of t 1) (ie-ctx r))
+      (ty? t :option-i64) (ie-r (tk :i64) (ie-ctx r))
+      :else r)))
+   :default nil)
+
+#?(:kotoba
+(defn if-test-check! [test-type [:ref :form/r] test [:ref :form/r]] :i64
+  (if (ty? test-type :i64)
+    (throw (fe-reject (str "if test is :i64, and a number is never truthy: "
+                           "compare it (for example (not= x 0)) or answer :bool")
+                      "kotoba.error/subset-reject" test))
+    (if (ty? test-type :bool)
+      0
+      (throw (fe-reject "if test must be bool or an option" "kotoba.error/subset-reject" test)))))
+   :default nil)
+
+#?(:kotoba
+(defn if-join [then-type [:ref :form/r] else-type [:ref :form/r] tail? :bool absent-then? :bool absent-else? :bool form [:ref :form/r]] [:ref :form/r]
+  (cond
+    (absence-kind? else-type) (absence-type then-type (absence-kind-mode else-type))
+    (absence-kind? then-type) (absence-type else-type (absence-kind-mode then-type))
+    (form/eq then-type (abort-bottom-form)) else-type
+    (form/eq else-type (abort-bottom-form)) then-type
+    (form/eq then-type else-type) then-type
+    (same-expression-type? then-type else-type) (if (schema-ref-type? else-type) else-type then-type)
+    (and (or tail? absent-then? absent-else?) (ftruthy? (lenient-branch-join then-type else-type)))
+    (lenient-branch-join then-type else-type)
+    :else (throw (fe-reject "if branches must have the same value type" "kotoba.error/subset-reject" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-if [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [test (a form 0)
+        then (a form 1)
+        else (a form 2)
+        tail? (ctx-tail? ctx)
+        absent-then? (absence-in-tail? then)
+        absent-else? (absence-in-tail? else)
+        r1 (ie-infer-t ctx false test locals sigs)
+        r2 (ie-infer-t (ie-ctx r1) (or tail? absent-else?) then locals sigs)
+        r3 (ie-infer-t (ie-ctx r2) (or tail? absent-then?) else locals sigs)
+        test-type (if (or (option-vector-type? (ie-type r1)) (ty? (ie-type r1) :option-i64)) (tk :bool) (ie-type r1))
+        _ (if-test-check! test-type test)
+        joined (if-join (ie-type r2) (ie-type r3) tail? absent-then? absent-else? form)]
+    (ie-r joined (ie-ctx r3))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-do-each [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 tail? :bool locals [:ref :form/r] sigs [:ref :form/r] last-type [:ref :form/r]] [:ref :ie/r]
+  (if (>= i (argc form))
+    (ie-r last-type ctx)
+    (let [r (ie-infer-t ctx (and tail? (= i (- (argc form) 1))) (a form i) locals sigs)]
+      (ie-do-each (ie-ctx r) form (+ i 1) tail? locals sigs (ie-type r)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-do [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (ie-do-each ctx form 0 (ctx-tail? ctx) locals sigs (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+(defn state-type-of [ctx [:ref :ie/ctx] handler-key [:ref :form/r]] [:ref :form/r]
+  (fget (form/form-get (ctx-handlers ctx) handler-key) :state-type))
+   :default nil)
+
+#?(:kotoba
+(defn state-handler-check! [state-type [:ref :form/r] prefix :string handler-key [:ref :form/r] form [:ref :form/r]] :i64
+  (if (ftruthy? state-type)
+    0
+    (throw (fe-reject (str prefix (form-text handler-key)) "kotoba.error/state-shape" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-state-op [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [handler-key (a form 0)
+        state-type (state-type-of ctx handler-key)
+        _ (state-handler-check! state-type "state operation names no handler: " handler-key form)]
+    (if (form/eq (a form 1) (tk :put))
+      (let [c1 (ie-expect ctx (a form 2) state-type locals sigs)]
+        (ie-r state-type c1))
+      (ie-r state-type ctx))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-state-with [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [handler-key (a form 0)
+        state-type (state-type-of ctx handler-key)
+        _ (state-handler-check! state-type "handle names no handler: " handler-key form)
+        c1 (ie-expect ctx (a form 1) state-type locals sigs)]
+    (ie-infer c1 (a form 2) locals sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn throw-shape-check! [form [:ref :form/r]] :i64
+  (if (= 1 (argc form))
+    0
+    (throw (fe-reject "throw requires exactly one error value" "kotoba.error/abort-shape" form))))
+   :default nil)
+
+#?(:kotoba
+(defn throw-bottom-check! [error-type [:ref :form/r] form [:ref :form/r]] :i64
+  (if (form/eq error-type (abort-bottom-form))
+    (throw (fe-reject "throw of a value that itself always aborts" "kotoba.error/abort-shape" form))
+    0))
+   :default nil)
+
+#?(:kotoba
+(defn ctx-collect [ctx [:ref :ie/ctx] error-type [:ref :form/r]] [:ref :ie/ctx]
+  (if (record-get [:ref :ie/ctx] ctx :collect)
+    (record-assoc [:ref :ie/ctx] ctx :throws (form/append-form (record-get [:ref :ie/ctx] ctx :throws) error-type))
+    ctx))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-throw [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [_ (throw-shape-check! form)
+        r (ie-infer ctx (a form 0) locals sigs)
+        _ (throw-bottom-check! (ie-type r) form)]
+    (ie-r (abort-bottom-form) (ctx-collect (ie-ctx r) (ie-type r)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-try-parts [clause [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+  (let [_ (req! (and (form/is-seq? clause) (sym-is? (form/nth-of clause 0) "catch"))
+                "try requires a (catch [error-type] binder handler) clause" "kotoba.error/abort-shape" form)
+        parts (- (form/count-of clause) 1)
+        _ (req! (or (= parts 2) (= parts 3))
+                "catch requires an optional error type, one binder, and one handler expression"
+                "kotoba.error/abort-shape" form)
+        error-type (if (= parts 3) (form/nth-of clause 1) (form/nil-form))
+        binder (form/nth-of clause (- (form/count-of clause) 2))
+        handler (form/nth-of clause (- (form/count-of clause) 1))
+        _ (req! (and (form/is-symbol? binder) (< (string-find-byte (form/symbol-value binder) 47 0) 0))
+                "catch binder must be an unqualified symbol" "kotoba.error/abort-shape" form)]
+    (form/vec3 (if (form/eq error-type (tk :default)) (form/nil-form) error-type) binder handler)))
+   :default nil)
+
+#?(:kotoba
+(defn candidates-from [thrown [:list [:ref :form/r]] callee [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count callee))
+    acc
+    (let [t (fl-nth callee i)]
+      (candidates-from thrown callee (+ i 1) (if (fl-has? acc t 0) acc (form/append-form acc t))))))
+   :default nil)
+
+#?(:kotoba
+(defn distinct-forms [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count xs))
+    acc
+    (let [t (fl-nth xs i)]
+      (distinct-forms xs (+ i 1) (if (fl-has? acc t 0) acc (form/append-form acc t))))))
+   :default nil)
+
+#?(:kotoba
+(defn try-error-type! [explicit [:ref :form/r] candidates [:list [:ref :form/r]] form [:ref :form/r]] [:ref :form/r]
+  (cond
+    (not (form/is-nil? explicit)) explicit
+    (> (vector-count candidates) 1)
+    (throw (fe-reject (str "try body aborts with two different error types: "
+                           (type-text (fl-nth candidates 0)) " and " (type-text (fl-nth candidates 1)))
+                      "kotoba.error/abort-error-type" form))
+    (= (vector-count candidates) 1) (fl-nth candidates 0)
+    :else (abort-unknown-error-form)))
+   :default nil)
+
+#?(:kotoba
+(defn try-join! [body-type [:ref :form/r] handler-type [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+  (cond
+    (form/eq body-type (abort-bottom-form)) handler-type
+    (form/eq handler-type (abort-bottom-form)) body-type
+    (same-expression-type? body-type handler-type) body-type
+    :else (throw (fe-reject (str "try body and catch handler must have the same value type: "
+                                 (type-text body-type) " and " (type-text handler-type))
+                            "kotoba.error/abort-value-type" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-try [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [body (a form 0)
+        parts (ie-try-parts (a form 1) form)
+        explicit (form/nth-of parts 0)
+        binder (form/nth-of parts 1)
+        handler (form/nth-of parts 2)
+        outer-collect (record-get [:ref :ie/ctx] ctx :collect)
+        outer-throws (record-get [:ref :ie/ctx] ctx :throws)
+        inner (record-assoc [:ref :ie/ctx] (record-assoc [:ref :ie/ctx] ctx :collect true) :throws (form/no-forms))
+        rb (ie-infer inner body locals sigs)
+        thrown (record-get [:ref :ie/ctx] (ie-ctx rb) :throws)
+        restored (record-assoc [:ref :ie/ctx] (record-assoc [:ref :ie/ctx] (ie-ctx rb) :collect outer-collect) :throws outer-throws)
+        candidates (candidates-from thrown (abort-callee-error-types body (record-get [:ref :ie/ctx] ctx :known)) 0 (distinct-forms thrown 0 (form/no-forms)))
+        error-type (try-error-type! explicit candidates form)
+        rh (ie-infer restored handler (form/assoc-form locals binder error-type) sigs)
+        joined (try-join! (ie-type rb) (ie-type rh) form)]
+    (ie-r joined (ie-ctx rh))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-cap-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [request-type (a form 1)
+        result-type (a form 2)
+        _ (type-valid! request-type)
+        _ (type-valid! result-type)
+        c1 (ie-expect ctx (a form 3) request-type locals sigs)]
+    (ie-r result-type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-payload [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] which :i64 result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) (form/nth-of type which) locals sigs)]
+    (ie-r (if (form/is-nil? result) type result) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-validated-value [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)]
+    (ie-r (if (form/is-nil? result) type result) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-value-fallback [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] which :i64] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (form/nth-of type which) locals sigs)]
+    (ie-r (form/nth-of type which) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn branch-types-same! [t1 [:ref :form/r] t2 [:ref :form/r] msg :string form [:ref :form/r]] :i64
+  (if (form/eq t1 t2)
+    0
+    (throw (fe-reject msg "kotoba.error/subset-reject" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-result-match [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        r1 (ie-infer c1 (a form 3) (form/assoc-form locals (a form 2) (form/nth-of type 1)) sigs)
+        r2 (ie-infer (ie-ctx r1) (a form 5) (form/assoc-form locals (a form 4) (form/nth-of type 2)) sigs)
+        _ (branch-types-same! (ie-type r1) (ie-type r2) "result match branches must have the same value type" form)]
+    (ie-r (ie-type r1) (ie-ctx r2))))
+   :default nil)
+
+#?(:kotoba
+(defn variant-payload-type [cases [:ref :form/r] tag [:ref :form/r] i :i64] [:ref :form/r]
+  (if (>= i (form/count-of cases))
+    (form/nil-form)
+    (let [case-pair (form/nth-of cases i)]
+      (if (and (form/eq (form/nth-of case-pair 0) tag) (ftruthy? (form/nth-of case-pair 1)))
+        (form/nth-of case-pair 1)
+        (variant-payload-type cases tag (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+(defn variant-declared! [payload-type [:ref :form/r] form [:ref :form/r]] :i64
+  (if (ftruthy? payload-type)
+    0
+    (throw (fe-reject "variant constructor tag is not declared" "kotoba.error/subset-reject" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-variant-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (canon-type (a form 0) (ctx-schemas ctx))
+        payload-type (variant-payload-type (form/nth-of type 2) (a form 1) 0)
+        _ (type-valid! type)
+        _ (variant-declared! payload-type form)
+        c1 (ie-expect ctx (a form 2) payload-type locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn variant-branches [ctx [:ref :ie/ctx] cases [:ref :form/r] branches [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :ie/r]
+  (if (or (>= i (form/count-of cases)) (>= i (form/count-of branches)))
+    (ie-r (form/form-vec acc) ctx)
+    (let [case-pair (form/nth-of cases i)
+          branch (form/nth-of branches i)
+          r (ie-infer ctx (form/nth-of branch 2) (form/assoc-form locals (form/nth-of branch 1) (form/nth-of case-pair 1)) sigs)]
+      (variant-branches (ie-ctx r) cases branches (+ i 1) locals sigs (form/append-form acc (ie-type r))))))
+   :default nil)
+
+#?(:kotoba
+(defn all-same! [types [:ref :form/r] i :i64 msg :string form [:ref :form/r]] :i64
+  (if (>= (+ i 1) (form/count-of types))
+    0
+    (if (form/eq (form/nth-of types i) (form/nth-of types (+ i 1)))
+      (all-same! types (+ i 1) msg form)
+      (throw (fe-reject msg "kotoba.error/subset-reject" form)))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-variant-match [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (canon-type (a form 0) (ctx-schemas ctx))
+        cases (form/nth-of type 2)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        rb (variant-branches c1 cases (a form 2) 0 locals sigs (form/no-forms))
+        _ (all-same! (ie-type rb) 0 "variant match branches must have the same value type" form)]
+    (ie-r (form/nth-of (ie-type rb) 0) (ie-ctx rb))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-option-match [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        r1 (ie-infer c1 (a form 2) locals sigs)
+        r2 (ie-infer (ie-ctx r1) (a form 4) (form/assoc-form locals (a form 3) (form/nth-of type 1)) sigs)
+        _ (branch-types-same! (ie-type r1) (ie-type r2) "option match branches must have the same value type" form)]
+    (ie-r (ie-type r1) (ie-ctx r2))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-items-expect [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (>= i (argc form))
+    ctx
+    (let [c1 (ie-expect ctx (a form i) expected locals sigs)]
+      (ie-items-expect c1 form (+ i 1) expected locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-list-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-items-expect ctx form 1 (form/nth-of type 1) locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-value-index [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (tk :i64) locals sigs)]
+    (ie-r (if (form/is-nil? result) (form/nth-of type 1) result) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-value-item [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] which :i64] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (form/nth-of type which) locals sigs)]
+    (ie-r type c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-two [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) type locals sigs)]
+    (ie-r result c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-spec [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] entry [:ref :form/r]] [:ref :ie/r]
+  (let [c1 (ie-spec-expect ctx form (form/nth-of entry 0) 0 locals sigs)]
+    (ie-r (form/nth-of entry 1) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-spec-expect [ctx [:ref :ie/ctx] form [:ref :form/r] types [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (>= i (form/count-of types))
+    ctx
+    (let [c1 (ie-expect ctx (a form i) (form/nth-of types i) locals sigs)]
+      (ie-spec-expect c1 form types (+ i 1) locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-hetero-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        item-types (form/nth-of type 1)
+        _ (type-valid! type)
+        c1 (ie-hetero-items ctx form 1 item-types locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-hetero-items [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 item-types [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (or (>= i (argc form)) (>= (- i 1) (form/count-of item-types)))
+    ctx
+    (let [c1 (ie-expect ctx (a form i) (form/nth-of item-types (- i 1)) locals sigs)]
+      (ie-hetero-items c1 form (+ i 1) item-types locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-hetero-at [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        item-types (form/nth-of type 1)
+        host-index (hvi! (a form 2) item-types form)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)]
+    (ie-r (form/nth-of item-types host-index) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-hetero-assoc [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        item-types (form/nth-of type 1)
+        host-index (hvi! (a form 2) item-types form)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 3) (form/nth-of item-types host-index) locals sigs)]
+    (ie-r type c2)))
+   :default nil)
+
+#?(:kotoba
+(defn set-item-mismatch! [type [:ref :form/r] expected [:ref :form/r] actual [:ref :form/r] item [:ref :form/r]] [:ref :form/r]
+  (throw (fe-reject-data (str "set item type mismatch: this set is " (pr-form type)
+                              ", so every item must be " (pr-form expected)
+                              "; this one is " (pr-form actual)
+                              ". A `#{...}` literal is [:set :keyword], [:set :string] or "
+                              "[:set :i64] by its items; one mixing item types is outside "
+                              "the bounded profile. Write "
+                              "(typed-set-new [:set item-type] item ...) for any other "
+                              "item type.")
+                         "kotoba.error/subset-reject" item (expected-actual-data expected actual))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-set-items [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 type [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (>= i (argc form))
+    ctx
+    (let [c1 (ie-set-item! ctx type (a form i) locals sigs)]
+      (ie-set-items c1 form (+ i 1) type locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-set-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-set-items ctx form 1 type locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-set-item [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-set-item! c1 type (a form 2) locals sigs)]
+    (ie-r (if (form/is-nil? result) type result) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-map-entries [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 key-type [:ref :form/r] value-type [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (>= (+ i 1) (argc form))
+    ctx
+    (let [c1 (ie-expect ctx (a form i) key-type locals sigs)
+          c2 (ie-expect c1 (a form (+ i 1)) value-type locals sigs)]
+      (ie-map-entries c2 form (+ i 2) key-type value-type locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        key-type (form/nth-of type 1)
+        value-type (form/nth-of type 2)
+        _ (type-valid! type)
+        c1 (ie-map-entries ctx form 1 key-type value-type locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-key [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (form/nth-of type 1) locals sigs)]
+    (ie-r (if (form/is-nil? result) type result) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-assoc [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (form/nth-of type 1) locals sigs)
+        c3 (ie-expect c2 (a form 3) (form/nth-of type 2) locals sigs)]
+    (ie-r type c3)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-keys [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] keys? :bool] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)]
+    (ie-r (form/vec2 (tk :list) (if keys? (form/nth-of type 1) (form/nth-of type 2))) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-entry-at [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (tk :i64) locals sigs)]
+    (ie-r (option-of (form/vec2 (tk :vector) (form/vec2 (form/nth-of type 1) (form/nth-of type 2)))) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn err-with-use-site [e [:ref :fe/err] use-site [:ref :form/r]] [:ref :fe/err]
+  (record-new [:ref :fe/err] (record-get [:ref :fe/err] e :msg) (record-get [:ref :fe/err] e :code)
+              (record-get [:ref :fe/err] e :form) (record-get [:ref :fe/err] e :phase)
+              (form/assoc-form (record-get [:ref :fe/err] e :data) (form/keyword-form :kotoba.error/use-site) use-site)))
+   :default nil)
+
+#?(:kotoba
+(defn use-site-rethrow [e [:ref :fe/err] op [:ref :form/r] args [:ref :form/r]] [:ref :ie/r]
+  (let [data (record-get [:ref :fe/err] e :data)
+        phase (record-get [:ref :fe/err] e :phase)]
+    (if (and (not (string=? phase ""))
+             (not (form/form-has? data (form/keyword-form :kotoba.error/use-site)))
+             (fl-has? (form/kids-of args) (record-get [:ref :fe/err] e :form) 0))
+      (throw (err-with-use-site e (call-form op args)))
+      (throw e))))
+   :default nil)
+
+#?(:kotoba
+(defn args3 [value [:ref :form/r] key [:ref :form/r] default [:ref :form/r]] [:ref :form/r]
+  (form/form-vec (form/append-form (form/append-form (form/one-form value) key) default)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-map-get-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (ie-call-top ctx (form/symbol-form "map-get")
+               (args3 (a form 0) (a form 1) (if (= 3 (argc form)) (a form 2) (form/int-form 0)))
+               locals sigs))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-destructure-get [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [value (a form 0)
+        key (a form 1)
+        default (a form 2)
+        r (ie-infer ctx value locals sigs)
+        value-type (ie-type r)
+        descriptor (resolve-ref-type value-type (ctx-schemas ctx))
+        c1 (ie-ctx r)]
+    (cond
+      (canonical-typed-map-type? value-type)
+      (let [_ (req! (= 3 (argc form)) "typed-map destructuring requires an :or default" "kotoba.error/destructure-default" form)
+            c2 (ie-expect c1 key (form/nth-of value-type 1) locals sigs)
+            c3 (ie-expect c2 default (form/nth-of value-type 2) locals sigs)]
+        (ie-r (form/nth-of value-type 2) c3))
+      (record-type? descriptor)
+      (let [ft (record-field-type descriptor key (ctx-schemas ctx))
+            _ (req! (ftruthy? ft) "record field is not declared" "kotoba.error/record-field" form)]
+        (ie-r ft c1))
+      :else (ie-map-get-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn literal-default? [default [:ref :form/r]] :bool
+  (or (form/is-symbol? default) (form/is-keyword? default) (form/is-string? default)
+      (form/is-bool? default) (kotoba-integer? default) (form/is-f64? default)))
+   :default nil)
+
+#?(:kotoba
+(defn default-literal! [default [:ref :form/r] key [:ref :form/r] descriptor [:ref :form/r] form [:ref :form/r]] :i64
+  (if (literal-default? default)
+    0
+    (throw (fe-reject (str "the default of " (pr-form key) " on record " (form-text (form/nth-of descriptor 1))
+                           " is never evaluated, because the record has that field:"
+                           " write the default as a literal or a local")
+                      "kotoba.error/record-projection-unresolved" form))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-get [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [value (a form 0)
+        key (a form 1)
+        default (a form 2)
+        r (ie-infer ctx value locals sigs)
+        value-type (ie-type r)
+        descriptor (resolve-ref-type value-type (ctx-schemas ctx))
+        c1 (ie-ctx r)]
+    (cond
+      (ty? value-type :document)
+      (if (= 3 (argc form)) (ie-r (tk :document) c1) (ie-r (option-of (tk :document)) c1))
+      (canonical-typed-map-type? value-type)
+      (let [c2 (ie-expect c1 key (form/nth-of value-type 1) locals sigs)]
+        (if (= 3 (argc form))
+          (let [c3 (ie-expect c2 default (form/nth-of value-type 2) locals sigs)]
+            (ie-r (form/nth-of value-type 2) c3))
+          (ie-r (option-of (form/nth-of value-type 2)) c2)))
+      (and (record-type? descriptor) (= 3 (argc form)) (form/is-keyword? key))
+      (record-get-default-type c1 descriptor key default form locals sigs)
+      (record-type? descriptor)
+      (let [_ (req! (= 2 (argc form)) "record get requires a value and one keyword field" "kotoba.error/record-projection-unresolved" form)
+            ft (record-field-type descriptor key (ctx-schemas ctx))
+            _ (req! (ftruthy? ft) "record field is not declared" "kotoba.error/record-field" form)]
+        (ie-r ft c1))
+      :else (ie-map-get-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arg0-type [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (if (= 1 (argc form))
+    (ie-infer ctx (a form 0) locals sigs)
+    (ie-r (form/nil-form) ctx)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-default-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (ie-call-top ctx (form/nth-of form 0) (vec-of form) locals sigs))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-count [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (ie-arg0-type ctx form locals sigs)
+        t (ie-type r)]
+    (if (or (ty? t :vector-i64) (ty? t :vector-f64) (heterogeneous-vector-type? t) (typed-set-type? t)
+            (canonical-typed-map-type? t) (canonical-list-type? t))
+      (ie-r (tk :i64) (ie-ctx r))
+      (ie-default-call (ie-ctx r) form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-peek-pop [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] peek? :bool] [:ref :ie/r]
+  (let [r (ie-arg0-type ctx form locals sigs)
+        t (ie-type r)
+        c1 (ie-ctx r)]
+    (cond
+      (ty? t :vector-i64) (ie-r (if peek? (tk :i64) (tk :vector-i64)) c1)
+      (ty? t :vector-f64) (ie-r (if peek? (tk :f64) (tk :vector-f64)) c1)
+      :else (ie-default-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-keys-vals [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] keys? :bool] [:ref :ie/r]
+  (let [r (ie-arg0-type ctx form locals sigs)
+        t (ie-type r)
+        c1 (ie-ctx r)]
+    (cond
+      (canonical-typed-map-type? t)
+      (ie-r (form/vec2 (tk :list) (if keys? (form/nth-of t 1) (form/nth-of t 2))) c1)
+      (ty? t :document) (ie-r (tk :document) c1)
+      :else (ie-default-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-pair [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] first? :bool] [:ref :ie/r]
+  (let [r (ie-arg0-type ctx form locals sigs)
+        t (ie-type r)
+        c1 (ie-ctx r)]
+    (cond
+      (ty? t :vector-i64) (ie-r (if first? (tk :i64) (tk :vector-i64)) c1)
+      (ty? t :vector-f64) (ie-r (if first? (tk :f64) (tk :vector-f64)) c1)
+      (ty? t :document) (ie-r (tk :document) c1)
+      :else (ie-default-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn nth-arity! [form [:ref :form/r] msg :string code :string] :i64
+  (req! (and (<= 2 (argc form)) (<= (argc form) 3)) msg code form))
+   :default nil)
+
+#?(:kotoba
+(defn ie-nth-call [ctx [:ref :ie/ctx] form [:ref :form/r] name-3 :string name-2 :string locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [_ (nth-arity! form "vector nth requires value, index, and optional default" "kotoba.error/subset-reject")]
+    (ie-call-top ctx (form/symbol-form (if (= 3 (argc form)) name-3 name-2)) (vec-of form) locals sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-nth-hetero [ctx [:ref :ie/ctx] form [:ref :form/r] value-type [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [_ (nth-arity! form "heterogeneous vector nth requires a value, one literal index, and an optional default" "kotoba.error/hetero-vector-index")
+        item-types (form/nth-of value-type 1)
+        host-index (hvi! (a form 1) item-types form)
+        item-type (form/nth-of item-types host-index)]
+    (if (= 3 (argc form))
+      (let [c1 (ie-expect ctx (a form 2) item-type locals sigs)]
+        (ie-r item-type c1))
+      (ie-r item-type ctx))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-nth [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (ie-infer ctx (a form 0) locals sigs)
+        value-type (ie-type r)
+        c1 (ie-ctx r)]
+    (cond
+      (and (ty? value-type :document) (= 2 (argc form))) (ie-r (tk :document) c1)
+      (heterogeneous-vector-type? value-type) (ie-nth-hetero c1 form value-type locals sigs)
+      (ty? value-type :vector-i64) (ie-nth-call c1 form "vector-get" "vector-at" locals sigs)
+      (ty? value-type :vector-f64) (ie-nth-call c1 form "vector-f64-get" "vector-f64-at" locals sigs)
+      (canonical-list-type? value-type)
+      (if (= 2 (argc form))
+        (ie-r (form/nth-of value-type 1) c1)
+        (ie-default-call c1 form locals sigs))
+      :else (ie-default-call c1 form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-record-new [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        fields (form/nth-of type 2)
+        _ (type-valid! type)
+        c1 (ie-record-items ctx form fields 0 locals sigs)]
+    (ie-r type c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-record-items [ctx [:ref :ie/ctx] form [:ref :form/r] fields [:ref :form/r] i :i64 locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (if (or (>= i (form/count-of fields)) (>= (+ i 1) (argc form)))
+    ctx
+    (let [pair (form/nth-of fields i)
+          item (a form (+ i 1))
+          r (ie-infer ctx item locals sigs)
+          _ (require-field-value-type! (ie-type r) (form/nth-of pair 1) item (form/nth-of pair 0))]
+      (ie-record-items (ie-ctx r) form fields (+ i 1) locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn declared-field-type [fields [:ref :form/r] field [:ref :form/r] i :i64] [:ref :form/r]
+  (if (>= i (form/count-of fields))
+    (form/nil-form)
+    (let [pair (form/nth-of fields i)]
+      (if (and (form/eq (form/nth-of pair 0) field) (ftruthy? (form/nth-of pair 1)))
+        (form/nth-of pair 1)
+        (declared-field-type fields field (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+(defn record-get-parts [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (if (= 2 (argc form))
+    (let [r (ie-infer ctx (a form 0) locals sigs)
+          _ (req! (record-type? (ie-type r))
+                  (str "record-get without a type descriptor requires a record value; got " (pr-form (ie-type r)))
+                  "kotoba.error/subset-reject" form)]
+      (ie-r (form/vec3 (ie-type r) (a form 0) (a form 1)) (ie-ctx r)))
+    (ie-r (form/vec3 (a form 0) (a form 1) (a form 2)) ctx)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-record-get [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [pr (record-get-parts ctx form locals sigs)
+        parts (ie-type pr)
+        type (form/nth-of parts 0)
+        value (form/nth-of parts 1)
+        field (form/nth-of parts 2)
+        field-type (declared-field-type (form/nth-of type 2) field 0)
+        _ (type-valid! type)
+        c1 (ie-expect (ie-ctx pr) value type locals sigs)]
+    (ie-r (if (callable-type? field-type) (tk :i64) field-type) c1)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-record-assoc [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        field (a form 2)
+        replacement (a form 3)
+        field-type (declared-field-type (form/nth-of type 2) field 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        r (ie-infer c1 replacement locals sigs)
+        _ (require-field-value-type! (ie-type r) field-type replacement replacement)]
+    (ie-r type (ie-ctx r))))
+   :default nil)
+
+#?(:kotoba
+(defn arm-spec-entry [ctx [:ref :ie/ctx] op [:ref :form/r]] [:ref :form/r]
+  (tables/table-get (form/form-get (ctx-tbl ctx) (form/keyword-form :arm-specs)) op))
+   :default nil)
+
+#?(:kotoba
+(defn ie-seq [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [op (form/nth-of form 0)
+        h (if (form/is-symbol? op) (form/symbol-value op) "")
+        spec (arm-spec-entry ctx op)]
+    (if (and (form/is-symbol? op) (ftruthy? spec))
+      (ie-arm-spec ctx form locals sigs spec)
+      (ie-seq-head ctx h form locals sigs))))
+   :default nil)
+
+#?(:kotoba
+(defn ie-seq-head [ctx [:ref :ie/ctx] h :string form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (cond
+    (string=? h "let") (ie-arm-let ctx form locals sigs)
+    (string=? h "__kotoba_absent") (ie-arm-absent ctx form)
+    (string=? h "__kotoba_present") (ie-arm-present ctx form locals sigs)
+    (string=? h "if") (ie-arm-if ctx form locals sigs)
+    (string=? h "do") (ie-arm-do ctx form locals sigs)
+    (string=? h "__kotoba_state_op") (ie-arm-state-op ctx form locals sigs)
+    (string=? h "__kotoba_state_with") (ie-arm-state-with ctx form locals sigs)
+    (string=? h "throw") (ie-arm-throw ctx form locals sigs)
+    (string=? h "try") (ie-arm-try ctx form locals sigs)
+    :else (ie-seq-head2 ctx h form locals sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-seq-head2 [ctx [:ref :ie/ctx] h :string form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (cond
+    (string=? h "typed-cap-call") (ie-arm-typed-cap-call ctx form locals sigs)
+    (string=? h "result-ok-of") (ie-arm-payload ctx form locals sigs 1 (form/nil-form))
+    (string=? h "result-err-of") (ie-arm-payload ctx form locals sigs 2 (form/nil-form))
+    (string=? h "result-ok?-of") (ie-arm-validated-value ctx form locals sigs (tk :bool))
+    (string=? h "result-value-of") (ie-arm-value-fallback ctx form locals sigs 1)
+    (string=? h "result-error-of") (ie-arm-value-fallback ctx form locals sigs 2)
+    (string=? h "result-match-of") (ie-arm-result-match ctx form locals sigs)
+    (string=? h "variant-new") (ie-arm-variant-new ctx form locals sigs)
+    (string=? h "variant-match") (ie-arm-variant-match ctx form locals sigs)
+    (string=? h "option-some-of") (ie-arm-payload ctx form locals sigs 1 (form/nil-form))
+    (string=? h "option-none-of") (ie-arm-option-none ctx form)
+    (string=? h "option-some?-of") (ie-arm-validated-value ctx form locals sigs (tk :bool))
+    (string=? h "option-value-of") (ie-arm-value-fallback ctx form locals sigs 1)
+    (string=? h "option-match") (ie-arm-option-match ctx form locals sigs)
+    (string=? h "typed-list-new") (ie-arm-typed-list-new ctx form locals sigs)
+    (string=? h "typed-list-nth") (ie-arm-typed-value-index ctx form locals sigs (form/nil-form))
+    (string=? h "typed-list-conj") (ie-arm-typed-value-item ctx form locals sigs 1)
+    (string=? h "hetero-vector-new") (ie-arm-hetero-new ctx form locals sigs)
+    (string=? h "hetero-vector-count") (ie-arm-validated-value ctx form locals sigs (tk :i64))
+    (string=? h "hetero-vector-at") (ie-arm-hetero-at ctx form locals sigs)
+    (string=? h "__kotoba_destructure_get") (ie-arm-destructure-get ctx form locals sigs)
+    (string=? h "get") (ie-arm-get ctx form locals sigs)
+    (string=? h "count") (ie-arm-count ctx form locals sigs)
+    (string=? h "peek") (ie-arm-peek-pop ctx form locals sigs true)
+    (string=? h "pop") (ie-arm-peek-pop ctx form locals sigs false)
+    (string=? h "keys") (ie-arm-keys-vals ctx form locals sigs true)
+    (string=? h "vals") (ie-arm-keys-vals ctx form locals sigs false)
+    (string=? h "pair-first") (ie-arm-pair ctx form locals sigs true)
+    (string=? h "pair-second") (ie-arm-pair ctx form locals sigs false)
+    (string=? h "nth") (ie-arm-nth ctx form locals sigs)
+    :else (ie-seq-head3 ctx h form locals sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-option-none [ctx [:ref :ie/ctx] form [:ref :form/r]] [:ref :ie/r]
+  (let [_ (type-valid! (a form 0))]
+    (ie-r (a form 0) ctx)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-seq-head3 [ctx [:ref :ie/ctx] h :string form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (cond
+    (string=? h "hetero-vector-assoc") (ie-arm-hetero-assoc ctx form locals sigs)
+    (string=? h "hetero-vector-equal") (ie-arm-typed-two ctx form locals sigs (tk :i64))
+    (string=? h "typed-set-new") (ie-arm-typed-set-new ctx form locals sigs)
+    (string=? h "typed-set-count") (ie-arm-validated-value ctx form locals sigs (tk :i64))
+    (string=? h "typed-set-contains") (ie-arm-typed-set-item ctx form locals sigs (tk :bool))
+    (string=? h "typed-set-conj") (ie-arm-typed-set-item ctx form locals sigs (form/nil-form))
+    (string=? h "typed-set-disj") (ie-arm-typed-set-item ctx form locals sigs (form/nil-form))
+    (string=? h "typed-set-equal") (ie-arm-typed-two ctx form locals sigs (tk :i64))
+    (string=? h "typed-set-nth") (ie-arm-typed-value-index ctx form locals sigs (form/nil-form))
+    (string=? h "typed-map-new") (ie-arm-typed-map-new ctx form locals sigs)
+    (string=? h "typed-map-count") (ie-arm-validated-value ctx form locals sigs (tk :i64))
+    (string=? h "typed-map-contains") (ie-arm-typed-map-key ctx form locals sigs (tk :bool))
+    (string=? h "typed-map-get") (ie-arm-typed-map-get ctx form locals sigs)
+    (string=? h "typed-map-entry-at") (ie-arm-typed-map-entry-at ctx form locals sigs)
+    (string=? h "typed-map-keys") (ie-arm-typed-map-keys ctx form locals sigs true)
+    (string=? h "typed-map-vals") (ie-arm-typed-map-keys ctx form locals sigs false)
+    (string=? h "typed-map-assoc") (ie-arm-typed-map-assoc ctx form locals sigs)
+    (string=? h "typed-map-dissoc") (ie-arm-typed-map-key ctx form locals sigs (form/nil-form))
+    (string=? h "typed-map-equal") (ie-arm-typed-two ctx form locals sigs (tk :i64))
+    (string=? h "record-new") (ie-arm-record-new ctx form locals sigs)
+    (string=? h "record-get") (ie-arm-record-get ctx form locals sigs)
+    (string=? h "record-assoc") (ie-arm-record-assoc ctx form locals sigs)
+    (string=? h "record-equal") (ie-arm-typed-two ctx form locals sigs (tk :i64))
+    :else (ie-default-call ctx form locals sigs)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-arm-typed-map-get [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [type (a form 0)
+        _ (type-valid! type)
+        c1 (ie-expect ctx (a form 1) type locals sigs)
+        c2 (ie-expect c1 (a form 2) (form/nth-of type 1) locals sigs)]
+    (ie-r (option-of (form/nth-of type 2)) c2)))
+   :default nil)
+
+#?(:kotoba
+(defn ie-set-item! [ctx [:ref :ie/ctx] type [:ref :form/r] item [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
+  (let [expected (form/nth-of type 1)
+        r (ie-infer ctx item locals sigs)
+        actual (ie-type r)]
+    (if (or (form/eq actual (abort-bottom-form)) (same-expression-type? actual expected))
+      (let [_ (require-expression-type! actual expected item)]
+        (ie-ctx r))
+      (let [_ (set-item-mismatch! type expected actual item)]
+        (ie-ctx r)))))
+   :default
 (defn require-set-item-type!
   "Require `item` to be the item type of set type `type`, and say which set
   when it is not.
@@ -449,7 +2415,7 @@
                     "item type.")
                item :kotoba.error/subset-reject
                {:kotoba.error/expected expected
-                :kotoba.error/actual actual}))))
+                :kotoba.error/actual actual})))))
 
 ;; --- row operations (ADR 0353 floor :row-operations) ----------------------
 ;;
@@ -469,39 +2435,87 @@
 
 #?(:kotoba nil :default (def row-operation-heads tables/row-operation-heads))
 
-(def ^:dynamic *row-op-schemas*
+#?(:kotoba nil :default (def ^:dynamic *row-op-schemas*
   "The module's schemas for the whole analysis: `*schemas*` is bound only
   around some passes, and a row operation is typed and elaborated in others."
-  nil)
+  nil))
 
+#?(:kotoba
+(defn row-op-record [type [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] [:ref :form/r]
+  (let [record (if (and (schema-ref-type? type) (form/is-nil? (form/form-get schemas (form/nth-of type 1))))
+                 (let [found (form/form-get row-schemas (form/nth-of type 1))]
+                   (if (form/is-nil? found) type found))
+                 (resolve-ref-type type schemas))]
+    (if (record-type? record) record (form/nil-form))))
+   :default
 (defn row-op-record
   "The record descriptor TYPE is (a declared `[:ref ..]` resolved), or nil."
   [type]
   (let [record (if (and (schema-ref-type? type) (not (get *schemas* (second type))))
                  (get (some-> *row-op-schemas* deref) (second type) type)
                  (resolve-ref-type type))]
-    (when (record-type? record) record)))
+    (when (record-type? record) record))))
 
+#?(:kotoba
+(defn row-op-name [type [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] [:ref :form/r]
+  (form/nth-of (row-op-record type schemas row-schemas) 1))
+   :default
 (defn row-op-name [type]
-  (second (row-op-record type)))
+  (second (row-op-record type))))
 
+#?(:kotoba
+(defn row-op-field-type [fields [:ref :form/r] field [:ref :form/r] i :i64] [:ref :form/r]
+  (if (>= i (form/count-of fields))
+    (form/nil-form)
+    (let [pair (form/nth-of fields i)]
+      (if (and (form/eq (form/nth-of pair 0) field) (ftruthy? (form/nth-of pair 1)))
+        (form/nth-of pair 1)
+        (row-op-field-type fields field (+ i 1))))))
+   :default
 (defn row-op-field-type [fields field]
-  (first-truthy (fn [[k t]] (when (= k field) t)) fields))
+  (first-truthy (fn [[k t]] (when (= k field) t)) fields)))
 
+#?(:kotoba
+(defn row-op-key! [op :string type [:ref :form/r] key [:ref :form/r] form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] :i64
+  (if (form/is-keyword? key)
+    0
+    (throw (fe-reject (str op " on record " (form-text (row-op-name type schemas row-schemas)) " needs keyword literal fields: "
+                           "a record's fields are static; " (use-site-text key) " is not a keyword literal")
+                      "kotoba.error/row-operation-shape" form))))
+   :default
 (defn row-op-key! [op type key form]
   (when-not (keyword? key)
     (reject! (str op " on record " (row-op-name type) " needs keyword literal fields: "
                   "a record's fields are static; " (use-site-text key) " is not a keyword literal")
-             form :kotoba.error/row-operation-shape)))
+             form :kotoba.error/row-operation-shape))))
 
+#?(:kotoba
+(defn row-op-field! [op :string type [:ref :form/r] fields [:ref :form/r] key [:ref :form/r] form [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] :i64
+  (let [_ (row-op-key! op type key form schemas row-schemas)
+        _ (row-op-field-missing! op type fields key form schemas row-schemas)]
+    0))
+   :default
 (defn row-op-field! [op type fields key form]
   (row-op-key! op type key form)
   (when-not (row-op-field-type fields key)
     (reject! (str op " names field " key ", which record " (row-op-name type)
                   " does not have: a row shrinks only by fields it has")
              form :kotoba.error/row-field-missing
-             {:kotoba.error/field key :kotoba.error/actual type})))
+             {:kotoba.error/field key :kotoba.error/actual type}))))
 
+#?(:kotoba
+(defn row-op-assoc-fields [fields [:ref :form/r] entries [:ref :form/r] i :i64] [:ref :form/r]
+  (if (>= i (form/count-of entries))
+    fields
+    (let [entry (form/nth-of entries i)
+          key (form/nth-of entry 0)
+          type (form/nth-of entry 1)
+          existing (row-op-field-type fields key 0)]
+      (if (ftruthy? existing)
+        (let [_ (require-expression-type! type existing (form/nth-of entry 2))]
+          (row-op-assoc-fields fields entries (+ i 1)))
+        (row-op-assoc-fields (form/form-vec (form/append-form (form/kids-of fields) (form/vec2 key type))) entries (+ i 1))))))
+   :default
 (defn row-op-assoc-fields
   "FIELDS with every `[key type form]` of ENTRIES assoc'ed: an existing field
   keeps its type and the value must be it; a new one is appended."
@@ -510,16 +2524,42 @@
             (if-let [existing (row-op-field-type fields key)]
               (do (require-expression-type! type existing form) fields)
               (conj fields [key type])))
-          fields entries))
+          fields entries)))
 
+#?(:kotoba
+(defn row-op-literal-entries [form [:ref :form/r]] [:ref :form/r]
+  (if (and (form/is-seq? form) (sym-is? (form/nth-of form 0) "map-new") (row-op-literal-keys? form 1))
+    (form/form-vec (row-op-literal-pairs form 1 (form/no-forms)))
+    (form/nil-form)))
+   :default
 (defn row-op-literal-entries
   "`[[key value] ...]` of a keyword-keyed map literal as desugared
   (`(map-new :k v ...)`), or nil."
   [form]
   (when (and (seq? form) (= 'map-new (first form))
              (every? keyword? (take-nth 2 (rest form))))
-    (mapv vec (partition 2 (rest form)))))
+    (mapv vec (partition 2 (rest form))))))
 
+#?(:kotoba
+(defn row-op-fields [ctx [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] form [:ref :form/r]] [:ref :ie/r]
+  (let [receiver-type (form/nth-of types 0)
+        schemas (ctx-schemas ctx)
+        row-schemas (ctx-row-schemas ctx)
+        fields (form/form-vec (form/kids-of (form/nth-of (row-op-record receiver-type schemas row-schemas) 2)))
+        o (form-text op)]
+    (cond
+      (string=? o "map-assoc")
+      (ie-r (row-op-assoc-entries! receiver-type args types 1 form schemas row-schemas fields) ctx)
+      (or (string=? o "dissoc") (string=? o "select-keys"))
+      (let [ks (form/form-vec (form/rest-list args))
+            _ (row-op-fields-each! o receiver-type fields ks 0 form schemas row-schemas)
+            kept (row-op-filter fields ks (string=? o "select-keys") 0 (form/no-forms))
+            _ (row-op-nonempty! o receiver-type kept form schemas row-schemas)]
+        (ie-r (form/form-vec kept) ctx))
+      (string=? o "merge")
+      (row-op-merge-args ctx receiver-type args types 1 locals sigs form fields)
+      :else (ie-r fields ctx))))
+   :default
 (defn row-op-fields
   "The fields of the record OP makes from ARGS, whose types are TYPES; the
   first is a record."
@@ -559,22 +2599,40 @@
                                   (if (keyword? type) (name type) (pr-str type)))
                              form :kotoba.error/row-operation-shape
                              {:kotoba.error/actual type}))))
-              fields (map vector (rest args) (rest types))))))
+              fields (map vector (rest args) (rest types)))))))
 
+#?(:kotoba
+(defn row-op-result-type [receiver-type [:ref :form/r] fields [:ref :form/r] schemas [:ref :form/r] row-schemas [:ref :form/r]] [:ref :form/r]
+  (if (form/eq (form/form-set (form/kids-of (form/nth-of (row-op-record receiver-type schemas row-schemas) 2)))
+               (form/form-set (form/kids-of fields)))
+    receiver-type
+    (map-literal-record-type (form/form-vec (sort-by-key-text fields 0 (form/no-forms))))))
+   :default
 (defn row-op-result-type
   "RECEIVER-TYPE itself when FIELDS are its fields, else the anonymous closed
   record of FIELDS."
   [receiver-type fields]
   (if (= (set (nth (row-op-record receiver-type) 2)) (set fields))
     receiver-type
-    (map-literal-record-type (vec (sort-by first (map-literal-key-order :keyword) fields)))))
+    (map-literal-record-type (vec (sort-by first (map-literal-key-order :keyword) fields))))))
 
+#?(:kotoba
+(defn row-op-not-record! [op :string receiver [:ref :form/r] type [:ref :form/r] form [:ref :form/r]] :i64
+  (throw (fe-reject-data (str op " is a row operation on a record; " (use-site-text receiver) " is " (type-text type))
+                         "kotoba.error/row-operation-receiver" form
+                         (form/form-map (form/append-form (form/append-form (form/no-forms) (form/keyword-form :kotoba.error/actual)) type)))))
+   :default
 (defn row-op-not-record! [op receiver type form]
   (reject! (str op " is a row operation on a record; " (use-site-text receiver) " is "
                 (if (keyword? type) (name type) (pr-str type)))
            form :kotoba.error/row-operation-receiver
-           {:kotoba.error/actual type}))
+           {:kotoba.error/actual type})))
 
+#?(:kotoba
+(defn ie-call-top [ctx [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (try (ie-call ctx op args locals sigs)
+       (catch [:ref :fe/err] e (use-site-rethrow e op args))))
+   :default
 (defn infer-call-type
   "`infer-call-type-impl`, with the call named on any refusal it raises about
   one of its own arguments: a rejection whose `:form` is one of ARGS and that
@@ -592,10 +2650,31 @@
                     (first-truthy #(= % (:form data)) args))
              (throw (ex-info (ex-message error)
                              (assoc data :kotoba.error/use-site (cons op args))))
-             (throw error))))))
+             (throw error)))))))
 
 #?(:kotoba nil :default (def library-predicate-heads tables/library-predicate-heads))
 
+#?(:kotoba
+(defn library-predicate-static-answer [o :string type [:ref :form/r]] [:ref :form/r]
+  (let [map-type? (or (record-type? type) (canonical-typed-map-type? type) (ty? type :map))
+        vector-type? (or (heterogeneous-vector-type? type) (ty? type :vector-i64) (ty? type :vector-f64))
+        set-type? (typed-set-type? type)
+        list-type? (canonical-list-type? type)]
+    (cond
+      (string=? o "true?") (if (ty? type :bool) (tk :operand) (form/bool-form false))
+      (string=? o "false?") (if (ty? type :bool) (tk :negated) (form/bool-form false))
+      (string=? o "boolean?") (form/bool-form (ty? type :bool))
+      (string=? o "integer?") (form/bool-form (ty? type :i64))
+      (string=? o "string?") (form/bool-form (ty? type :string))
+      (string=? o "keyword?") (form/bool-form (ty? type :keyword))
+      (string=? o "symbol?") (form/bool-form (ty? type :symbol))
+      (string=? o "map?") (form/bool-form map-type?)
+      (string=? o "vector?") (form/bool-form vector-type?)
+      (string=? o "set?") (form/bool-form set-type?)
+      (or (string=? o "list?") (string=? o "seq?")) (form/bool-form list-type?)
+      (string=? o "coll?") (form/bool-form (or map-type? vector-type? set-type? list-type?))
+      :else (form/bool-form false))))
+   :default
 (defn library-predicate-static-answer
   "What `(op x)` is for a value of the static, non-document TYPE: :operand
   (the bool itself), :negated, true or false."
@@ -617,10 +2696,20 @@
       vector? vector-type?
       set? set-type?
       (list? seq?) list-type?
-      coll? (or map-type? vector-type? set-type? list-type?))))
+      coll? (or map-type? vector-type? set-type? list-type?)))))
 
 #?(:kotoba nil :default (def document-of-constructors tables/document-of-constructors))
 
+#?(:kotoba
+(defn document-of-constructor! [c [:ref :ie/ctx] type [:ref :form/r] operand [:ref :form/r]] [:ref :form/r]
+  (cond
+    (ty? type :document) (tk :identity)
+    (ie-tbl-has? c :document-of-constructors type) (ie-tbl-get c :document-of-constructors type)
+    :else (throw (fe-reject (str "ex-info data value " (pr-form operand) " has type " (pr-form type)
+                                 ", which has no document form here: a data map value must be an "
+                                 "i64, string, keyword, bool, f64 or document")
+                            "kotoba.error/library-head-document" operand))))
+   :default
 (defn document-of-constructor!
   "The constructor that makes a value of TYPE a document, `:identity` for a
   document, or a refusal naming the type."
@@ -630,8 +2719,29 @@
         :else (reject! (str "ex-info data value " (pr-str operand) " has type " (pr-str type)
                             ", which has no document form here: a data map value must be an "
                             "i64, string, keyword, bool, f64 or document")
-                       operand :kotoba.error/library-head-document)))
+                       operand :kotoba.error/library-head-document))))
 
+#?(:kotoba
+(defn library-predicate-answer! [op [:ref :form/r] type [:ref :form/r] operand [:ref :form/r]] [:ref :form/r]
+  (let [o (form-text op)]
+    (cond
+      (ty? type :document) (tk :document)
+      (and (schema-ref-type? type) (or (string=? o "map?") (string=? o "coll?")))
+      (throw (fe-reject (str o " on " (pr-form type) " is not decided here: a schema reference "
+                             "names a record or a variant, and only a record is a map; project "
+                             "the value through its declared type")
+                        "kotoba.error/library-head-document" (form/form-seq (form/append-form (form/one-form op) operand))))
+      (or (option-vector-type? type) (ty? type :option-i64))
+      (let [payload (if (ty? type :option-i64) (tk :i64) (form/nth-of type 1))]
+        (if (or (ty? payload :document) (ty? payload :bool))
+          (throw (fe-reject (str o " on " (pr-form type) " depends on the value, not the type: "
+                                 "bind the payload first (when-let / if-let) and ask the payload")
+                            "kotoba.error/library-head-document" (form/form-seq (form/append-form (form/one-form op) operand))))
+          (if (form/eq (library-predicate-static-answer o payload) (form/bool-form true))
+            (tk :present)
+            (form/bool-form false))))
+      :else (library-predicate-static-answer o type))))
+   :default
 (defn library-predicate-answer!
   "What `(op x)` is for an operand of TYPE: :operand, :negated, true, false,
   :document (ask its kind) or :present (ask an option's presence)."
@@ -650,8 +2760,13 @@
                       "bind the payload first (when-let / if-let) and ask the payload")
                  (list op operand) :kotoba.error/library-head-document)
         (if (true? (library-predicate-static-answer op payload)) :present false)))
-    :else (library-predicate-static-answer op type)))
+    :else (library-predicate-static-answer op type))))
 
+#?(:kotoba
+(defn ie-call [c [:ref :ie/ctx] op [:ref :form/r] args [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [tr (ie-infer-args c args 0 locals sigs (form/no-forms))]
+    (ie-call-cond (ie-ctx tr) op args (ie-type tr) locals sigs)))
+   :default
 (defn infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -1349,13 +3464,20 @@
       (contains? named-operation-default-results op)
       (get named-operation-default-results op)
 
-      :else (unknown-operation! op op signatures))))
+      :else (unknown-operation! op op signatures)))))
 
-(def ^:dynamic *absence-tail*
+#?(:kotoba nil :default (def ^:dynamic *absence-tail*
   "True while inferring a tail of the present branch of an absence (see
   `absence-type`): only there does `lenient-branch-join` apply."
-  false)
+  false))
 
+#?(:kotoba
+(defn ie-infer [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (if (and (ctx-tail? ctx) (not (tail-form? form)))
+    (let [r (ie-infer-impl (ctx-tail ctx false) form locals sigs)]
+      (ie-r (ie-type r) (ctx-tail (ie-ctx r) true)))
+    (ie-infer-impl ctx form locals sigs)))
+   :default
 (defn infer-expression-type [form locals signatures]
   (try (if (and *absence-tail*
                 (not (and (seq? form) (contains? '#{if let do} (first form)))))
@@ -1363,8 +3485,18 @@
          ;; thread; every other form is typed as before.
          (binding [*absence-tail* false] (infer-expression-type-impl form locals signatures))
          (infer-expression-type-impl form locals signatures))
-       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form))))
+       (catch #?(:clj Throwable :cljs :default) error (internal-failure! error form)))))
 
+#?(:kotoba
+(defn record-get-default-type [ctx [:ref :ie/ctx] descriptor [:ref :form/r] key [:ref :form/r] default [:ref :form/r] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (let [r (ie-infer ctx default locals sigs)
+        field-type (record-field-type descriptor key (ctx-schemas ctx))]
+    (if (ftruthy? field-type)
+      (let [_ (require-expression-type! (ie-type r) field-type default)
+            _ (default-literal! default key descriptor form)]
+        (ie-r field-type (ie-ctx r)))
+      r)))
+   :default
 (defn record-get-default-type
   "`(get r :k d)` / `(:k r d)` on a record (ADR 0353 floor :literal-typing).
   A record is closed, so whether it has :k is known here: a field it lacks
@@ -1384,8 +3516,20 @@
                           " write the default as a literal or a local")
                      form :kotoba.error/record-projection-unresolved))
           field-type)
-      default-type)))
+      default-type))))
 
+#?(:kotoba
+(defn ie-infer-impl [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/r]
+  (cond
+    (kotoba-integer? form) (ie-r (tk :i64) ctx)
+    (form/is-f64? form) (ie-r (tk :f64) ctx)
+    (form/is-string? form) (ie-r (tk :string) ctx)
+    (form/is-keyword? form) (ie-r (tk :keyword) ctx)
+    (form/is-bool? form) (ie-r (tk :bool) ctx)
+    (form/is-symbol? form) (ie-symbol ctx form locals sigs)
+    (form/is-seq? form) (ie-seq ctx form locals sigs)
+    :else (throw (fe-reject "value has no admitted type" "kotoba.error/subset-reject" form))))
+   :default
 (defn infer-expression-type-impl [form locals signatures]
   (cond
     (kotoba-integer? form) :i64
@@ -2091,9 +4235,9 @@
         ;; "unbound symbol has no value type" naming the callee.
         kernel-function-address :i64
         (infer-call-type op args locals signatures)))
-    :else (reject! "value has no admitted type" form)))
+    :else (reject! "value has no admitted type" form))))
 
-(defn elaborate-named-ability
+#?(:kotoba nil :default (defn elaborate-named-ability
   "Lower a friendly qualified operation such as `(http/post request)` after
   parameter and result types are known. Request type comes from the lexical
   expression and result type from the typed context; neither is repeated in
@@ -2251,9 +4395,9 @@
          (list* op
                 (map #(elaborate-named-ability
                        % nil locals signatures used)
-                     args)))))))
+                     args))))))))
 
-(defn elaborate-named-abilities [functions]
+#?(:kotoba nil :default (defn elaborate-named-abilities [functions]
   (let [signatures
         (into {} (map (fn [{:keys [name params param-types result]}]
                         [name {:params params
@@ -2267,7 +4411,7 @@
                      #(elaborate-named-ability
                        % result (zipmap params param-types) signatures used)))
            functions)
-     :used @used}))
+     :used @used})))
 
 ;; ── loop/recur accumulator types (ADR 0027) ─────────────────────────────────
 ;;
@@ -2287,16 +4431,16 @@
 ;; helper's result is the type those exits agree on. After `replace-recur` a
 ;; `recur` is a self-call, so "not a recur" is "not a call to this helper".
 
-(def loop-recur-marker
+#?(:kotoba nil :default (def loop-recur-marker
   "The symbol a self-call stands in as while a loop-helper's exits are typed.
   A self-call in TAIL position is a `recur` and is not an exit, so the walker
   drops it; one anywhere else (inside a `variant-match` branch, say) is typed
   from this symbol's binding in `locals`, which is the result type the fixed
   point currently believes -- so such a loop keeps exactly the meaning it had
   before this pass existed."
-  '__kotoba_recur_position__)
+  '__kotoba_recur_position__))
 
-(defn replace-loop-self-calls
+#?(:kotoba nil :default (defn replace-loop-self-calls
   "BODY with every call to HELPER-NAME replaced by `loop-recur-marker`."
   [form helper-name]
   (cond
@@ -2304,9 +4448,9 @@
     (seq? form) (with-meta (apply list (map #(replace-loop-self-calls % helper-name) form))
                   (meta form))
     (vector? form) (mapv #(replace-loop-self-calls % helper-name) form)
-    :else form))
+    :else form)))
 
-(defn loop-exit-forms
+#?(:kotoba nil :default (defn loop-exit-forms
   "The tail exits of a marked loop-helper body, as `[form locals]` pairs.
 
   `if`, `do` and `let` are tail-transparent -- `let` is the only binding form
@@ -2339,17 +4483,17 @@
 
         :else [[form locals]]))
 
-    :else [[form locals]]))
+    :else [[form locals]])))
 
-(defn loop-type-text [type] (if (keyword? type) (name type) (pr-str type)))
+#?(:kotoba nil :default (defn loop-type-text [type] (if (keyword? type) (name type) (pr-str type))))
 
-(defn loop-exit-text
+#?(:kotoba nil :default (defn loop-exit-text
   "A tail exit named short enough to read in a one-line refusal."
   [form]
   (let [text (pr-str form)]
-    (if (> (count text) 48) (str (subs text 0 45) "...") text)))
+    (if (> (count text) 48) (str (subs text 0 45) "...") text))))
 
-(defn loop-helper-exit-type
+#?(:kotoba nil :default (defn loop-helper-exit-type
   "The type a loop-helper leaves through, or nil when nothing here can say.
 
   Iterated to a fixed point over the marker's own binding, so a loop whose only
@@ -2407,9 +4551,9 @@
                     :kotoba.error/actual (second disagreeing)})
 
           (or (= first-type provisional) (>= rounds 4)) first-type
-          :else (recur first-type (inc rounds)))))))
+          :else (recur first-type (inc rounds))))))))
 
-(defn loop-helper-result
+#?(:kotoba nil :default (defn loop-helper-result
   "The result type for one loop-helper, refusing a type that cannot be one.
 
   Every rejection this raises other than its own two is swallowed: a loop body
@@ -2446,14 +4590,14 @@
                    (:body helper) :kotoba.error/loop-result-type
                    {:kotoba.error/expected declared-result
                     :kotoba.error/actual inferred}))
-        inferred))))
+        inferred)))))
 
-(defn loop-helper-signatures [functions]
+#?(:kotoba nil :default (defn loop-helper-signatures [functions]
   (into {} (map (fn [{:keys [name params param-types result]}]
                   [name {:params params :param-types param-types :result (or result :i64)}]))
-        functions))
+        functions)))
 
-(defn infer-loop-helper-results
+#?(:kotoba nil :default (defn infer-loop-helper-results
   "Give every synthesized loop-helper the result type its exits have.
 
   Runs AFTER `resolve-loop-helper-param-types` (the exits are typed in the
@@ -2482,9 +4626,9 @@
         (let [next-fs (round fs false)]
           (if (or (= (mapv :result next-fs) (mapv :result fs)) (>= rounds 4))
             (round next-fs true)
-            (recur next-fs (inc rounds))))))))
+            (recur next-fs (inc rounds)))))))))
 
-(defn check-loop-recur-argument-types!
+#?(:kotoba nil :default (defn check-loop-recur-argument-types!
   "A `recur` argument must have the type of the binding it rebinds.
 
   `check-value-types!` would catch this too -- a `recur` is a self-call and its
@@ -2542,11 +4686,11 @@
               :when (and loop-helper? (pos? (or bindings 0)))]
         (walk name (vec (take bindings params)) (vec param-types) body
               (zipmap params param-types)))))
-  functions)
+  functions))
 
 ;; ── resolving absence markers (gap 1; see `absence-type`) ────────────────────
 
-(defn absence-none
+#?(:kotoba nil :default (defn absence-none
   "What an absent path is once the `if` is known to have TYPE."
   [marker type]
   (cond
@@ -2554,9 +4698,9 @@
     (= :bool type) false
     (= :option-i64 type) '(option-none)
     (option-vector-type? type) (list 'option-none-of type)
-    :else (legacy-absence marker)))
+    :else (legacy-absence marker))))
 
-(defn absence-leaves
+#?(:kotoba nil :default (defn absence-leaves
   "FORM with each tail leaf made a value of TYPE: a marker is TYPE's none, a
   value of T is wrapped when TYPE is [:option T], anything else is left for
   the type check that follows."
@@ -2590,9 +4734,9 @@
         (list 'option-some-of type form)
         form))
 
-    :else form))
+    :else form)))
 
-(defn absence-tails-legacy
+#?(:kotoba nil :default (defn absence-tails-legacy
   "FORM with each tail marker what the desugar used to write."
   [form]
   (cond
@@ -2603,9 +4747,9 @@
       (meta form))
     (and (seq? form) (contains? '#{let do} (first form)) (<= 2 (count form)))
     (with-meta (concat (butlast form) [(absence-tails-legacy (last form))]) (meta form))
-    :else form))
+    :else form)))
 
-(defn resolve-absence-if
+#?(:kotoba nil :default (defn resolve-absence-if
   "An `if` whose children are already resolved: when one of its tails is an
   absence marker, the `if`'s type decides every tail (`absence-type`). Left
   as it is when nothing here can type it. STATEMENT? is true when the value is
@@ -2621,14 +4765,26 @@
        (cond
          (or (nil? type) (absence-kind? type) (= abort-bottom type)) form
          (and statement? (contains? #{:i64 [:option :i64]} type)) (absence-tails-legacy form)
-         :else (absence-leaves form type locals signatures))))))
+         :else (absence-leaves form type locals signatures)))))))
 
-(defn refinable-value-type? [type]
+#?(:kotoba nil :default (defn refinable-value-type? [type]
   (and (some? type)
        (not= type :i64)
        (try (do (validate-value-type! type) true)
-            (catch #?(:clj Exception :cljs :default) _ false))))
+            (catch #?(:clj Exception :cljs :default) _ false)))))
 
+#?(:kotoba
+(defn use-site-text [form [:ref :form/r]] :string
+  (cond
+    (form/is-seq? form)
+    (let [head (form/nth-of form 0)
+          src (fsource-head form)
+          shown (if (string=? src "") (use-site-text head) src)]
+      (str "(" shown (if (> (form/count-of form) 1) " " "") (use-site-kids form 1 "") ")"))
+    (form/is-vec? form) (str "[" (use-site-kids form 0 "") "]")
+    (or (form/is-int? form) (form/is-symbol? form)) (form-text-any form)
+    :else (pr-form form)))
+   :default
 (defn use-site-text
   "FORM as a diagnostic shows it: the head the source wrote when the lowering
   table renamed it (`:kotoba.diag/source-head`, see `desugar-expr`), integers
@@ -2643,9 +4799,9 @@
     (vector? form) (str "[" (str/join " " (map use-site-text form)) "]")
     (kotoba-integer? form) (str form)
     (symbol? form) (str form)
-    :else (pr-str form)))
+    :else (pr-str form))))
 
-(defn parameter-use-conflict!
+#?(:kotoba nil :default (defn parameter-use-conflict!
   "Refuse FUNCTION's unannotated PARAMETER whose uses disagree, naming both.
 
   FIRST-USE is the refusal the provisional `:i64` met (its `:expected` is what
@@ -2682,9 +4838,9 @@
                       :kotoba.error/function function
                       :kotoba.error/parameter parameter
                       :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
-               (:span first-use) (assoc :span (:span first-use))))))
+               (:span first-use) (assoc :span (:span first-use)))))))
 
-(defn infer-absent-parameter-types
+#?(:kotoba nil :default (defn infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
   An absent annotation meant `:i64`, so any function touching a string had to
@@ -2788,9 +4944,9 @@
               (if second-use
                 (parameter-use-conflict! function (nth (:params refined) index)
                                          first-use second-use)
-                (recur applied (dec budget))))))))))
+                (recur applied (dec budget)))))))))))
 
-(defn infer-absent-results
+#?(:kotoba nil :default (defn infer-absent-results
   "Give every unannotated `defn` the result type its body actually has.
 
   An absent annotation used to mean `:i64`, so an unannotated function could not
@@ -2819,15 +4975,15 @@
                           f)
                         f))
                     fs)))]
-    (-> functions pass pass)))
+    (-> functions pass pass))))
 
-(defn first-aborting-call
+#?(:kotoba nil :default (defn first-aborting-call
   "The name of the first aborting function FORM calls, for a refusal."
   [form abort-error-types]
   (first-truthy (fn [x] (when (and (seq? x) (contains? abort-error-types (first x))) (first x)))
-        (tree-seq coll? seq form)))
+        (tree-seq coll? seq form))))
 
-(defn abort-synthesized-context
+#?(:kotoba nil :default (defn abort-synthesized-context
   "The lexical context a SYNTHESIZED function came from -- the description the
   precondition refusal names -- or nil when the author wrote the function.
 
@@ -2843,17 +4999,17 @@
   (when-not source-name
     (cond loop-helper? nil
           lazy-thunk? "a lazy thunk"
-          :else "a fn literal")))
+          :else "a fn literal"))))
 
-(defn abort-type-text [type]
-  (if (keyword? type) (name type) (pr-str type)))
+#?(:kotoba nil :default (defn abort-type-text [type]
+  (if (keyword? type) (name type) (pr-str type))))
 
-(defn abort-signatures [functions]
+#?(:kotoba nil :default (defn abort-signatures [functions]
   (into {} (map (fn [{:keys [name params param-types result]}]
                   [name {:params params :param-types param-types :result result}]))
-        functions))
+        functions)))
 
-(defn infer-abort-error-types
+#?(:kotoba nil :default (defn infer-abort-error-types
   "Result inference and abort-error-type inference, together, to a fixed point.
 
   A function's error type E is the type of its own escaping throws -- the ones
@@ -2969,9 +5125,9 @@
              known fs)]
         (if (= next-known known)
           {:functions fs :abort-error-types known}
-          (recur next-known fs))))))
+          (recur next-known fs)))))))
 
-(defn elaborate-aborts
+#?(:kotoba nil :default (defn elaborate-aborts
   "Lower every `throw`/`try` to result values, and every aborting function to
   one that returns `[:result T E]`.
 
@@ -3198,25 +5354,25 @@
                       (cond-> (assoc function :body (walk body env nil true))
                         (abort-form-mentions? body) (assoc :abort-catches? true))
                       :else function)))
-                functions))))))
+                functions)))))))
 
-(defn closure-dispatcher-function?
+#?(:kotoba nil :default (defn closure-dispatcher-function?
   "The synthetic entry points whose first physical i64 word is a closure pair."
   [function-name]
   (or (= '__kotoba_closure_apply function-name)
       (boolean
        (re-matches #"__kotoba_invoke(?:_.+)?\$arity[0-4]"
-                   (str function-name)))))
+                   (str function-name))))))
 
-(defn callable-field-read?
+#?(:kotoba nil :default (defn callable-field-read?
   "`(record-get T v :f)` where T declares :f as `[:fn ...]`."
   [form]
   (and (seq? form) (= 'record-get (first form)) (= 4 (count form))
        (let [type (canonical-closure-result-type (second form))]
          (and (record-type? type)
-              (callable-type? (record-field-type type (nth form 3)))))))
+              (callable-type? (record-field-type type (nth form 3))))))))
 
-(defn callable-field-values
+#?(:kotoba nil :default (defn callable-field-values
   "The values a `record-new` / `record-assoc` form stores in `[:fn ...]`
   fields."
   [form]
@@ -3231,16 +5387,16 @@
                            (map vector (nth type 2) args))
           record-assoc (let [[_ field replacement] args]
                          (when (callable-type? (record-field-type type field))
-                           [replacement])))))))
+                           [replacement]))))))))
 
-(defn generated-empty-test?
+#?(:kotoba nil :default (defn generated-empty-test?
   "`(= __kotoba_... 0)`: the empty test a lazy sequence's desugaring writes."
   [form]
   (and (seq? form) (= '= (first form)) (= 3 (count form))
        (let [[a b] (rest form)
              generated? #(and (symbol? %) (str/starts-with? (str %) "__kotoba_"))
              zero? #(and (kotoba-integer? %) (zero? %))]
-         (or (and (generated? a) (zero? b)) (and (zero? a) (generated? b))))))
+         (or (and (generated? a) (zero? b)) (and (zero? a) (generated? b)))))))
 
 #?(:kotoba
    (defn closure-number-operations [] [:ref :form/r]
@@ -3258,7 +5414,7 @@
      (into (set/union arithmetic comparisons)
            (concat (keys i64-operations) (keys i32-operations)))))
 
-(defn infer-closure-refinements
+#?(:kotoba nil :default (defn infer-closure-refinements
   "Infer checked closure positions without adding a public closure value type.
 
   Closure pairs intentionally remain i64 words in Wasm/native signatures.  The
@@ -3582,14 +5738,14 @@
              (cond-> function
                (seq indexes) (assoc :closure-param-indexes indexes)
                result? (assoc :closure-result? true))))
-         functions)))))
+         functions))))))
 
 ;; Total bytes of string literals, and of keyword literals, a module may carry (each occurrence counts, after desugaring). This is a
 ;; bound on the module's rodata, not on one value: it used to reuse `value/string-value-byte-limit` (64 KiB, the cap on a single runtime
 ;; string), which the compiler's own linked closure exceeds many times over (amu ADR 0359).
-(def max-module-literal-bytes 4194304)
+#?(:kotoba nil :default (def max-module-literal-bytes 4194304))
 
-(defn check-value-types! [functions]
+#?(:kotoba nil :default (defn check-value-types! [functions]
   (let [signatures (into {} (map (fn [{:keys [name params param-types result]}]
                                    [name {:params params :param-types param-types
                                           :result result}])
@@ -3610,4 +5766,4 @@
       (when (> literal-bytes max-module-literal-bytes)
         (reject! "module string literals exceed UTF-8 byte limit" literal-bytes))
       (when (> keyword-bytes max-module-literal-bytes)
-        (reject! "module keyword literals exceed UTF-8 byte limit" keyword-bytes)))))
+        (reject! "module keyword literals exceed UTF-8 byte limit" keyword-bytes))))))

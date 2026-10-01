@@ -14,7 +14,7 @@
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
                                  ;; a refusal: the Kotoba-route `reject!` throws one (ADR 0007)
-                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string]]]
+                                 :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string] [:data [:ref :form/r]]]]
                                  ;; the desugar env and its results (docs/selfhost-frontend-typemodel-design.md 1.2)
                                  :fe/env [:record :fe/env [[:counter :i64] [:result [:ref :form/r]] [:none :bool] [:arities [:ref :form/r]] [:lexical [:ref :form/r]] [:types [:ref :form/r]] [:docfns [:ref :form/r]] [:loop-counter :i64] [:tbl [:ref :form/r]] [:schemas [:ref :form/r]] [:lazy :bool] [:abort-ctx :string] [:used-caps [:ref :form/r]] [:options [:ref :form/r]] [:helpers [:ref :form/r]] [:shapes [:ref :form/r]] [:lambda-counter :i64] [:lambdas [:ref :form/r]] [:loop-result [:ref :form/r]] [:loop-known [:ref :form/r]] [:dispatchers [:ref :form/r]] [:uses-apply :bool] [:uses-lazy :bool] [:contracts [:ref :form/r]]]]
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
@@ -312,7 +312,7 @@
 ;; aborting function is typed [:result T E] here and does not propagate through a plain call).
 #?(:kotoba
    (defn fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
-     (record-new [:ref :fe/err] msg code form "subset"))
+     (record-new [:ref :fe/err] msg code form "subset" (form/nil-form)))
    :default nil)
 
 #?(:kotoba
@@ -491,12 +491,17 @@
 ;; Refuse the unbound SYMBOL with PREFIX as the sentence, naming the symbol and the nearest names
 ;; among LOCALS (a set or a map keyed by name) and FUNCTIONS (a map keyed by name)
 #?(:kotoba
-   (defn unbound-symbol! [prefix :string symbol [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r]] :i64
+   (defn unbound-symbol-error [prefix :string symbol [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r]] [:ref :fe/err]
      (let [entries (nd-entries-of locals "local" (nd-entries-of functions "function" (form/no-forms)))
            suffix (nd-nearest-suffix (form-text symbol) entries)]
-       (throw (fe-reject (str prefix ": " (form-text symbol) " is not a parameter, a let binding, or a "
-                              "function of this module" suffix)
-                         "kotoba.error/unbound-symbol" symbol))))
+       (fe-reject (str prefix ": " (form-text symbol) " is not a parameter, a let binding, or a "
+                       "function of this module" suffix)
+                  "kotoba.error/unbound-symbol" symbol)))
+   :default nil)
+
+#?(:kotoba
+   (defn unbound-symbol! [prefix :string symbol [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r]] :i64
+     (throw (unbound-symbol-error prefix symbol locals functions)))
    :default nil)
 
 ;; A host error cannot escape as a value on this route: a refusal is already an :fe/err, so it
@@ -894,17 +899,22 @@
 ;; Refuse the call FORM whose head OP no pass admitted, naming WHICH of the two facts that can
 ;; mean: declared by the grammar but unlowered, or unknown with the nearest names beside it
 #?(:kotoba
-   (defn unknown-operation! [op [:ref :form/r] form [:ref :form/r] functions [:ref :form/r]] :i64
+   (defn unknown-operation-error [op [:ref :form/r] form [:ref :form/r] functions [:ref :form/r]] [:ref :fe/err]
      (if (tables/table-has? (grammar-declared-heads) op)
-       (throw (fe-reject (str (form-text op) " is named by the language grammar (lang/guest-grammar.edn) "
-                              "but this analyser has no lowering for it -- not implemented on "
-                              "this compile path")
-                         "kotoba.error/unimplemented-grammar-head" form))
+       (fe-reject (str (form-text op) " is named by the language grammar (lang/guest-grammar.edn) "
+                       "but this analyser has no lowering for it -- not implemented on "
+                       "this compile path")
+                  "kotoba.error/unimplemented-grammar-head" form)
        (let [entries (nd-entries-of functions "function" (nd-builtin-entries))
              suffix (nd-nearest-suffix (form-text op) entries)]
-         (throw (fe-reject (str "unknown operation: " (form-text op) " is not a builtin, a sugar head, or a "
-                                "function of this module" suffix)
-                           "kotoba.error/unknown-operation" form)))))
+         (fe-reject (str "unknown operation: " (form-text op) " is not a builtin, a sugar head, or a "
+                         "function of this module" suffix)
+                    "kotoba.error/unknown-operation" form))))
+   :default nil)
+
+#?(:kotoba
+   (defn unknown-operation! [op [:ref :form/r] form [:ref :form/r] functions [:ref :form/r]] :i64
+     (throw (unknown-operation-error op form functions)))
    :default nil)
 
 
