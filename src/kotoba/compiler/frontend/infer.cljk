@@ -5,7 +5,7 @@
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
-            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts #?@(:kotoba [fe-reject fe-reject-data form-text pr-form ascii-digit-code? simple-symbol-form? fput fget ftruthy? fsource-head fl-has? fl-nth fl-slice fdrop] :default [first-truthy *synthetic-counter*])]]
+            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts #?@(:kotoba [capability-registry fe-reject fe-reject-data form-text pr-form ascii-digit-code? simple-symbol-form? fput fget ftruthy? fsource-head fl-has? fl-nth fl-slice fdrop] :default [first-truthy *synthetic-counter*])]]
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [] :default [kernel-memory-operations])]]
             [kotoba.compiler.frontend.closure-types :refer [callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [] :default [*schemas*])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
@@ -888,7 +888,7 @@
         m18 (tput m17 :explicit-numeric-conversions (tables/explicit-numeric-conversions))
         m19 (tput m18 :arm-specs (form/edn-form "{bytes-empty [[] :bytes] bytes-count [[:bytes] :i64] bytes-at [[:bytes :i64] :i64] bytes-slice [[:bytes :i64 :i64] :bytes] bytes-concat [[:bytes :bytes] :bytes] bytes-from-vector-i64 [[:vector-i64] :bytes] vector-i64-from-bytes [[:bytes] :vector-i64] string-from-utf8 [[:bytes] :string] kernel-function-address [[] :i64]}"))
         m20 (tput m19 :specs (form/edn-form "[{bool-not [[[0 :bool]] :bool] option-some [[[0 :i64]] :option-i64]} {option-some? [[[0 :option-i64]] :bool] option-value [[[0 :option-i64] [1 :i64]] :i64] result-ok [[[0 :i64]] :result-i64] result-err [[[0 :i64]] :result-i64] result-ok? [[[0 :result-i64]] :bool] result-value [[[0 :result-i64] [1 :i64]] :i64] result-error [[[0 :result-i64] [1 :i64]] :i64] vector-alloc [[[0 :i64]] :vector-i64] vector-new [[[:all 0 :i64]] :vector-i64]} {vector-get [[[0 :vector-i64] [1 :i64] [2 :i64]] :i64] vector-at [[[0 :vector-i64] [1 :i64]] :i64] vector-drop [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-take [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-assoc [[[0 :vector-i64] [1 :i64] [2 :i64]] :vector-i64] vector-assoc! [[[0 :vector-i64] [1 :i64] [2 :i64]] :vector-i64] vector-conj [[[0 :vector-i64] [1 :i64]] :vector-i64] vector-f64-new [[[:all 0 :f64]] :vector-f64] vector-f64-count [[[0 :vector-f64]] :i64] vector-f64-get [[[0 :vector-f64] [1 :i64] [2 :f64]] :f64] vector-f64-at [[[0 :vector-f64] [1 :i64]] :f64] vector-f64-drop [[[0 :vector-f64] [1 :i64]] :vector-f64] vector-f64-take [[[0 :vector-f64] [1 :i64]] :vector-f64] vector-f64-assoc [[[0 :vector-f64] [1 :i64] [2 :f64]] :vector-f64] vector-f64-conj [[[0 :vector-f64] [1 :f64]] :vector-f64]} {string-index-count [[[0 :string-index]] :i64] string-index-contains [[[0 :string-index] [1 :string]] :bool] string-index-get [[[0 :string-index] [1 :string]] [:option :i64]] string-index-assoc [[[0 :string-index] [1 :string] [2 :i64]] :string-index] disjoint-set-i64-new [[[0 :i64]] :disjoint-set-i64] disjoint-set-i64-count [[[0 :disjoint-set-i64]] :i64] disjoint-set-i64-union [[[0 :disjoint-set-i64] [1 :i64] [2 :i64]] [:option :disjoint-set-i64]]} {document-bool [[[0 :bool]] :document] document-i64 [[[0 :i64]] :document] document-f64 [[[0 :f64]] :document] document-string [[[0 :string]] :document] document-keyword [[[0 :keyword]] :document] document-symbol [[[0 :symbol]] :document] document-vector [[[:all 0 :document]] :document] document-list [[[:all 0 :document]] :document] document-set [[[:all 0 :document]] :document]} {document-count [[[0 :document]] :i64] document-kind [[[0 :document]] :keyword] document-sha256 [[[0 :document]] :string] document-print [[[0 :document]] :string] document-read [[[0 :string]] :document] document-edn-print [[[0 :document]] :string] document-edn-read [[[0 :string]] :document] document-vector-at [[[0 :document] [1 :i64]] [:option :document]] document-list-at [[[0 :document] [1 :i64]] [:option :document]] document-map-entry-at [[[0 :document] [1 :i64]] [:option :document]] document-vector-assoc [[[0 :document] [1 :i64] [2 :document]] :document] document-vector-conj [[[0 :document] [1 :document]] :document] document-vector-drop [[[0 :document] [1 :i64]] :document] document-vector-remove [[[0 :document] [1 :i64]] :document] document-vector-sort [[[0 :document]] :document]} {document-equal? [[[0 :document] [1 :document]] :bool] document-set-contains? [[[0 :document] [1 :document]] :bool]} {document-merge [[[:all 0 :document]] :document] document-string-value [[[0 :document]] [:option :string]] document-keyword-value [[[0 :document]] [:option :keyword]] document-symbol-value [[[0 :document]] [:option :symbol]] document-bool-value [[[0 :document]] [:option :bool]] document-i64-value [[[0 :document]] [:option :i64]] document-f64-value [[[0 :document]] [:option :f64]]} {cap-call [[[1 :i64]] :i64] string-byte-length [[[0 :string]] :i64] string-length [[[0 :string]] :i64] string-from-i64 [[[0 :i64]] :string]} {bytes-task-byte-count [[[0 [:task [:stream :bytes]]]] :i64] task-ready? [[[0 [:task [:stream :bytes]]]] :i64]} {bool-result [[[0 :bool]] :i64]} {string=? [[[:all 0 :string]] :bool] string-concat [[[:all 0 :string]] :string] string-substring [[[0 :string] [:all 1 :i64]] :string] string-replace-all [[[:all 0 :string]] :string] string-contains? [[[:all 0 :string]] :bool] string-index-of [[[0 :string] [1 :string]] :i64] string-split-count [[[:all 0 :string]] :i64] string-compare [[[0 :string] [1 :string]] :i64] string-fold-ascii [[[0 :string]] :string] string-find-blank [[[0 :string] [1 :i64]] :i64] string-skip-blank [[[0 :string] [1 :i64]] :i64] string-index-of-from [[[0 :string] [1 :string] [2 :i64]] :i64] string-compare-lines [[[0 :string] [1 :i64] [2 :string] [3 :i64]] :i64] string-find-byte [[[0 :string] [1 :i64] [2 :i64]] :i64] string-append-range [[[0 :string] [1 :string] [2 :i64] [3 :i64]] :string]} {string-code-point-at [[[0 :string] [1 :i64]] :i64] string-fold-case [[[0 :string]] :string] string-upper [[[0 :string]] :string] keyword-from-string [[[0 :string]] :keyword] keyword-name [[[0 :keyword]] :string] symbol [[[0 :string]] :symbol] xml-path-count [[[:all 0 :string]] :i64] xml-name-count [[[:all 0 :string]] :i64] xml-name-text [[[0 :string] [1 :string] [2 :i64]] [:option :string]] xml-path-text [[[0 :string] [1 :string] [2 :i64]] [:option :string]] xml-path-attr [[[0 :string] [1 :string] [2 :i64] [3 :string]] [:option :string]] decimal-f64-parse [[[0 :string]] [:option :f64]] decimal-f64x3-parse [[[0 :string]] [:option [:vector [:f64 :f64 :f64]]]] f64-to-bits [[[0 :f64]] :i64] f64-from-bits [[[0 :i64]] :f64] i64-to-f64-checked [[[0 :i64]] :f64] i64-to-f64-rounded [[[0 :i64]] :f64] f64-to-i64-checked [[[0 :f64]] :i64] f64-to-i64-truncating [[[0 :f64]] :i64] f64-add [[[:all 0 :f64]] :f64] f64-sub [[[:all 0 :f64]] :f64] f64-mul [[[:all 0 :f64]] :f64] f64-div [[[:all 0 :f64]] :f64] f64-min [[[:all 0 :f64]] :f64] f64-max [[[:all 0 :f64]] :f64] f64-neg [[[0 :f64]] :f64] f64-abs [[[0 :f64]] :f64] f64-sqrt [[[0 :f64]] :f64] f64-sin-quarter-turn [[[0 :f64]] :f64] f64-cos-quarter-turn [[[0 :f64]] :f64] f64-sin-bounded [[[0 :f64]] :f64] f64-cos-bounded [[[0 :f64]] :f64] f64-exp-near-zero [[[0 :f64]] :f64] f64-log-near-one [[[0 :f64]] :f64] f64-atan2-bounded [[[:all 0 :f64]] :f64] f64-exp-bounded [[[0 :f64]] :f64] f64-log-bounded [[[0 :f64]] :f64] f64-eq [[[:all 0 :f64]] :bool] f64-lt [[[:all 0 :f64]] :bool] f64-le [[[:all 0 :f64]] :bool] f64-gt [[[:all 0 :f64]] :bool] f64-ge [[[:all 0 :f64]] :bool] f64-unordered [[[:all 0 :f64]] :bool] f32-to-bits [[[0 :f32]] :i64] f32-from-bits [[[0 :i64]] :f32] f64-to-f32-rounded [[[0 :f64]] :f32] f32-to-f64-exact [[[0 :f32]] :f64] i64-to-f32-checked [[[0 :i64]] :f32] i64-to-f32-rounded [[[0 :i64]] :f32] f32-to-i64-checked [[[0 :f32]] :i64] f32-to-i64-truncating [[[0 :f32]] :i64] f32-add [[[:all 0 :f32]] :f32] f32-sub [[[:all 0 :f32]] :f32] f32-mul [[[:all 0 :f32]] :f32] f32-div [[[:all 0 :f32]] :f32] f32-min [[[:all 0 :f32]] :f32] f32-max [[[:all 0 :f32]] :f32] f32-neg [[[0 :f32]] :f32] f32-abs [[[0 :f32]] :f32] f32-sqrt [[[0 :f32]] :f32] f32-eq [[[:all 0 :f32]] :bool] f32-lt [[[:all 0 :f32]] :bool] f32-le [[[:all 0 :f32]] :bool] f32-gt [[[:all 0 :f32]] :bool] f32-ge [[[:all 0 :f32]] :bool] f32-unordered [[[:all 0 :f32]] :bool]} {map-get [[[0 :map] [1 :keyword] [2 :i64]] :i64]}]"))]
-    (form/form-map m20)))
+    (form/form-map (tput (tput m20 :capability-registry (capability-registry)) :source-operation-registry (source-operation-registry)))))
    :default nil)
 
 #?(:kotoba
@@ -6731,3 +6731,378 @@
         (reject! "module string literals exceed UTF-8 byte limit" literal-bytes))
       (when (> keyword-bytes max-module-literal-bytes)
         (reject! "module keyword literals exceed UTF-8 byte limit" keyword-bytes))))))
+
+;; ── Kotoba route: the module passes check-value-types! and elaborate-named-abilities ──
+;; (ported from the host forms above and below; the context is the first argument, section 9 of
+;; docs/selfhost-frontend-typemodel-design.md. A function is a Form map keyed like the host's.)
+;; ---- the module passes over a function list (Kotoba route) ----
+#?(:kotoba
+(defn- check-value-body! [f [:ref :form/r] ctx [:ref :ie/ctx] sigs [:ref :form/r]] :i64
+  (let [body (fget f :body)
+        params (fget f :params)
+        ptypes (fget f :param-types)
+        locals (zip-locals params ptypes)
+        res (ie-infer ctx body locals sigs)
+        actual (ie-type res)
+        result (fget f :result)
+        name (fget f :name)]
+    (require-expression-type! actual result name)))
+   :default nil)
+
+#?(:kotoba
+(defn- check-value-bodies! [functions [:ref :form/r] i :i64 ctx [:ref :ie/ctx] sigs [:ref :form/r]] :i64
+  (if (>= i (form/count-of functions))
+    0
+    (let [_ (check-value-body! (form/nth-of functions i) ctx sigs)]
+      (check-value-bodies! functions (+ i 1) ctx sigs))))
+   :default nil)
+
+;; Total UTF-8 bytes of the string literals (KW? false) or keyword literals (KW? true) of F
+#?(:kotoba
+(defn- literal-bytes-kids [f [:ref :form/r] i :i64 kw? :bool acc :i64] :i64
+  (if (>= i (form/count-of f))
+    acc
+    (literal-bytes-kids f (+ i 1) kw? (+ acc (literal-bytes (form/nth-of f i) kw?)))))
+   :default nil)
+
+#?(:kotoba
+(defn- literal-bytes [f [:ref :form/r] kw? :bool] :i64
+  (cond
+    (form/is-string? f) (if kw? 0 (string-length (form/string-value f)))
+    (form/is-keyword? f) (if kw? (string-length (form-text f)) 0)
+    :else (literal-bytes-kids f 0 kw? 0)))
+   :default nil)
+
+#?(:kotoba
+(defn- module-literal-bytes [functions [:ref :form/r] i :i64 kw? :bool acc :i64] :i64
+  (if (>= i (form/count-of functions))
+    acc
+    (module-literal-bytes functions (+ i 1) kw? (+ acc (literal-bytes (fget (form/nth-of functions i) :body) kw?)))))
+   :default nil)
+
+;; Total bytes of string literals, and of keyword literals, a module may carry (amu ADR 0359)
+#?(:kotoba
+(defn- max-module-literal-bytes [] :i64 4194304)
+   :default nil)
+
+#?(:kotoba
+(defn- check-value-types! [ctx [:ref :ie/ctx] functions [:ref :form/r]] :i64
+  (let [sigs (abort-signatures functions)
+        _ (check-value-bodies! functions 0 (record-assoc [:ref :ie/ctx] ctx :final true) sigs)
+        lit (module-literal-bytes functions 0 false 0)
+        _ (req! (<= lit (max-module-literal-bytes)) "module string literals exceed UTF-8 byte limit" "kotoba.error/subset-reject" (form/int-form lit))
+        kw (module-literal-bytes functions 0 true 0)]
+    (req! (<= kw (max-module-literal-bytes)) "module keyword literals exceed UTF-8 byte limit" "kotoba.error/subset-reject" (form/int-form kw))))
+   :default nil)
+
+#?(:kotoba
+(defn- ie-type-of [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r]] [:ref :form/r]
+  (let [r (ie-infer ctx form locals sigs)]
+    (ie-type r)))
+   :default nil)
+
+;; ---- elaborate-named-ability(ies) ----
+;; A pass answers a pair [form' used'] : the host's `used` volatile is threaded by value (a Form set of capabilities).
+;; Style: the arguments of an aborting call are bare locals (the lowering of an aborting call whose argument is an
+;; imported call on a let-bound local loses the local).
+#?(:kotoba
+(defn- el-r [form [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (form/vec2 form used))
+   :default nil)
+
+#?(:kotoba
+(defn- el-form [r [:ref :form/r]] [:ref :form/r]
+  (form/nth-of r 0))
+   :default nil)
+
+#?(:kotoba
+(defn- el-used [r [:ref :form/r]] [:ref :form/r]
+  (form/nth-of r 1))
+   :default nil)
+
+#?(:kotoba
+(defn- el-used-add [used [:ref :form/r] cap [:ref :form/r]] [:ref :form/r]
+  (if (fl-has? (form/kids-of used) cap 0)
+    used
+    (form/form-set (form/append-form (form/kids-of used) cap))))
+   :default nil)
+
+#?(:kotoba
+(defn- cap-wire-id! [ctx [:ref :ie/ctx] capability [:ref :form/r] form [:ref :form/r]] :i64
+  (let [id (ie-tbl-get ctx :capability-registry capability)
+        msg (string-concat "cap-call names an unregistered capability: " (form-text capability))
+        ok (not (form/is-nil? id))
+        _ (req! ok msg "kotoba.error/subset-reject" form)]
+    (form/int-value id)))
+   :default nil)
+
+#?(:kotoba
+(defn- el-arity! [op [:ref :form/r] want :i64 got :i64 form [:ref :form/r]] :i64
+  (if (= want got)
+    0
+    (throw (fe-reject (str "function call arity mismatch: " (form-text op) " takes " (string-from-i64 want)
+                           (if (= 1 want) " argument" " arguments") "; got " (string-from-i64 got))
+                      "kotoba.error/call-arity" form))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-arg-expected [mode :i64 expected [:ref :form/r] ptypes [:ref :form/r] i :i64 n :i64] [:ref :form/r]
+  (cond
+    (= mode 1) (form/nth-of ptypes i)
+    (and (= mode 2) (= i (- n 1))) expected
+    :else (form/nil-form)))
+   :default nil)
+
+;; the arguments of FORM from position I (a form index, 1 = first argument), elaborated; answers [vec used]
+;; MODE 0: no expected type, 1: the callee's parameter types, 2: EXPECTED for the last (`do`)
+#?(:kotoba
+(defn- el-args [ctx [:ref :ie/ctx] form [:ref :form/r] i :i64 mode :i64 expected [:ref :form/r] ptypes [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :form/r]
+  (if (>= i (form/count-of form))
+    (el-r (form/form-vec acc) used)
+    (let [arg (form/nth-of form i)
+          want (el-arg-expected mode expected ptypes (- i 1) (argc form))
+          r (ie-elab ctx arg want locals sigs used)
+          used2 (el-used r)
+          acc2 (form/append-form acc (el-form r))]
+      (el-args ctx form (+ i 1) mode expected ptypes locals sigs used2 acc2))))
+   :default nil)
+
+;; (op arg'...) with FORM's metadata
+#?(:kotoba
+(defn- el-call-of [form [:ref :form/r] args-r [:ref :form/r]] [:ref :form/r]
+  (let [items (form/kids-of (el-form args-r))
+        call (form/form-seq (form/cons-onto (form/nth-of form 0) items))]
+    (el-r (preserve-form-meta form call) (el-used args-r))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-source-op-checks! [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r]] :i64
+  (let [op (form/nth-of form 0)
+        one (= 1 (argc form))
+        _ (req! one "named capability operation requires exactly one request" "kotoba.error/subset-reject" form)
+        typed (or (ftruthy? expected) (ie-tbl-has? ctx :named-operation-default-results op))]
+    (req! typed "named capability operation requires a typed result context" "kotoba.error/subset-reject" form)))
+   :default nil)
+
+#?(:kotoba
+(defn- el-source-op [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [_ (el-source-op-checks! ctx form expected)
+        op (form/nth-of form 0)
+        want (if (ftruthy? expected) expected (ie-tbl-get ctx :named-operation-default-results op))
+        arg (a form 0)
+        none (form/nil-form)
+        rq (ie-elab ctx arg none locals sigs used)
+        request (el-form rq)
+        request-type (ie-type-of ctx request locals sigs)
+        capability (ie-tbl-get ctx :source-operation-registry op)
+        id (cap-wire-id! ctx capability form)
+        idf (form/int-form id)
+        call (form/call4 "typed-cap-call" idf request-type want request)]
+    (el-r (preserve-form-meta form call) (el-used-add (el-used rq) capability))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-let-pairs [ctx [:ref :ie/ctx] bindings [:ref :form/r] i :i64 current [:ref :form/r] out [:list [:ref :form/r]] body [:ref :form/r] expected [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (if (< (+ i 1) (form/count-of bindings))
+    (let [name (form/nth-of bindings i)
+          value (form/nth-of bindings (+ i 1))
+          none (form/nil-form)
+          r (ie-elab ctx value none current sigs used)
+          elaborated (el-form r)
+          t (ie-type-of ctx elaborated current sigs)
+          next-locals (form/assoc-form current name t)
+          out2 (form/append-form (form/append-form out name) elaborated)
+          used2 (el-used r)]
+      (el-let-pairs ctx bindings (+ i 2) next-locals out2 body expected sigs used2))
+    (let [r (ie-elab ctx body expected current sigs used)
+          e (el-form r)
+          vec-out (form/form-vec out)]
+      (el-r (form/call2 "let" vec-out e) (el-used r)))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-let [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [body (ie-let-body form)
+        bindings (a form 0)
+        r (el-let-pairs ctx bindings 0 locals (form/no-forms) body expected sigs used)]
+    (el-r (preserve-form-meta form (el-form r)) (el-used r))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-if [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [msg (str "if requires test, then, else; got " (string-from-i64 (argc form)) " arguments")
+        ok (= 3 (argc form))
+        _ (req! ok msg "kotoba.error/if-arity" form)
+        none (form/nil-form)
+        test (a form 0)
+        then (a form 1)
+        else (a form 2)
+        r1 (ie-elab ctx test none locals sigs used)
+        u1 (el-used r1)
+        r2 (ie-elab ctx then expected locals sigs u1)
+        u2 (el-used r2)
+        r3 (ie-elab ctx else expected locals sigs u2)
+        call (form/call3 "if" (el-form r1) (el-form r2) (el-form r3))]
+    (el-r (preserve-form-meta form call) (el-used r3))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-do [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [none (form/nil-form)
+        r (el-args ctx form 1 2 expected none locals sigs used (form/no-forms))]
+    (el-call-of form r)))
+   :default nil)
+
+#?(:kotoba
+(defn- el-option-match [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [mtype (a form 0)
+        value (a form 1)
+        none-body (a form 2)
+        some-name (a form 3)
+        some-body (a form 4)
+        rv (ie-elab ctx value mtype locals sigs used)
+        u1 (el-used rv)
+        rn (ie-elab ctx none-body expected locals sigs u1)
+        u2 (el-used rn)
+        inner (form/assoc-form locals some-name (form/nth-of mtype 1))
+        rs (ie-elab ctx some-body expected inner sigs u2)
+        call (form/call5 "option-match" mtype (el-form rv) (el-form rn) some-name (el-form rs))]
+    (el-r (preserve-form-meta form call) (el-used rs))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-result-match [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [mtype (a form 0)
+        value (a form 1)
+        ok-name (a form 2)
+        ok-body (a form 3)
+        err-name (a form 4)
+        err-body (a form 5)
+        rv (ie-elab ctx value mtype locals sigs used)
+        u1 (el-used rv)
+        ok-locals (form/assoc-form locals ok-name (form/nth-of mtype 1))
+        ro (ie-elab ctx ok-body expected ok-locals sigs u1)
+        u2 (el-used ro)
+        err-locals (form/assoc-form locals err-name (form/nth-of mtype 2))
+        re (ie-elab ctx err-body expected err-locals sigs u2)
+        call (form/call6 "result-match-of" mtype (el-form rv) ok-name (el-form ro) err-name (el-form re))]
+    (el-r (preserve-form-meta form call) (el-used re))))
+   :default nil)
+
+;; (into {} (nth mtype 2)): tag -> payload mtype
+#?(:kotoba
+(defn- el-payloads [entries [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+  (if (>= i (form/count-of entries))
+    acc
+    (let [entry (form/nth-of entries i)]
+      (el-payloads entries (+ i 1) (form/assoc-form acc (form/nth-of entry 0) (form/nth-of entry 1))))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-variant-branches [ctx [:ref :ie/ctx] branches [:ref :form/r] i :i64 payloads [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :form/r]
+  (if (>= i (form/count-of branches))
+    (el-r (form/form-vec acc) used)
+    (let [br (form/nth-of branches i)
+          tag (form/nth-of br 0)
+          binder (form/nth-of br 1)
+          body (form/nth-of br 2)
+          inner (form/assoc-form locals binder (form/form-get payloads tag))
+          r (ie-elab ctx body expected inner sigs used)
+          used2 (el-used r)
+          acc2 (form/append-form acc (form/vec3 tag binder (el-form r)))]
+      (el-variant-branches ctx branches (+ i 1) payloads expected locals sigs used2 acc2))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-variant-match [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [mtype (a form 0)
+        value (a form 1)
+        branches (a form 2)
+        entries (form/nth-of mtype 2)
+        none-map (empty-fmap)
+        payloads (el-payloads entries 0 none-map)
+        rv (ie-elab ctx value mtype locals sigs used)
+        u1 (el-used rv)
+        rb (el-variant-branches ctx branches 0 payloads expected locals sigs u1 (form/no-forms))
+        call (form/call3 "variant-match" mtype (el-form rv) (el-form rb))]
+    (el-r (preserve-form-meta form call) (el-used rb))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-typed-cap-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [request (a form 3)
+        request-type (a form 1)
+        r (ie-elab ctx request request-type locals sigs used)
+        call (form/call4 "typed-cap-call" (a form 0) request-type (a form 2) (el-form r))]
+    (el-r (preserve-form-meta form call) (el-used r))))
+   :default nil)
+
+#?(:kotoba
+(defn- el-sig-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [op (form/nth-of form 0)
+        sig (form/form-get sigs op)
+        want (form/count-of (fget sig :params))
+        got (argc form)
+        ptypes (fget sig :param-types)
+        none (form/nil-form)
+        _ (el-arity! op want got form)
+        r (el-args ctx form 1 1 none ptypes locals sigs used (form/no-forms))]
+    (el-call-of form r)))
+   :default nil)
+
+#?(:kotoba
+(defn- el-plain-call [ctx [:ref :ie/ctx] form [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [none (form/nil-form)
+        r (el-args ctx form 1 0 none none locals sigs used (form/no-forms))]
+    (el-call-of form r)))
+   :default nil)
+
+#?(:kotoba
+(defn- ie-elab-seq [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (let [op (form/nth-of form 0)]
+    (cond
+      (ie-tbl-has? ctx :source-operation-registry op) (el-source-op ctx form expected locals sigs used)
+      (sym-is? op "let") (el-let ctx form expected locals sigs used)
+      (sym-is? op "if") (el-if ctx form expected locals sigs used)
+      (sym-is? op "do") (el-do ctx form expected locals sigs used)
+      (sym-is? op "option-match") (el-option-match ctx form expected locals sigs used)
+      (sym-is? op "result-match-of") (el-result-match ctx form expected locals sigs used)
+      (sym-is? op "variant-match") (el-variant-match ctx form expected locals sigs used)
+      (sym-is? op "typed-cap-call") (el-typed-cap-call ctx form locals sigs used)
+      (form/form-has? sigs op) (el-sig-call ctx form locals sigs used)
+      :else (el-plain-call ctx form locals sigs used))))
+   :default nil)
+
+;; Lower a friendly qualified operation such as `(http/post request)` after parameter and result types are known.
+;; Answers [form' used'].
+#?(:kotoba
+(defn- ie-elab [ctx [:ref :ie/ctx] form [:ref :form/r] expected [:ref :form/r] locals [:ref :form/r] sigs [:ref :form/r] used [:ref :form/r]] [:ref :form/r]
+  (if (form/is-seq? form)
+    (ie-elab-seq ctx form expected locals sigs used)
+    (el-r form used)))
+   :default nil)
+
+#?(:kotoba
+(defn- el-functions [functions [:ref :form/r] i :i64 ctx [:ref :ie/ctx] sigs [:ref :form/r] used [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :form/r]
+  (if (>= i (form/count-of functions))
+    (el-r (form/form-vec acc) used)
+    (let [f (form/nth-of functions i)
+          body (fget f :body)
+          result (fget f :result)
+          params (fget f :params)
+          ptypes (fget f :param-types)
+          locals (zip-locals params ptypes)
+          r (ie-elab ctx body result locals sigs used)
+          used2 (el-used r)
+          f2 (fput f :body (el-form r))
+          acc2 (form/append-form acc f2)]
+      (el-functions functions (+ i 1) ctx sigs used2 acc2))))
+   :default nil)
+
+;; {:functions [...] :used #{...}}
+#?(:kotoba
+(defn- elaborate-named-abilities [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
+  (let [sigs (abort-signatures functions)
+        r (el-functions functions 0 ctx sigs (form/form-set (form/no-forms)) (form/no-forms))]
+    (form/form-map (tput (tput (form/no-forms) :functions (el-form r)) :used (el-used r)))))
+   :default nil)
