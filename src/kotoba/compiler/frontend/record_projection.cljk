@@ -4,7 +4,7 @@
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form]])
             #?@(:cljs [[kotoba.kir.cljs-i64 :as i64]])
-            [kotoba.compiler.frontend.base :refer [*synthetic-counter* first-truthy let-body reject! synthetic]]
+            [kotoba.compiler.frontend.base :refer [let-body reject! synthetic #?@(:kotoba [] :default [first-truthy *synthetic-counter*])]]
             [kotoba.compiler.frontend.closure-types :refer [canonical-list-type? canonical-typed-map-type? closure-default-value-expr heterogeneous-vector-type? record-type? schema-ref-type? typed-set-type? variant-type? #?@(:kotoba [fe-error])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
             [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! #?@(:kotoba [] :default [collection-count-operations map-projection-operations set-operations vector-end-operations])]]

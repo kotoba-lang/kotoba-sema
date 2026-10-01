@@ -5,9 +5,9 @@
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt]])
-            [kotoba.compiler.frontend.base :refer [*synthetic-counter* abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id first-truthy if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts]]
+            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-wire-id effect-capability-id if-parts let-body reject! reject-call-arity! source-operation-registry synthetic try-clause-parts #?@(:kotoba [] :default [first-truthy *synthetic-counter*])]]
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [] :default [kernel-memory-operations])]]
-            [kotoba.compiler.frontend.closure-types :refer [*schemas* callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type?]]
+            [kotoba.compiler.frontend.closure-types :refer [callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [] :default [*schemas*])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
             [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]

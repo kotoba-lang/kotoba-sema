@@ -2,7 +2,7 @@
   "Module `state-ability` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (12 forms, 565 lines). Depends on: base, closure-types, expand, namespace-defs, infer."
   (:require [kotoba.compiler.frontend-tables :as tables]
             #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [*synthetic-counter* abort-form-mentions? first-truthy if-parts let-body reject! reject-call-arity! synthetic]]
+            [kotoba.compiler.frontend.base :refer [abort-form-mentions? if-parts let-body reject! reject-call-arity! synthetic #?@(:kotoba [] :default [first-truthy *synthetic-counter*])]]
             [kotoba.compiler.frontend.closure-types :refer [canonical-closure-result-type]]
             [kotoba.compiler.frontend.expand :refer [max-parameters state-rebuild-seq]]
             [kotoba.compiler.frontend.namespace-defs :refer [#?@(:kotoba [heads-kids])]]

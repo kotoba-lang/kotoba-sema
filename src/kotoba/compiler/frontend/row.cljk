@@ -2,7 +2,7 @@
   "Module `row` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (19 forms, 499 lines). Depends on: base, kernel-region, closure-types, infer, record-projection."
   (:require [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
-            [kotoba.compiler.frontend.base :refer [first-truthy reject!]]
+            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [] :default [first-truthy])]]
             [kotoba.compiler.frontend.kernel-region :refer [map-literal-record-namespace map-literal-record-type]]
             [kotoba.compiler.frontend.closure-types :refer [*schemas* max-record-fields record-type?]]
             [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text]]

@@ -9,7 +9,7 @@
             [kotoba.kir :as kir]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [*local-state-used* *synthetic-counter* a-normalize-aborts abort-escapes? capability-id->name capability-registry check-abort-facet-unwind! effect-capability-id elaborate-local-state expand-intrinsic-helper-forms first-truthy form-span max-reader-depth read-forms reject! source-operation-registry synthetic validate-interrupt-entries!]]
+            [kotoba.compiler.frontend.base :refer [a-normalize-aborts abort-escapes? capability-id->name capability-registry check-abort-facet-unwind! effect-capability-id elaborate-local-state expand-intrinsic-helper-forms form-span max-reader-depth read-forms reject! source-operation-registry synthetic validate-interrupt-entries! #?@(:kotoba [] :default [first-truthy *synthetic-counter* *local-state-used*])]]
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker? check-kernel-region-provenance!]]
             [kotoba.compiler.frontend.closure-types :refer [*schemas* callable-type? canonical-closure-result-type check-linear-resource-ownership! closure-result-type? invoke-dispatcher-name lambda-dispatchers record-type? schema-ref-type? structured-type? type-alias-form? typed-param-parts variant-type?]]
             [kotoba.compiler.frontend.expand :refer [binding-symbols expand-closed-multimethod-forms expand-defn-parts expand-record-protocol-forms expand-state-ability-forms kotoba-integer? max-parameters rewrite-pure-application-forms valid-name? variadic-params?]]
