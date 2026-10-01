@@ -3584,6 +3584,11 @@
                result? (assoc :closure-result? true))))
          functions)))))
 
+;; Total bytes of string literals, and of keyword literals, a module may carry (each occurrence counts, after desugaring). This is a
+;; bound on the module's rodata, not on one value: it used to reuse `value/string-value-byte-limit` (64 KiB, the cap on a single runtime
+;; string), which the compiler's own linked closure exceeds many times over (amu ADR 0359).
+(def max-module-literal-bytes 4194304)
+
 (defn check-value-types! [functions]
   (let [signatures (into {} (map (fn [{:keys [name params param-types result]}]
                                    [name {:params params :param-types param-types
@@ -3602,7 +3607,7 @@
           (reduce + 0
                   (map (comp value/utf8-byte-count! str)
                        (filter keyword? nodes)))]
-      (when (> literal-bytes value/string-value-byte-limit)
+      (when (> literal-bytes max-module-literal-bytes)
         (reject! "module string literals exceed UTF-8 byte limit" literal-bytes))
-      (when (> keyword-bytes value/string-value-byte-limit)
+      (when (> keyword-bytes max-module-literal-bytes)
         (reject! "module keyword literals exceed UTF-8 byte limit" keyword-bytes)))))
