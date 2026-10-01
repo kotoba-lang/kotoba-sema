@@ -194,7 +194,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-rewrite-kids [kids [:list [:ref :form/r]] i :i64 names [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-rewrite-kids [kids [:list [:ref :form/r]] i :i64 names [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
        (ex-rewrite-kids kids (+ i 1) names (form/append-form acc (rewrite-pure-app-form (fl-nth kids i) names)))))
@@ -202,7 +202,7 @@
 
 ;; the rewritten forms of the arguments after the head
 #?(:kotoba
-   (defn ex-rewrite-args [form [:ref :form/r] names [:ref :form/r]] [:list [:ref :form/r]]
+   (defn- ex-rewrite-args [form [:ref :form/r] names [:ref :form/r]] [:list [:ref :form/r]]
      (ex-rewrite-kids (form/kids-of form) 1 names (form/no-forms)))
    :default nil)
 
@@ -264,7 +264,7 @@
 
 ;; the names a module's top level defines, read syntactically
 #?(:kotoba
-   (defn ex-definition-names [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-definition-names [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)
@@ -282,7 +282,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-rewrite-forms [forms [:list [:ref :form/r]] i :i64 names [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-rewrite-forms [forms [:list [:ref :form/r]] i :i64 names [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (ex-rewrite-forms forms (+ i 1) names (form/append-form acc (rewrite-pure-app-form (fl-nth forms i) names)))))
@@ -308,7 +308,7 @@
 ;; {:fixed :rest-name :body :min-arity}; the surplus arguments become positional parameters named
 ;; under PREFIX and REST is bound to the `(list ...)` of exactly those
 #?(:kotoba
-   (defn ex-extras [prefix :string i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-extras [prefix :string i :i64 n :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i n)
        acc
        (ex-extras prefix (+ i 1) n (form/append-form acc (fsym (string-concat prefix (string-from-i64 i)))))))
@@ -342,7 +342,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-state-kids [kids [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-state-kids [kids [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
        (ex-state-kids kids (+ i 1) (form/append-form acc (rewrite-state-ability-form (fl-nth kids i))))))
@@ -398,7 +398,7 @@
 ;; Inside ONE handler clause body, `(resume value state)` becomes the reserved head; a resume of
 ;; any other arity is refused by its own name
 #?(:kotoba
-   (defn ex-resume-kids [kids [:list [:ref :form/r]] i :i64 handler [:ref :form/r] op [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-resume-kids [kids [:list [:ref :form/r]] i :i64 handler [:ref :form/r] op [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
        (ex-resume-kids kids (+ i 1) handler op (form/append-form acc (state-resume-rewrite (fl-nth kids i) handler op)))))
@@ -424,7 +424,7 @@
 
 ;; One clause of a defhandler: {:op :params :body}
 #?(:kotoba
-   (defn ex-handler-clause [clause [:ref :form/r] handler [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
+   (defn- ex-handler-clause [clause [:ref :form/r] handler [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
      (let [ok (require-k (and (form/is-seq? clause) (form/is-symbol? (form/nth-of clause 0))
                               (form/is-vec? (form/nth-of clause 1)) (> (form/count-of clause) 2))
                          (str "handler " (form-text handler) " clause must be (op [state value ...] body): " (pr-form clause))
@@ -436,7 +436,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-handler-clauses [clauses [:list [:ref :form/r]] i :i64 handler [:ref :form/r] form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-handler-clauses [clauses [:list [:ref :form/r]] i :i64 handler [:ref :form/r] form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count clauses))
        acc
        (ex-handler-clauses clauses (+ i 1) handler form (form/append-form acc (ex-handler-clause (fl-nth clauses i) handler form)))))
@@ -444,14 +444,14 @@
 
 ;; the :op of each parsed clause
 #?(:kotoba
-   (defn ex-handler-ops [parsed [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-handler-ops [parsed [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count parsed))
        acc
        (ex-handler-ops parsed (+ i 1) (form/append-form acc (fget (fl-nth parsed i) :op)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-ops-text [ops [:list [:ref :form/r]] i :i64 acc :string] :string
+   (defn- ex-ops-text [ops [:list [:ref :form/r]] i :i64 acc :string] :string
      (if (>= i (vector-count ops))
        acc
        (ex-ops-text ops (+ i 1) (string-concat (if (> i 0) (string-concat acc ", ") acc) (fname (fl-nth ops i))))))
@@ -459,7 +459,7 @@
 
 ;; each clause takes the state, then the operation's values
 #?(:kotoba
-   (defn ex-handler-params-ok [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] form [:ref :form/r]] :i64
+   (defn- ex-handler-params-ok [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] form [:ref :form/r]] :i64
      (if (>= i (vector-count parsed))
        0
        (let [c (fl-nth parsed i)
@@ -477,7 +477,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-all-simple? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-all-simple? [xs [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of xs))
        true
        (and (simple-symbol-form? (form/nth-of xs i)) (ex-all-simple? xs (+ i 1)))))
@@ -485,7 +485,7 @@
 
 ;; (p state-type ...) for each parameter
 #?(:kotoba
-   (defn ex-typed-params [params [:ref :form/r] state-type [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-typed-params [params [:ref :form/r] state-type [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of params))
        acc
        (ex-typed-params params state-type (+ i 1)
@@ -493,7 +493,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-handler-defns [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] state-type [:ref :form/r] form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-handler-defns [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] state-type [:ref :form/r] form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count parsed))
        acc
        (let [c (fl-nth parsed i)
@@ -509,7 +509,7 @@
 
 ;; {op {:fn name}} for the handler's clauses
 #?(:kotoba
-   (defn ex-handler-clause-map [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-handler-clause-map [parsed [:list [:ref :form/r]] i :i64 handler [:ref :form/r] acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count parsed))
        acc
        (let [op (fget (fl-nth parsed i) :op)]
@@ -553,21 +553,21 @@
 
 ;; does the form mention any of the state ability's source forms?
 #?(:kotoba
-   (defn ex-mentions-state? [f [:ref :form/r]] :bool
+   (defn- ex-mentions-state? [f [:ref :form/r]] :bool
      (if (or (fhead-is? f "defhandler") (state-ability-perform-form? f) (state-ability-handle-form? f))
        true
        (ex-mentions-state-kids? (form/kids-of f) 0)))
    :default nil)
 
 #?(:kotoba
-   (defn ex-mentions-state-kids? [kids [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-mentions-state-kids? [kids [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count kids))
        false
        (if (ex-mentions-state? (fl-nth kids i)) true (ex-mentions-state-kids? kids (+ i 1)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-state-forms [forms [:list [:ref :form/r]] i :i64 out [:list [:ref :form/r]] handlers [:ref :form/r]] [:ref :form/r]
+   (defn- ex-state-forms [forms [:list [:ref :form/r]] i :i64 out [:list [:ref :form/r]] handlers [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count forms))
        (fput (fput (form/form-map (form/no-forms)) :forms (form/form-vec out)) :handlers handlers)
        (let [f (fl-nth forms i)]
@@ -594,14 +594,14 @@
 
 ;; every element of CEILING (a set Form) is a keyword
 #?(:kotoba
-   (defn ex-all-keywords? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-all-keywords? [xs [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of xs))
        true
        (and (form/is-keyword? (form/nth-of xs i)) (ex-all-keywords? xs (+ i 1)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-ceiling-rows [ceiling [:ref :form/r] i :i64 form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-ceiling-rows [ceiling [:ref :form/r] i :i64 form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of ceiling))
        acc
        (let [kw (form/nth-of ceiling i)
@@ -630,7 +630,7 @@
 
 ;; ---- defn declarations ----
 #?(:kotoba
-   (defn ex-absent [] [:ref :form/r] (form/keyword-form :kotoba.expand/absent))
+   (defn- ex-absent [] [:ref :form/r] (form/keyword-form :kotoba.expand/absent))
    :default nil)
 
 ;; Parse Kotoba's bounded function declaration shape: an optional docstring, the parameter vector,
@@ -638,12 +638,12 @@
 ;; map {:name :raw-params :result :body ...}; the body is a Form vector of one or more forms
 ;; collapsed to one `do` when several were written.
 #?(:kotoba
-   (defn ex-type-position? [f [:ref :form/r]] :bool
+   (defn- ex-type-position? [f [:ref :form/r]] :bool
      (or (form/is-keyword? f) (structured-type? f) (type-alias-form? f)))
    :default nil)
 
 #?(:kotoba
-   (defn ex-ceiling-map? [f [:ref :form/r]] :bool
+   (defn- ex-ceiling-map? [f [:ref :form/r]] :bool
      (and (form/is-map? f) (form/form-has? f (form/keyword-form :effects))
           (= 2 (form/count-of f))))
    :default nil)
@@ -682,7 +682,7 @@
 
 ;; every clause of DECLARATION (from I) is a list headed by a vector
 #?(:kotoba
-   (defn ex-all-clauses? [declaration [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-all-clauses? [declaration [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count declaration))
        true
        (let [c (fl-nth declaration i)]
@@ -706,7 +706,7 @@
 
 ;; the index of the `&` in a parameter vector, -1 when absent
 #?(:kotoba
-   (defn ex-amp-index [raw-params [:ref :form/r] i :i64] :i64
+   (defn- ex-amp-index [raw-params [:ref :form/r] i :i64] :i64
      (if (>= i (form/count-of raw-params))
        -1
        (if (form/eq (form/nth-of raw-params i) (fsym "&")) i (ex-amp-index raw-params (+ i 1)))))
@@ -714,7 +714,7 @@
 
 ;; the patterns of PARTS (imp-typed-param-parts maps)
 #?(:kotoba
-   (defn ex-part-symbols [parts [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-part-symbols [parts [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of parts))
        acc
        (ex-part-symbols parts (+ i 1) (fsymbols-into (fget (form/nth-of parts i) :pattern) acc))))
@@ -747,7 +747,7 @@
 
 ;; ---- expand-defn-parts ----
 #?(:kotoba
-   (defn ex-defn-raws [declaration [:list [:ref :form/r]] i :i64 op [:ref :form/r] source-name [:ref :form/r] constants [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-defn-raws [declaration [:list [:ref :form/r]] i :i64 op [:ref :form/r] source-name [:ref :form/r] constants [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count declaration))
        acc
        (let [clause (fl-nth declaration i)
@@ -757,7 +757,7 @@
 
 ;; the raw clauses that are (VARIADIC? true) / are not variadic
 #?(:kotoba
-   (defn ex-select-raws [raws [:list [:ref :form/r]] variadic? :bool i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-select-raws [raws [:list [:ref :form/r]] variadic? :bool i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count raws))
        acc
        (let [raw (fl-nth raws i)]
@@ -766,7 +766,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-fixed-clauses [raws [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] public? :bool constants [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-fixed-clauses [raws [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] public? :bool constants [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count raws))
        acc
        (let [raw (fl-nth raws i)]
@@ -778,7 +778,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-clause-arities [clauses [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-clause-arities [clauses [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count clauses))
        acc
        (ex-clause-arities clauses (+ i 1) (form/append-form acc (fget (fl-nth clauses i) :logical-arity)))))
@@ -786,7 +786,7 @@
 
 ;; the called arities within [MIN, max-parameters]
 #?(:kotoba
-   (defn ex-used-arities [call-arities [:ref :form/r] i :i64 min :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-used-arities [call-arities [:ref :form/r] i :i64 min :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of call-arities))
        acc
        (let [a (form/int-value (form/nth-of call-arities i))]
@@ -796,14 +796,14 @@
 
 ;; the smallest arity from A through max-parameters that no fixed clause holds, -1 when none
 #?(:kotoba
-   (defn ex-first-free [fixed [:list [:ref :form/r]] a :i64] :i64
+   (defn- ex-first-free [fixed [:list [:ref :form/r]] a :i64] :i64
      (if (> a (max-parameters))
        -1
        (if (fl-has? fixed (form/int-form a) 0) (ex-first-free fixed (+ a 1)) a)))
    :default nil)
 
 #?(:kotoba
-   (defn ex-insert-int [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
+   (defn- ex-insert-int [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] [:list [:ref :form/r]]
      (if (or (>= i (vector-count xs)) (> (form/int-value (fl-nth xs i)) (form/int-value x)))
        (fl-slice xs i (vector-count xs) (form/append-form (fl-slice xs 0 i (form/no-forms)) x))
        (ex-insert-int xs x (+ i 1))))
@@ -811,7 +811,7 @@
 
 ;; the called arities not held by a fixed clause, plus the first free one, ascending
 #?(:kotoba
-   (defn ex-variadic-arities [used [:list [:ref :form/r]] always :i64 fixed [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-variadic-arities [used [:list [:ref :form/r]] always :i64 fixed [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count used))
        (if (and (>= always 0) (not (fl-has? acc (form/int-form always) 0)))
          (ex-insert-int acc (form/int-form always) 0)
@@ -822,7 +822,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-variadic-clauses [raw [:ref :form/r] parts [:ref :form/r] arities [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] public? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-variadic-clauses [raw [:ref :form/r] parts [:ref :form/r] arities [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] public? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count arities))
        acc
        (let [arity (form/int-value (fl-nth arities i))
@@ -839,7 +839,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-rename-clauses [clauses [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-rename-clauses [clauses [:list [:ref :form/r]] i :i64 source-name [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count clauses))
        acc
        (let [c (fl-nth clauses i)]
@@ -849,7 +849,7 @@
 
 ;; The multi-arity / variadic path of expand-defn-parts: one monomorphic clause per arity
 #?(:kotoba
-   (defn ex-defn-clauses [form [:ref :form/r] op [:ref :form/r] source-name [:ref :form/r] declaration [:list [:ref :form/r]] public? :bool constants [:ref :form/r] call-arities [:ref :form/r]] [:ref :form/r]
+   (defn- ex-defn-clauses [form [:ref :form/r] op [:ref :form/r] source-name [:ref :form/r] declaration [:list [:ref :form/r]] public? :bool constants [:ref :form/r] call-arities [:ref :form/r]] [:ref :form/r]
      (let [declaration2 (if (multi-arity-declaration? declaration) declaration (form/one-form (form/form-seq declaration)))
            ok1 (require-k (<= (vector-count declaration2) (max-arity-clauses))
                           "multi-arity clause count exceeds admission limit" "kotoba.error/subset-reject" form)
@@ -915,7 +915,7 @@
 
 ;; the forms of FORMS (from I) headed by HEAD
 #?(:kotoba
-   (defn ex-select-head [forms [:list [:ref :form/r]] head :string i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-select-head [forms [:list [:ref :form/r]] head :string i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)]
@@ -924,12 +924,12 @@
 
 ;; an unqualified symbol
 #?(:kotoba
-   (defn ex-plain-symbol? [f [:ref :form/r]] :bool
+   (defn- ex-plain-symbol? [f [:ref :form/r]] :bool
      (and (form/is-symbol? f) (string=? (fnamespace f) "")))
    :default nil)
 
 #?(:kotoba
-   (defn ex-all-plain-symbols? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-all-plain-symbols? [xs [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of xs))
        true
        (and (ex-plain-symbol? (form/nth-of xs i)) (ex-all-plain-symbols? xs (+ i 1)))))
@@ -937,7 +937,7 @@
 
 ;; the names of FORMS (their second element)
 #?(:kotoba
-   (defn ex-second-of-all [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-second-of-all [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (ex-second-of-all forms (+ i 1) (form/append-form acc (form/nth-of (fl-nth forms i) 1)))))
@@ -945,7 +945,7 @@
 
 ;; defmulti declarations: {name {:form :dispatch}}
 #?(:kotoba
-   (defn ex-multi-declarations [declarations [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-multi-declarations [declarations [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count declarations))
        acc
        (let [f (fl-nth declarations i)
@@ -960,7 +960,7 @@
 
 ;; each defmethod is well formed and names a declared defmulti
 #?(:kotoba
-   (defn ex-check-methods [methods [:list [:ref :form/r]] i :i64 declarations [:ref :form/r]] :i64
+   (defn- ex-check-methods [methods [:list [:ref :form/r]] i :i64 declarations [:ref :form/r]] :i64
      (if (>= i (vector-count methods))
        0
        (let [f (fl-nth methods i)
@@ -983,7 +983,7 @@
 
 ;; the defmethod forms of NAME
 #?(:kotoba
-   (defn ex-methods-of [methods [:list [:ref :form/r]] name [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-methods-of [methods [:list [:ref :form/r]] name [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count methods))
        acc
        (let [f (fl-nth methods i)]
@@ -992,7 +992,7 @@
 
 ;; every method uses the first method's parameter vector
 #?(:kotoba
-   (defn ex-same-params [methods [:list [:ref :form/r]] params [:ref :form/r] i :i64] :i64
+   (defn- ex-same-params [methods [:list [:ref :form/r]] params [:ref :form/r] i :i64] :i64
      (if (>= i (vector-count methods))
        0
        (let [ok (require-k (form/eq params (form/nth-of (fl-nth methods i) 3))
@@ -1001,7 +1001,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-method-body [method [:ref :form/r]] [:ref :form/r]
+   (defn- ex-method-body [method [:ref :form/r]] [:ref :form/r]
      (let [body (fdrop method 4)]
        (if (= 1 (vector-count body))
          (fl-nth body 0)
@@ -1010,7 +1010,7 @@
 
 ;; the dispatch-value and body pairs of the non-default methods, then the default body
 #?(:kotoba
-   (defn ex-method-clauses [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]] default-body [:ref :form/r]] [:list [:ref :form/r]]
+   (defn- ex-method-clauses [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]] default-body [:ref :form/r]] [:list [:ref :form/r]]
      (if (>= i (vector-count methods))
        (if (form/is-nil? default-body) acc (form/append-form acc default-body))
        (let [m (fl-nth methods i)]
@@ -1022,7 +1022,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-default-method-body [methods [:list [:ref :form/r]] i :i64] [:ref :form/r]
+   (defn- ex-default-method-body [methods [:list [:ref :form/r]] i :i64] [:ref :form/r]
      (if (>= i (vector-count methods))
        (form/nil-form)
        (let [m (fl-nth methods i)]
@@ -1032,7 +1032,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-dispatch-values [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-dispatch-values [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count methods))
        acc
        (ex-dispatch-values methods (+ i 1) (form/append-form acc (form/nth-of (fl-nth methods i) 2)))))
@@ -1040,7 +1040,7 @@
 
 ;; the generated `(defn name params (case (dispatch params...) clauses...))`
 #?(:kotoba
-   (defn ex-generated-multi [name [:ref :form/r] decl [:ref :form/r] methods [:list [:ref :form/r]]] [:ref :form/r]
+   (defn- ex-generated-multi [name [:ref :form/r] decl [:ref :form/r] methods [:list [:ref :form/r]]] [:ref :form/r]
      (let [form (fget decl :form)
            ok1 (require-k (> (vector-count methods) 0) "defmulti requires at least one closed-world defmethod"
                           "kotoba.error/subset-reject" form)
@@ -1056,7 +1056,7 @@
 
 ;; the output forms: each defmulti becomes its generated defn, each defmethod disappears
 #?(:kotoba
-   (defn ex-multi-output [forms [:list [:ref :form/r]] i :i64 declarations [:ref :form/r] methods [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-multi-output [forms [:list [:ref :form/r]] i :i64 declarations [:ref :form/r] methods [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)]
@@ -1085,7 +1085,7 @@
 ;; ---- protocols and records ----
 ;; A protocol declaration's method forms with the trailing docstring of a method removed
 #?(:kotoba
-   (defn ex-strip-docs [tail [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-strip-docs [tail [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count tail))
        acc
        (let [m (fl-nth tail i)]
@@ -1104,7 +1104,7 @@
 ;; Split a protocol method parameter vector into its names and their value types, as a Form map
 ;; {:names :types}; nil when it is not names with optional types
 #?(:kotoba
-   (defn ex-param-parts [params [:ref :form/r] i :i64 names [:list [:ref :form/r]] types [:list [:ref :form/r]]] [:ref :form/r]
+   (defn- ex-param-parts [params [:ref :form/r] i :i64 names [:list [:ref :form/r]] types [:list [:ref :form/r]]] [:ref :form/r]
      (if (>= i (form/count-of params))
        (fput (fput (form/form-map (form/no-forms)) :names (form/form-vec names)) :types (form/form-vec types))
        (let [param (form/nth-of params i)]
@@ -1126,7 +1126,7 @@
 
 ;; the trailing docstring of each method of TAIL (a string after the signature)
 #?(:kotoba
-   (defn ex-method-docs [tail [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-method-docs [tail [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count tail))
        acc
        (let [m (fl-nth tail i)]
@@ -1137,7 +1137,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-docs-bounded [docs [:list [:ref :form/r]] i :i64 head [:ref :form/r] form [:ref :form/r]] :i64
+   (defn- ex-docs-bounded [docs [:list [:ref :form/r]] i :i64 head [:ref :form/r] form [:ref :form/r]] :i64
      (if (>= i (vector-count docs))
        0
        (let [doc (fl-nth docs i)
@@ -1149,7 +1149,7 @@
 
 ;; a method signature `(name [this ...])` of a protocol declaration is bounded
 #?(:kotoba
-   (defn ex-method-signature-ok? [m [:ref :form/r]] :bool
+   (defn- ex-method-signature-ok? [m [:ref :form/r]] :bool
      (and (form/is-seq? m) (= 2 (form/count-of m)) (valid-name? (form/nth-of m 0))
           (form/is-vec? (form/nth-of m 1)) (> (form/count-of (form/nth-of m 1)) 0)
           (let [parts (protocol-method-param-parts (form/nth-of m 1))]
@@ -1160,21 +1160,21 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-all-valid-names? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-all-valid-names? [xs [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of xs))
        true
        (and (valid-name? (form/nth-of xs i)) (ex-all-valid-names? xs (+ i 1)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-all-signatures-ok? [methods [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-all-signatures-ok? [methods [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count methods))
        true
        (and (ex-method-signature-ok? (fl-nth methods i)) (ex-all-signatures-ok? methods (+ i 1)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-method-names [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-method-names [methods [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count methods))
        acc
        (ex-method-names methods (+ i 1) (form/append-form acc (form/nth-of (fl-nth methods i) 0)))))
@@ -1182,7 +1182,7 @@
 
 ;; {method-name parts} for each method
 #?(:kotoba
-   (defn ex-method-parts [methods [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-method-parts [methods [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count methods))
        acc
        (let [m (fl-nth methods i)]
@@ -1191,7 +1191,7 @@
 
 ;; every non-nil declared type of the parts of M is a valid value type
 #?(:kotoba
-   (defn ex-validate-types [types [:ref :form/r] i :i64] :i64
+   (defn- ex-validate-types [types [:ref :form/r] i :i64] :i64
      (if (>= i (form/count-of types))
        0
        (let [t (form/nth-of types i)
@@ -1200,7 +1200,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-validate-part-types [parts [:ref :form/r] j :i64] :i64
+   (defn- ex-validate-part-types [parts [:ref :form/r] j :i64] :i64
      (if (>= (+ j 1) (form/count-of parts))
        0
        (let [ok (ex-validate-types (fget (form/nth-of parts (+ j 1)) :types) 0)]
@@ -1209,7 +1209,7 @@
 
 ;; {method-name (names or types)} projected from PARTS
 #?(:kotoba
-   (defn ex-project-parts [parts [:ref :form/r] key :keyword j :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-project-parts [parts [:ref :form/r] key :keyword j :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= (+ j 1) (form/count-of parts))
        acc
        (ex-project-parts parts key (+ j 2) (form/assoc-form acc (form/nth-of parts j) (fget (form/nth-of parts (+ j 1)) key)))))
@@ -1242,7 +1242,7 @@
 
 ;; ---- record field parts ----
 #?(:kotoba
-   (defn ex-any-keyword? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-any-keyword? [xs [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of xs))
        false
        (if (form/is-keyword? (form/nth-of xs i)) true (ex-any-keyword? xs (+ i 1)))))
@@ -1250,19 +1250,19 @@
 
 ;; some odd-position element (a field's type) is a structured type
 #?(:kotoba
-   (defn ex-any-structured-type? [xs [:ref :form/r] i :i64] :bool
+   (defn- ex-any-structured-type? [xs [:ref :form/r] i :i64] :bool
      (if (>= (+ i 1) (form/count-of xs))
        false
        (if (structured-type? (form/nth-of xs (+ i 1))) true (ex-any-structured-type? xs (+ i 2)))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-field-part [name [:ref :form/r] type [:ref :form/r]] [:ref :form/r]
+   (defn- ex-field-part [name [:ref :form/r] type [:ref :form/r]] [:ref :form/r]
      (fput (fput (form/form-map (form/no-forms)) :name name) :type type))
    :default nil)
 
 #?(:kotoba
-   (defn ex-typed-fields [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-typed-fields [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ i 1) (form/count-of fields))
        acc
        (let [field (form/nth-of fields i)
@@ -1274,7 +1274,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-untyped-fields [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-untyped-fields [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of fields))
        acc
        (let [field (form/nth-of fields i)
@@ -1297,7 +1297,7 @@
 ;; ---- extension implementations ----
 ;; the method names of a protocol info (keys of its :methods map)
 #?(:kotoba
-   (defn ex-map-keys [m [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-map-keys [m [:ref :form/r] j :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ j 1) (form/count-of m))
        acc
        (ex-map-keys m (+ j 2) (form/append-form acc (form/nth-of m j)))))
@@ -1305,7 +1305,7 @@
 
 ;; the first element of each method form
 #?(:kotoba
-   (defn ex-form-heads [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-form-heads [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (ex-form-heads forms (+ i 1) (form/append-form acc (form/nth-of (fl-nth forms i) 0)))))
@@ -1313,12 +1313,12 @@
 
 ;; A and B hold the same elements
 #?(:kotoba
-   (defn ex-same-members? [a [:list [:ref :form/r]] b [:list [:ref :form/r]]] :bool
+   (defn- ex-same-members? [a [:list [:ref :form/r]] b [:list [:ref :form/r]]] :bool
      (and (ex-subset? a b 0) (ex-subset? b a 0)))
    :default nil)
 
 #?(:kotoba
-   (defn ex-subset? [a [:list [:ref :form/r]] b [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-subset? [a [:list [:ref :form/r]] b [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count a))
        true
        (and (fl-has? b (fl-nth a i) 0) (ex-subset? a b (+ i 1)))))
@@ -1326,7 +1326,7 @@
 
 ;; declared type or the given one (:i64 when neither), per parameter
 #?(:kotoba
-   (defn ex-param-types [declared [:ref :form/r] given [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-param-types [declared [:ref :form/r] given [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (or (>= i (form/count-of declared)) (>= i (form/count-of given)))
        acc
        (let [g (form/nth-of given i)
@@ -1336,7 +1336,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-impl-method [method-form [:ref :form/r] protocol [:ref :form/r] protocol-name [:ref :form/r] record [:ref :form/r] record-name [:ref :form/r]] [:ref :form/r]
+   (defn- ex-impl-method [method-form [:ref :form/r] protocol [:ref :form/r] protocol-name [:ref :form/r] record [:ref :form/r] record-name [:ref :form/r]] [:ref :form/r]
      (let [method-name (form/nth-of method-form 0)
            params (form/nth-of method-form 1)
            body (fdrop method-form 2)
@@ -1368,7 +1368,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-impl-methods [method-forms [:list [:ref :form/r]] i :i64 protocol [:ref :form/r] protocol-name [:ref :form/r] record [:ref :form/r] record-name [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-impl-methods [method-forms [:list [:ref :form/r]] i :i64 protocol [:ref :form/r] protocol-name [:ref :form/r] record [:ref :form/r] record-name [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count method-forms))
        acc
        (ex-impl-methods method-forms (+ i 1) protocol protocol-name record record-name
@@ -1395,7 +1395,7 @@
 ;; ---- record constructors and member access ----
 ;; the rewritten kids of FORM from I (record constructors under the two constructor tables)
 #?(:kotoba
-   (defn ex-rc-kids [kids [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-rc-kids [kids [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
        (ex-rc-kids kids (+ i 1) by-map by-wide
@@ -1404,7 +1404,7 @@
 
 ;; the keywords (name field) of each field symbol
 #?(:kotoba
-   (defn ex-field-keys [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-field-keys [fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of fields))
        acc
        (ex-field-keys fields (+ i 1) (form/append-form acc (fkw (fname (form/nth-of fields i)))))))
@@ -1412,18 +1412,18 @@
 
 ;; the keys of a map Form (even positions)
 #?(:kotoba
-   (defn ex-map-key-list [m [:ref :form/r]] [:list [:ref :form/r]] (ex-map-keys m 0 (form/no-forms)))
+   (defn- ex-map-key-list [m [:ref :form/r]] [:list [:ref :form/r]] (ex-map-keys m 0 (form/no-forms)))
    :default nil)
 
 ;; the leading elements of XS up to (not including) the last
 #?(:kotoba
-   (defn ex-butlast [xs [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-butlast [xs [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (fl-slice xs 0 (- (vector-count xs) 1) (form/no-forms)))
    :default nil)
 
 ;; the rewritten values of the declared fields of a literal map, in field order
 #?(:kotoba
-   (defn ex-field-values [form [:ref :form/r] keys [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-field-values [form [:ref :form/r] keys [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count keys))
        acc
        (ex-field-values form keys (+ i 1) by-map by-wide
@@ -1432,7 +1432,7 @@
 
 ;; test/result pairs of CLAUSES (without the final default), the result positions rewritten
 #?(:kotoba
-   (defn ex-record-pairs [clauses [:list [:ref :form/r]] i :i64 n :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-record-pairs [clauses [:list [:ref :form/r]] i :i64 n :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ i 1) n)
        acc
        (ex-record-pairs clauses (+ i 2) n record by-map by-wide
@@ -1442,7 +1442,7 @@
 
 ;; cond clauses: even positions are tests (rewritten), odd positions are results (record-valued)
 #?(:kotoba
-   (defn ex-record-cond [clauses [:list [:ref :form/r]] i :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-record-cond [clauses [:list [:ref :form/r]] i :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count clauses))
        acc
        (ex-record-cond clauses (+ i 1) record by-map by-wide
@@ -1454,7 +1454,7 @@
 
 ;; let bindings: odd positions are initializers (rewritten)
 #?(:kotoba
-   (defn ex-record-let-bindings [bindings [:ref :form/r] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-record-let-bindings [bindings [:ref :form/r] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of bindings))
        acc
        (ex-record-let-bindings bindings (+ i 1) by-map by-wide
@@ -1465,7 +1465,7 @@
 
 ;; a body: all but the last rewritten as expressions, the last record-valued
 #?(:kotoba
-   (defn ex-record-body [body [:list [:ref :form/r]] i :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-record-body [body [:list [:ref :form/r]] i :i64 record [:ref :form/r] by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count body))
        acc
        (ex-record-body body (+ i 1) record by-map by-wide
@@ -1594,14 +1594,14 @@
 ;; ---- member access ----
 ;; does PATTERN bind RECEIVER?
 #?(:kotoba
-   (defn ex-binds? [pattern [:ref :form/r] receiver [:ref :form/r]] :bool
+   (defn- ex-binds? [pattern [:ref :form/r] receiver [:ref :form/r]] :bool
      (fl-has? (form/kids-of (binding-symbols pattern)) receiver 0))
    :default nil)
 
 ;; Rewrite sequential binding values while tracking whether a pattern shadows the receiver; the
 ;; answer is a Form vector [bindings active?]
 #?(:kotoba
-   (defn ex-record-bindings [bindings [:ref :form/r] j :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:ref :form/r]
+   (defn- ex-record-bindings [bindings [:ref :form/r] j :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:ref :form/r]
      (if (>= (+ j 1) (form/count-of bindings))
        (form/vec2 (form/form-vec acc) (form/bool-form active?))
        (let [pattern (form/nth-of bindings j)
@@ -1618,7 +1618,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-ra-kids [kids [:list [:ref :form/r]] i :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-ra-kids [kids [:list [:ref :form/r]] i :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count kids))
        acc
        (ex-ra-kids kids (+ i 1) receiver descriptor active?
@@ -1635,7 +1635,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-fn-clauses [clauses [:list [:ref :form/r]] i :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool named-receiver? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-fn-clauses [clauses [:list [:ref :form/r]] i :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool named-receiver? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count clauses))
        acc
        (ex-fn-clauses clauses (+ i 1) receiver descriptor active? named-receiver?
@@ -1644,7 +1644,7 @@
 
 ;; loop bindings: values rewritten, patterns kept; the body is active unless a pattern shadows
 #?(:kotoba
-   (defn ex-loop-bindings [bindings [:ref :form/r] j :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-loop-bindings [bindings [:ref :form/r] j :i64 receiver [:ref :form/r] descriptor [:ref :form/r] active? :bool acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= (+ j 1) (form/count-of bindings))
        acc
        (ex-loop-bindings bindings (+ j 2) receiver descriptor active?
@@ -1653,14 +1653,14 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-loop-shadows? [bindings [:ref :form/r] j :i64 receiver [:ref :form/r]] :bool
+   (defn- ex-loop-shadows? [bindings [:ref :form/r] j :i64 receiver [:ref :form/r]] :bool
      (if (>= (+ j 1) (form/count-of bindings))
        false
        (if (ex-binds? (form/nth-of bindings j) receiver) true (ex-loop-shadows? bindings (+ j 2) receiver))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-ra-call [form [:ref :form/r] receiver [:ref :form/r] descriptor [:ref :form/r]] [:ref :form/r]
+   (defn- ex-ra-call [form [:ref :form/r] receiver [:ref :form/r] descriptor [:ref :form/r]] [:ref :form/r]
      (let [op (form/nth-of form 0)
            args (fdrop form 1)
            head (fhead form)]
@@ -1728,14 +1728,14 @@
 ;; the sections of an extension: [protocol-name methods] pairs, each protocol name followed by
 ;; its leading seq forms. Answers a Form vector of [name methods-vec].
 #?(:kotoba
-   (defn ex-leading-seqs [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-leading-seqs [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (and (< i (vector-count xs)) (form/is-seq? (fl-nth xs i)))
        (ex-leading-seqs xs (+ i 1) (form/append-form acc (fl-nth xs i)))
        acc))
    :default nil)
 
 #?(:kotoba
-   (defn ex-extension-groups [remaining [:list [:ref :form/r]] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-extension-groups [remaining [:list [:ref :form/r]] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (= 0 (vector-count remaining))
        acc
        (let [protocol-name (fl-nth remaining 0)
@@ -1754,7 +1754,7 @@
 
 ;; the implementations of each group of GROUPS for RECORD-NAME
 #?(:kotoba
-   (defn ex-group-impls [groups [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] record-name [:ref :form/r] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-group-impls [groups [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] record-name [:ref :form/r] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count groups))
        acc
        (let [g (fl-nth groups i)]
@@ -1776,7 +1776,7 @@
 ;; Read one `(extend-protocol Protocol Record (method ...) ... default (method ...))`: a Form map
 ;; {:protocol :implementations :default-methods :form}
 #?(:kotoba
-   (defn ex-protocol-sections [remaining [:list [:ref :form/r]] protocols [:ref :form/r] records [:ref :form/r] protocol-name [:ref :form/r] form [:ref :form/r] implementations [:list [:ref :form/r]] default-methods [:ref :form/r]] [:ref :form/r]
+   (defn- ex-protocol-sections [remaining [:list [:ref :form/r]] protocols [:ref :form/r] records [:ref :form/r] protocol-name [:ref :form/r] form [:ref :form/r] implementations [:list [:ref :form/r]] default-methods [:ref :form/r]] [:ref :form/r]
      (if (= 0 (vector-count remaining))
        (fput (fput (fput (fput (form/form-map (form/no-forms)) :protocol protocol-name)
                          :implementations (form/form-vec implementations))
@@ -1815,7 +1815,7 @@
 
 ;; the implementations of every group for the record being declared, all under {record-name record}
 #?(:kotoba
-   (defn ex-record-impls [groups [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] record-name [:ref :form/r] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-record-impls [groups [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] record-name [:ref :form/r] whole-form [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count groups))
        acc
        (let [g (fl-nth groups i)]
@@ -1826,7 +1826,7 @@
 
 ;; the field parts' names
 #?(:kotoba
-   (defn ex-part-names [parts [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-part-names [parts [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count parts))
        acc
        (ex-part-names parts (+ i 1) (form/append-form acc (fget (fl-nth parts i) :name)))))
@@ -1862,7 +1862,7 @@
 ;; ---- expand-record-protocol-forms ----
 ;; a map name -> info of INFOS (maps carrying :name); duplicate names are reported by the caller
 #?(:kotoba
-   (defn ex-infos-by-name [infos [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-infos-by-name [infos [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count infos))
        acc
        (let [info (fl-nth infos i)]
@@ -1870,7 +1870,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-map-infos [forms [:list [:ref :form/r]] i :i64 kind :i64 a [:ref :form/r] b [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-map-infos [forms [:list [:ref :form/r]] i :i64 kind :i64 a [:ref :form/r] b [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)]
@@ -1883,7 +1883,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-extend-type-impls [forms [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-extend-type-impls [forms [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (ex-extend-type-impls forms (+ i 1) protocols records
@@ -1892,7 +1892,7 @@
 
 ;; the concatenation of KEY's list of each info
 #?(:kotoba
-   (defn ex-concat-key [infos [:list [:ref :form/r]] key :keyword i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-concat-key [infos [:list [:ref :form/r]] key :keyword i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count infos))
        acc
        (ex-concat-key infos key (+ i 1) (form/append-many acc (form/kids-of (fget (fl-nth infos i) key))))))
@@ -1900,14 +1900,14 @@
 
 ;; the method names (keys of each protocol's :methods map)
 #?(:kotoba
-   (defn ex-all-method-names [infos [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-all-method-names [infos [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count infos))
        acc
        (ex-all-method-names infos (+ i 1) (form/append-many acc (ex-map-keys (fget (fl-nth infos i) :methods) 0 (form/no-forms))))))
    :default nil)
 
 #?(:kotoba
-   (defn ex-declared-function-names [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-declared-function-names [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)]
@@ -1916,7 +1916,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-intersects? [a [:list [:ref :form/r]] b [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-intersects? [a [:list [:ref :form/r]] b [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count a))
        false
        (if (fl-has? b (fl-nth a i) 0) true (ex-intersects? a b (+ i 1)))))
@@ -1924,7 +1924,7 @@
 
 ;; the identity [protocol method record] of each implementation
 #?(:kotoba
-   (defn ex-impl-identities [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-impl-identities [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count impls))
        acc
        (let [m (fl-nth impls i)]
@@ -1934,7 +1934,7 @@
 
 ;; the infos whose :default-methods is set
 #?(:kotoba
-   (defn ex-default-infos [infos [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-default-infos [infos [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count infos))
        acc
        (let [info (fl-nth infos i)]
@@ -1942,7 +1942,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-info-keys [infos [:list [:ref :form/r]] key :keyword i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-info-keys [infos [:list [:ref :form/r]] key :keyword i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count infos))
        acc
        (ex-info-keys infos key (+ i 1) (form/append-form acc (fget (fl-nth infos i) key)))))
@@ -1950,7 +1950,7 @@
 
 ;; the records of EXPLICIT implementations of PROTOCOL
 #?(:kotoba
-   (defn ex-implemented-records [impls [:list [:ref :form/r]] protocol [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-implemented-records [impls [:list [:ref :form/r]] protocol [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count impls))
        acc
        (let [m (fl-nth impls i)]
@@ -1960,7 +1960,7 @@
 
 ;; the default section specialized for each record that has no explicit implementation
 #?(:kotoba
-   (defn ex-default-for-records [record-infos [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] protocol [:ref :form/r] default-methods [:ref :form/r] form [:ref :form/r] implemented [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-default-for-records [record-infos [:list [:ref :form/r]] i :i64 protocols [:ref :form/r] records [:ref :form/r] protocol [:ref :form/r] default-methods [:ref :form/r] form [:ref :form/r] implemented [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count record-infos))
        acc
        (let [name (fget (fl-nth record-infos i) :name)]
@@ -1972,7 +1972,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-default-impls [default-infos [:list [:ref :form/r]] i :i64 record-infos [:list [:ref :form/r]] protocols [:ref :form/r] records [:ref :form/r] explicit [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-default-impls [default-infos [:list [:ref :form/r]] i :i64 record-infos [:list [:ref :form/r]] protocols [:ref :form/r] records [:ref :form/r] explicit [:list [:ref :form/r]] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count default-infos))
        acc
        (let [info (fl-nth default-infos i)
@@ -1991,7 +1991,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-name-impls [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-name-impls [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count impls))
        acc
        (ex-name-impls impls (+ i 1)
@@ -2001,7 +2001,7 @@
 
 ;; (defn ->Name params descriptor (record-new descriptor fields...)) for each record narrow enough to be first-class
 #?(:kotoba
-   (defn ex-typed-ctor-params [field-parts [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-typed-ctor-params [field-parts [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of field-parts))
        acc
        (let [p (form/nth-of field-parts i)]
@@ -2009,7 +2009,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-constructor [r [:ref :form/r]] [:ref :form/r]
+   (defn- ex-constructor [r [:ref :form/r]] [:ref :form/r]
      (let [fields (fget r :fields)
            descriptor (fget r :descriptor)
            params (if (form/bool-value (fget r :typed?))
@@ -2022,7 +2022,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-constructors [records [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-constructors [records [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count records))
        acc
        (let [r (fl-nth records i)]
@@ -2034,7 +2034,7 @@
 
 ;; [param type] per parameter: the receiver (index 0) is typed by the record, the rest by their declared types
 #?(:kotoba
-   (defn ex-impl-params [params [:ref :form/r] param-types [:ref :form/r] record-type [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-impl-params [params [:ref :form/r] param-types [:ref :form/r] record-type [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of params))
        acc
        (ex-impl-params params param-types record-type (+ i 1)
@@ -2043,7 +2043,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-impl-defs [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-impl-defs [impls [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count impls))
        acc
        (let [m (fl-nth impls i)
@@ -2058,7 +2058,7 @@
 
 ;; {record-keyword impl-name} for the implementations of METHOD-NAME
 #?(:kotoba
-   (defn ex-method-impls [impls [:list [:ref :form/r]] method-name [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-method-impls [impls [:list [:ref :form/r]] method-name [:ref :form/r] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count impls))
        acc
        (let [m (fl-nth impls i)]
@@ -2070,7 +2070,7 @@
 
 ;; {method-name {:arity n :implementations {...}}} over every protocol's methods
 #?(:kotoba
-   (defn ex-dispatch-methods [protocol-infos [:list [:ref :form/r]] pi :i64 impls [:list [:ref :form/r]] acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-dispatch-methods [protocol-infos [:list [:ref :form/r]] pi :i64 impls [:list [:ref :form/r]] acc [:ref :form/r]] [:ref :form/r]
      (if (>= pi (vector-count protocol-infos))
        acc
        (let [methods (fget (fl-nth protocol-infos pi) :methods)]
@@ -2078,7 +2078,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-dispatch-one [methods [:ref :form/r] j :i64 impls [:list [:ref :form/r]] acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-dispatch-one [methods [:ref :form/r] j :i64 impls [:list [:ref :form/r]] acc [:ref :form/r]] [:ref :form/r]
      (if (>= (+ j 1) (form/count-of methods))
        acc
        (let [name (form/nth-of methods j)
@@ -2091,7 +2091,7 @@
 
 ;; {map->Name record} for each record
 #?(:kotoba
-   (defn ex-map-ctors [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-map-ctors [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count records))
        acc
        (let [r (fl-nth records i)]
@@ -2100,7 +2100,7 @@
 
 ;; {->Name record} for each record too wide to be a first-class constructor
 #?(:kotoba
-   (defn ex-wide-ctors [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-wide-ctors [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count records))
        acc
        (let [r (fl-nth records i)]
@@ -2112,12 +2112,12 @@
 
 ;; some subform of T is a record or variant type
 #?(:kotoba
-   (defn ex-inline-nominal? [t [:ref :form/r]] :bool
+   (defn- ex-inline-nominal? [t [:ref :form/r]] :bool
      (if (or (record-type? t) (variant-type? t)) true (ex-inline-nominal-kids? (form/kids-of t) 0)))
    :default nil)
 
 #?(:kotoba
-   (defn ex-inline-nominal-kids? [kids [:list [:ref :form/r]] i :i64] :bool
+   (defn- ex-inline-nominal-kids? [kids [:list [:ref :form/r]] i :i64] :bool
      (if (>= i (vector-count kids))
        false
        (if (ex-inline-nominal? (fl-nth kids i)) true (ex-inline-nominal-kids? kids (+ i 1)))))
@@ -2125,7 +2125,7 @@
 
 ;; some field type of the descriptor `[:record id [[field type] ...]]` holds an inline nominal type
 #?(:kotoba
-   (defn ex-fields-inline-nominal? [fields [:ref :form/r] i :i64] :bool
+   (defn- ex-fields-inline-nominal? [fields [:ref :form/r] i :i64] :bool
      (if (>= i (form/count-of fields))
        false
        (if (ex-inline-nominal? (form/nth-of (form/nth-of fields i) 1)) true (ex-fields-inline-nominal? fields (+ i 1)))))
@@ -2133,7 +2133,7 @@
 
 ;; {record-keyword descriptor}: a record whose fields already use closed schema edges
 #?(:kotoba
-   (defn ex-record-schemas [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
+   (defn- ex-record-schemas [records [:list [:ref :form/r]] i :i64 acc [:ref :form/r]] [:ref :form/r]
      (if (>= i (vector-count records))
        acc
        (let [descriptor (fget (fl-nth records i) :descriptor)]
@@ -2145,7 +2145,7 @@
 
 ;; the forms that are not declarations, constructors rewritten
 #?(:kotoba
-   (defn ex-ordinary-forms [forms [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-ordinary-forms [forms [:list [:ref :form/r]] i :i64 by-map [:ref :form/r] by-wide [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)
@@ -2157,7 +2157,7 @@
    :default nil)
 
 #?(:kotoba
-   (defn ex-namespace-symbol [forms [:list [:ref :form/r]] i :i64] [:ref :form/r]
+   (defn- ex-namespace-symbol [forms [:list [:ref :form/r]] i :i64] [:ref :form/r]
      (if (>= i (vector-count forms))
        (fsym "kotoba.user")
        (let [f (fl-nth forms i)]
@@ -2168,7 +2168,7 @@
 
 ;; the protocol-declaration forms of FORMS
 #?(:kotoba
-   (defn ex-protocol-forms [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+   (defn- ex-protocol-forms [forms [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (vector-count forms))
        acc
        (let [f (fl-nth forms i)]
