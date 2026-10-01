@@ -3463,6 +3463,581 @@
        (dr env e)))
    :default nil)
 
+;; ---- map, set and f64 literals on the Kotoba route (selfhost S3) ----
+;; A bounded map literal lowers to a legacy pair map (`map-new`, keyword keys with i64-spelled values), a closed anonymous record
+;; (keyword keys with a value that spells another type), a typed map (`typed-map-new`, integer or string keys), or the record named by
+;; the context. Entries are emitted in the key type's total order. Type descriptors are Form trees; a "type or nothing" answer is the
+;; nil-form.
+#?(:kotoba
+   (defn mlit-key-kind [k [:ref :form/r]] :string
+     (cond
+       (form/is-keyword? k) "keyword"
+       (form/is-int? k) "i64"
+       (form/is-string? k) "string"
+       :else ""))
+   :default nil)
+
+;; how many keys of the map literal M have the kind KIND
+#?(:kotoba
+   (defn mlit-count-kind [m [:ref :form/r] kind :string i :i64 n :i64] :i64
+     (if (>= i (form/count-of m))
+       n
+       (mlit-count-kind m kind (+ i 2) (if (string=? (mlit-key-kind (form/nth-of m i)) kind) (+ n 1) n))))
+   :default nil)
+
+;; the first key (in source order) that has no admitted kind, nil-form when there is none
+#?(:kotoba
+   (defn mlit-first-offender [m [:ref :form/r] i :i64] [:ref :form/r]
+     (cond
+       (>= i (form/count-of m)) (form/nil-form)
+       (string=? (mlit-key-kind (form/nth-of m i)) "") (form/nth-of m i)
+       :else (mlit-first-offender m (+ i 2))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-key-description [k [:ref :form/r]] :string
+     (cond
+       (form/is-f64? k) "floating point"
+       (form/is-bool? k) "boolean"
+       (form/is-seq? k) "expression"
+       (form/is-symbol? k) "symbol"
+       (form/is-vec? k) "vector"
+       (form/is-map? k) "map"
+       (form/is-set? k) "set"
+       (form/is-nil? k) "nil"
+       :else "unrecognized"))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-key-text [k [:ref :form/r]] :string
+     (if (form/is-int? k) (string-from-i64 (form/int-value k)) (pr-form k)))
+   :default nil)
+
+;; the order of two keys of one kind: -1, 0, 1
+#?(:kotoba
+   (defn mlit-key-compare [kind :string a [:ref :form/r] b [:ref :form/r]] :i64
+     (cond
+       (string=? kind "i64") (cond (< (form/int-value a) (form/int-value b)) -1 (> (form/int-value a) (form/int-value b)) 1 :else 0)
+       (string=? kind "string") (string-compare (form/string-value a) (form/string-value b))
+       :else (string-compare (kw-text a) (kw-text b))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-entry-position [sorted [:list [:ref :form/r]] kind :string k [:ref :form/r] i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (mlit-key-compare kind (form/nth-of (typed-list-nth [:list [:ref :form/r]] sorted i) 0) k) 0)
+         i
+         (mlit-entry-position sorted kind k (+ i 1)))))
+   :default nil)
+
+;; the entries of M as [key value] vectors in the total order of KIND
+#?(:kotoba
+   (defn mlit-sorted-entries [m [:ref :form/r] kind :string i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= (+ i 1) (form/count-of m))
+       acc
+       (let [e (form/vec2 (form/nth-of m i) (form/nth-of m (+ i 1)))
+             p (mlit-entry-position acc kind (form/nth-of m i) 0)]
+         (mlit-sorted-entries m kind (+ i 2)
+                              (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) e))))))
+   :default nil)
+
+;; the value type a literal value determines on its own (nil-form for an expression only inference can type)
+#?(:kotoba
+   (defn mlit-value-type [env [:ref :fe/env] v [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-bool? v) (form/keyword-form :bool)
+       (form/is-int? v) (form/keyword-form :i64)
+       (form/is-string? v) (form/keyword-form :string)
+       (form/is-keyword? v) (form/keyword-form :keyword)
+       (form/is-f64? v) (form/keyword-form :f64)
+       (form/is-seq? v) (mlit-seq-type v)
+       :else (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-seq-type [v [:ref :form/r]] [:ref :form/r]
+     (if (= 0 (form/count-of v))
+       (form/nil-form)
+       (let [head (form/nth-of v 0)]
+         (cond
+           (sym-is? head "f64-from-bits") (form/keyword-form :f64)
+           (sym-is? head "f32-from-bits") (form/keyword-form :f32)
+           :else
+           (let [declared (tables/table-get (tables/map-literal-value-constructors) head)
+                 descriptor (if (> (form/count-of v) 1) (form/nth-of v 1) (form/nil-form))]
+             (if (and (not (form/is-nil? declared)) (form/is-vec? descriptor) (> (form/count-of descriptor) 0)
+                      (form/eq declared (form/nth-of descriptor 0)))
+               descriptor
+               (form/nil-form)))))))
+   :default nil)
+
+;; the [key type] pairs of the entries whose value spells a type
+#?(:kotoba
+   (defn mlit-typed-entries [env [:ref :fe/env] entries [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count entries))
+       acc
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+             t (mlit-value-type env (form/nth-of e 1))]
+         (mlit-typed-entries env entries (+ i 1)
+                             (if (form/is-nil? t) acc (form/append-form acc (form/vec2 (form/nth-of e 0) t)))))))
+   :default nil)
+
+;; the first typed entry whose type is a float, nil-form when there is none
+#?(:kotoba
+   (defn mlit-first-floating [typed [:list [:ref :form/r]] i :i64] [:ref :form/r]
+     (if (>= i (vector-count typed))
+       (form/nil-form)
+       (let [e (typed-list-nth [:list [:ref :form/r]] typed i)
+             t (form/nth-of e 1)]
+         (if (or (form/eq t (form/keyword-form :f32)) (form/eq t (form/keyword-form :f64)))
+           e
+           (mlit-first-floating typed (+ i 1))))))
+   :default nil)
+
+;; the first typed entry after I whose type differs from T
+#?(:kotoba
+   (defn mlit-first-other [typed [:list [:ref :form/r]] t [:ref :form/r] i :i64] [:ref :form/r]
+     (if (>= i (vector-count typed))
+       (form/nil-form)
+       (let [e (typed-list-nth [:list [:ref :form/r]] typed i)]
+         (if (form/eq (form/nth-of e 1) t)
+           (mlit-first-other typed t (+ i 1))
+           e))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-floating-refusal [floating [:ref :form/r] form [:ref :form/r]] :i64
+     (if (form/is-nil? floating)
+       0
+       (throw (fe-reject
+               (string-concat "map literal value at key "
+                 (string-concat (mlit-key-text (form/nth-of floating 0))
+                   (string-concat " is a floating point literal: map value type "
+                     (string-concat (kw-text (form/nth-of floating 1))
+                       " is outside the structured scalar ABI. This is the ABI's refusal and not the floating-key one -- a value needs neither a total order nor a decidable identity, and is refused because the typed map's value slot has no floating encoding"))))
+               "kotoba.error/floating-map-kv" form))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-disagree-refusal [first-e [:ref :form/r] other [:ref :form/r] form [:ref :form/r]] :i64
+     (if (form/is-nil? other)
+       0
+       (throw (fe-reject
+               (string-concat "map literal values must all be one type; the value at key "
+                 (string-concat (mlit-key-text (form/nth-of first-e 0))
+                   (string-concat " is "
+                     (string-concat (pr-form (form/nth-of first-e 1))
+                       (string-concat " and the value at key "
+                         (string-concat (mlit-key-text (form/nth-of other 0))
+                           (string-concat " is " (pr-form (form/nth-of other 1)))))))))
+               "kotoba.error/map-literal-value" form))))
+   :default nil)
+
+;; the value type of a typed map literal read off its own value expressions (refusing floats and disagreeing types by name)
+#?(:kotoba
+   (defn mlit-item-type [env [:ref :fe/env] entries [:list [:ref :form/r]] form [:ref :form/r]] [:ref :form/r]
+     (let [typed (mlit-typed-entries env entries 0 (form/no-forms))
+           _ (mlit-floating-refusal (mlit-first-floating typed 0) form)]
+       (mlit-item-type-agree typed form)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-item-type-agree [typed [:list [:ref :form/r]] form [:ref :form/r]] [:ref :form/r]
+     (if (= 0 (vector-count typed))
+       (form/keyword-form :i64)
+       (let [first-e (typed-list-nth [:list [:ref :form/r]] typed 0)
+             other (mlit-first-other typed (form/nth-of first-e 1) 1)
+             _ (mlit-disagree-refusal first-e other form)]
+         (form/nth-of first-e 1))))
+   :default nil)
+
+;; the field type one value of a keyword-keyed literal determines on its own (a nested literal through its own lowered type)
+#?(:kotoba
+   (defn mlit-record-field-type [env [:ref :fe/env] v [:ref :form/r]] [:ref :form/r]
+     (cond
+       (form/is-map? v) (mlit-lowered-type env v)
+       (form/is-vec? v) (closed-vector-literal-type v)
+       :else (mlit-value-type env v)))
+   :default nil)
+
+;; [key (or type nil)] for every entry
+#?(:kotoba
+   (defn mlit-field-types [env [:ref :fe/env] entries [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count entries))
+       acc
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+             t (mlit-record-field-type env (form/nth-of e 1))]
+         (mlit-field-types env entries (+ i 1) (form/append-form acc (form/vec2 (form/nth-of e 0) t))))))
+   :default nil)
+
+;; the first entry whose value is the literal nil, nil-form when there is none
+#?(:kotoba
+   (defn mlit-first-nil-entry [entries [:list [:ref :form/r]] i :i64] [:ref :form/r]
+     (if (>= i (vector-count entries))
+       (form/nil-form)
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)]
+         (if (form/is-nil? (form/nth-of e 1))
+           e
+           (mlit-first-nil-entry entries (+ i 1))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-nil-refusal [e [:ref :form/r] form [:ref :form/r]] :i64
+     (if (form/is-nil? e)
+       0
+       (throw (fe-reject
+               (string-concat "map literal value at key "
+                 (string-concat (mlit-key-text (form/nth-of e 0))
+                   " is nil, which makes the field an absent [:option T], and nothing here says T: give the literal a record type from context (a declared record result, or a record field) or write (option-none-of [:option T])"))
+               "kotoba.error/map-literal-value" form))))
+   :default nil)
+
+;; does any typed field spell something other than :i64
+#?(:kotoba
+   (defn mlit-any-non-i64? [typed [:list [:ref :form/r]] i :i64] :bool
+     (if (>= i (vector-count typed))
+       false
+       (let [t (form/nth-of (typed-list-nth [:list [:ref :form/r]] typed i) 1)]
+         (or (and (not (form/is-nil? t)) (not (form/eq t (form/keyword-form :i64))))
+             (mlit-any-non-i64? typed (+ i 1))))))
+   :default nil)
+
+;; the fields [key type] with the unspelled ones as :i64
+#?(:kotoba
+   (defn mlit-defaulted-fields [typed [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (vector-count typed))
+       acc
+       (let [e (typed-list-nth [:list [:ref :form/r]] typed i)
+             t (form/nth-of e 1)]
+         (mlit-defaulted-fields typed (+ i 1)
+                                (form/append-form acc (form/vec2 (form/nth-of e 0) (if (form/is-nil? t) (form/keyword-form :i64) t)))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-record-limit-refusal [n :i64 form [:ref :form/r]] :i64
+     (if (<= n 32)
+       0
+       (throw (fe-reject
+               (string-concat "map literal with keyword keys and a non-i64 value lowers to a closed record and exceeds the record field limit: "
+                 (string-concat (string-from-i64 n) (string-concat " entries, at most " (string-from-i64 32))))
+               "kotoba.error/map-literal-value" form))))
+   :default nil)
+
+;; the fields of the closed record a keyword-keyed literal lowers to, nil-form when it stays the legacy pair map
+#?(:kotoba
+   (defn mlit-keyword-fields [env [:ref :fe/env] form [:ref :form/r] entries [:list [:ref :form/r]]] [:ref :form/r]
+     (let [typed (mlit-field-types env entries 0 (form/no-forms))
+           _ (mlit-nil-refusal (mlit-first-nil-entry entries 0) form)]
+       (mlit-keyword-fields-spelled typed (vector-count entries) form)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-keyword-fields-spelled [typed [:list [:ref :form/r]] n :i64 form [:ref :form/r]] [:ref :form/r]
+     (if (mlit-any-non-i64? typed 0)
+       (let [_ (mlit-record-limit-refusal n form)]
+         (form/form-vec (mlit-defaulted-fields typed 0 (form/no-forms))))
+       (form/nil-form)))
+   :default nil)
+
+;; the kinds present among the keys: [keyword-count i64-count string-count other-count]
+#?(:kotoba
+   (defn mlit-kind-count [m [:ref :form/r]] :i64
+     (+ (+ (if (> (mlit-count-kind m "keyword" 0 0) 0) 1 0) (if (> (mlit-count-kind m "i64" 0 0) 0) 1 0))
+        (+ (if (> (mlit-count-kind m "string" 0 0) 0) 1 0) (if (> (mlit-count-kind m "" 0 0) 0) 1 0))))
+   :default nil)
+
+;; the single kind of the keys of M, "keyword" for an empty literal
+#?(:kotoba
+   (defn mlit-the-kind [m [:ref :form/r]] :string
+     (cond
+       (> (mlit-count-kind m "i64" 0 0) 0) "i64"
+       (> (mlit-count-kind m "string" 0 0) 0) "string"
+       :else "keyword"))
+   :default nil)
+
+;; the type a map literal lowers to, read off its source alone (nil-form when its keys are not one admitted kind)
+#?(:kotoba
+   (defn mlit-lowered-type [env [:ref :fe/env] m [:ref :form/r]] [:ref :form/r]
+     (if (and (= 0 (mlit-count-kind m "" 0 0)) (<= (mlit-kind-count m) 1))
+       (let [kind (mlit-the-kind m)
+             entries (mlit-sorted-entries m kind 0 (form/no-forms))]
+         (if (string=? kind "keyword")
+           (mlit-lowered-keyword-type env m entries)
+           (mlit-lowered-typed-type env entries kind m)))
+       (form/nil-form)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-lowered-keyword-type [env [:ref :fe/env] m [:ref :form/r] entries [:list [:ref :form/r]]] [:ref :form/r]
+     (let [fields (mlit-keyword-fields env m entries)]
+       (if (form/is-nil? fields)
+         (form/keyword-form :map)
+         (map-literal-record-type fields))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-lowered-typed-type [env [:ref :fe/env] entries [:list [:ref :form/r]] kind :string m [:ref :form/r]] [:ref :form/r]
+     (let [t (mlit-item-type env entries m)]
+       (form/vec3 (form/keyword-form :map) (mlit-kind-keyword kind) t)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-kind-keyword [kind :string] [:ref :form/r]
+     (cond
+       (string=? kind "i64") (form/keyword-form :i64)
+       (string=? kind "string") (form/keyword-form :string)
+       :else (form/keyword-form :keyword)))
+   :default nil)
+
+;; ---- a keyword-keyed literal in a position whose type is a record ----
+#?(:kotoba
+   (defn mlit-field-name-in? [fields [:ref :form/r] k [:ref :form/r] i :i64] :bool
+     (if (>= i (form/count-of fields))
+       false
+       (or (form/eq k (form/nth-of (form/nth-of fields i) 0)) (mlit-field-name-in? fields k (+ i 1)))))
+   :default nil)
+
+;; the keys of M (all keywords) that are not fields of the record, the first by text order; nil-form when none
+#?(:kotoba
+   (defn mlit-extra-key [m [:ref :form/r] fields [:ref :form/r] i :i64 best [:ref :form/r]] [:ref :form/r]
+     (if (>= i (form/count-of m))
+       best
+       (let [k (form/nth-of m i)]
+         (mlit-extra-key m fields (+ i 2)
+                         (if (mlit-field-name-in? fields k 0)
+                           best
+                           (if (or (form/is-nil? best) (< (string-compare (kw-text k) (kw-text best)) 0)) k best))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-extra-refusal [extra [:ref :form/r] record-name [:ref :form/r] form [:ref :form/r]] :i64
+     (if (form/is-nil? extra)
+       0
+       (throw (fe-reject
+               (string-concat "map literal key "
+                 (string-concat (mlit-key-text extra)
+                   (string-concat " is not a field of record " (kw-text record-name))))
+               "kotoba.error/map-literal-value" form))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-absent-refusal [field [:ref :form/r] field-type [:ref :form/r] record-name [:ref :form/r] key-absent? :bool form [:ref :form/r]] [:ref :form/r]
+     (if (generic-option-type? field-type)
+       (form/call1 "option-none-of" field-type)
+       (throw (fe-reject
+               (string-concat "map literal field "
+                 (string-concat (mlit-key-text field)
+                   (string-concat " of record "
+                     (string-concat (kw-text record-name)
+                       (string-concat " is "
+                         (string-concat (pr-form field-type)
+                           (string-concat ", which is not an option, so it cannot be absent"
+                             (string-concat (if key-absent? " (the key is left out)" " (its value is nil)")
+                                            "; only an [:option T] field is absent"))))))))
+               "kotoba.error/map-literal-value" form))))
+   :default nil)
+
+;; one record field of a literal: the value checked against the declared type, or the absent option
+#?(:kotoba
+   (defn mlit-record-field [env [:ref :fe/env] m [:ref :form/r] field [:ref :form/r] field-type [:ref :form/r] record-name [:ref :form/r] form [:ref :form/r]] [:ref :fe/dr]
+     (let [present? (form/form-has? m field)
+           value (form/form-get m field)]
+       (if (or (not present?) (form/is-nil? value))
+         (mlit-absent-dr env field field-type record-name (not present?) form)
+         (desugar-expected-value env field-type value))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-absent-dr [env [:ref :fe/env] field [:ref :form/r] field-type [:ref :form/r] record-name [:ref :form/r] key-absent? :bool form [:ref :form/r]] [:ref :fe/dr]
+     (let [v (mlit-absent-refusal field field-type record-name key-absent? form)]
+       (dr env v)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-record-fields [env [:ref :fe/env] m [:ref :form/r] fields [:ref :form/r] i :i64 record-name [:ref :form/r] form [:ref :form/r] acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (form/count-of fields))
+       (drs env acc)
+       (let [f (form/nth-of fields i)
+             r (mlit-record-field env m (form/nth-of f 0) (form/nth-of f 1) record-name form)]
+         (mlit-record-fields (dr-env r) m fields (+ i 1) record-name form (form/append-form acc (dr-form r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-against-record [env [:ref :fe/env] m [:ref :form/r] record [:ref :form/r]] [:ref :fe/dr]
+     (let [fields (form/nth-of record 2)
+           record-name (form/nth-of record 1)
+           _ (mlit-extra-refusal (mlit-extra-key m fields 0 (form/nil-form)) record-name m)
+           r (mlit-record-fields env m fields 0 record-name m (form/no-forms))]
+       (dr (drs-env r) (head-call (form/symbol-form "record-new") (form/cons-onto record (drs-forms r))))))
+   :default nil)
+
+;; ---- the literal itself ----
+;; the sorted kind names of the keys, joined with " and " (for the mixed-kind refusal)
+#?(:kotoba
+   (defn mlit-kind-names [m [:ref :form/r]] :string
+     (let [i64? (> (mlit-count-kind m "i64" 0 0) 0)
+           kw? (> (mlit-count-kind m "keyword" 0 0) 0)
+           s? (> (mlit-count-kind m "string" 0 0) 0)]
+       (cond
+         (and i64? kw? s?) "i64 and keyword and string"
+         (and i64? kw?) "i64 and keyword"
+         (and i64? s?) "i64 and string"
+         :else "keyword and string")))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-key-refusal [m [:ref :form/r] form [:ref :form/r]] :i64
+     (let [offender (mlit-first-offender m 0)]
+       (if (form/is-f64? offender)
+         (throw (fe-reject "map literal keys must be keywords, integers or strings; this literal has a floating point key, which has no portable key identity -- NaN compares unequal to itself, and +0.0 and -0.0 are equal while differing in bits, so neither the entry order nor duplicate-key detection is decidable"
+                           "kotoba.error/map-literal-key" form))
+         (throw (fe-reject (string-concat "map literal keys must be keywords, integers or strings; this literal has a key of kind: " (mlit-key-description offender))
+                           "kotoba.error/map-literal-key" form)))))
+   :default nil)
+
+;; the [key value] pairs desugared (values only; keys stay as written), flat after the head
+#?(:kotoba
+   (defn mlit-desugar-values [env [:ref :fe/env] entries [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (vector-count entries))
+       (drs env acc)
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+             v (desugar-expr env (form/nth-of e 1))]
+         (mlit-desugar-values (dr-env v) entries (+ i 1) (form/append-form (form/append-form acc (form/nth-of e 0)) (dr-form v))))))
+   :default nil)
+
+;; the record-new operands: each value desugared against its field type
+#?(:kotoba
+   (defn mlit-record-values [env [:ref :fe/env] entries [:list [:ref :form/r]] fields [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :fe/drs]
+     (if (>= i (vector-count entries))
+       (drs env acc)
+       (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+             r (desugar-expected-value env (form/nth-of (form/nth-of fields i) 1) (form/nth-of e 1))]
+         (mlit-record-values (dr-env r) entries fields (+ i 1) (form/append-form acc (dr-form r))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-keyword-literal [env [:ref :fe/env] m [:ref :form/r] entries [:list [:ref :form/r]]] [:ref :fe/dr]
+     (let [fields (mlit-keyword-fields env m entries)]
+       (if (form/is-nil? fields)
+         (mlit-pair-map env entries)
+         (mlit-closed-record env entries fields))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-pair-map [env [:ref :fe/env] entries [:list [:ref :form/r]]] [:ref :fe/dr]
+     (let [vs (mlit-desugar-values env entries 0 (form/no-forms))]
+       (dr (drs-env vs) (head-call (form/symbol-form "map-new") (drs-forms vs)))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-closed-record [env [:ref :fe/env] entries [:list [:ref :form/r]] fields [:ref :form/r]] [:ref :fe/dr]
+     (let [vs (mlit-record-values env entries fields 0 (form/no-forms))]
+       (dr (drs-env vs) (head-call (form/symbol-form "record-new") (form/cons-onto (map-literal-record-type fields) (drs-forms vs))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-typed-literal [env [:ref :fe/env] m [:ref :form/r] entries [:list [:ref :form/r]] kind :string] [:ref :fe/dr]
+     (let [item-type (mlit-item-type env entries m)
+           _ (require-k (<= (vector-count entries) 31)
+                        (string-concat "map literal with " (string-concat kind " keys exceeds the typed map entry limit"))
+                        "kotoba.error/map-literal-key" m)
+           vs (mlit-desugar-values env entries 0 (form/no-forms))]
+       (dr (drs-env vs)
+           (head-call (form/symbol-form "typed-map-new")
+                      (form/cons-onto (form/vec3 (form/keyword-form :map) (mlit-kind-keyword kind) item-type) (drs-forms vs))))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-context-record [env [:ref :fe/env] ctx [:ref :form/r]] [:ref :form/r]
+     (let [t (canonical-closure-result-type env ctx)]
+       (if (record-type? t) t (form/nil-form))))
+   :default nil)
+
+#?(:kotoba
+   (defn desugar-map-literal [env [:ref :fe/env] m [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (let [n (quot (form/count-of m) 2)
+           _ (require-k (<= n 128) "map entry count exceeds admission limit" "kotoba.error/subset-reject" m)
+           context-record (mlit-context-record env ctx)
+           kinds (mlit-kind-count m)
+           keyword-only? (and (= 1 kinds) (> (mlit-count-kind m "keyword" 0 0) 0))]
+       (cond
+         (and (not (form/is-nil? context-record)) keyword-only?) (mlit-against-record env m context-record)
+         (> (mlit-count-kind m "" 0 0) 0) (mlit-key-refusal-dr env m)
+         (> kinds 1) (mlit-mixed-refusal-dr env m)
+         :else (mlit-literal-of-kind env m))))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-key-refusal-dr [env [:ref :fe/env] m [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (mlit-key-refusal m m)]
+       (dr env m)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-mixed-refusal-dr [env [:ref :fe/env] m [:ref :form/r]] [:ref :fe/dr]
+     (let [_ (require-k false (string-concat "map literal keys must all be one kind; this literal mixes " (mlit-kind-names m))
+                        "kotoba.error/map-literal-key" m)]
+       (dr env m)))
+   :default nil)
+
+#?(:kotoba
+   (defn mlit-literal-of-kind [env [:ref :fe/env] m [:ref :form/r]] [:ref :fe/dr]
+     (let [kind (mlit-the-kind m)
+           entries (mlit-sorted-entries m kind 0 (form/no-forms))]
+       (if (string=? kind "keyword")
+         (mlit-keyword-literal env m entries)
+         (mlit-typed-literal env m entries kind))))
+   :default nil)
+
+;; ---- set and f64 literals ----
+#?(:kotoba
+   (defn set-all-of? [s [:ref :form/r] kind :string i :i64] :bool
+     (if (>= i (form/count-of s))
+       true
+       (and (if (string=? kind "string") (form/is-string? (form/nth-of s i)) (form/is-int? (form/nth-of s i)))
+            (set-all-of? s kind (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+   (defn set-member-position [sorted [:list [:ref :form/r]] key :string i :i64] :i64
+     (if (>= i (vector-count sorted))
+       i
+       (if (> (string-compare (pr-form (typed-list-nth [:list [:ref :form/r]] sorted i)) key) 0)
+         i
+         (set-member-position sorted key (+ i 1)))))
+   :default nil)
+
+;; the members of the set ordered by their printed text (the host's `(sort-by pr-str ...)`), stable
+#?(:kotoba
+   (defn set-sorted-members [s [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+     (if (>= i (form/count-of s))
+       acc
+       (let [m (form/nth-of s i)
+             p (set-member-position acc (pr-form m) 0)]
+         (set-sorted-members s (+ i 1) (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) m))))))
+   :default nil)
+
+;; a bounded non-empty keyword set lowers to the typed-set profile in canonical order; the item type is read off the literal
+#?(:kotoba
+   (defn desugar-set-literal [env [:ref :fe/env] s [:ref :form/r]] [:ref :fe/dr]
+     (let [kind (cond
+                  (and (> (form/count-of s) 0) (set-all-of? s "string" 0)) :string
+                  (and (> (form/count-of s) 0) (set-all-of? s "i64" 0)) :i64
+                  :else :keyword)]
+       (dr env (head-call (form/symbol-form "typed-set-new")
+                          (form/cons-onto (form/vec2 (form/keyword-form :set) (form/keyword-form kind))
+                                          (set-sorted-members s 0 (form/no-forms)))))))
+   :default nil)
+
+;; a floating literal is its bits
+#?(:kotoba
+   (defn desugar-f64-literal [env [:ref :fe/env] f [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
+     (if (form/eq ctx (form/keyword-form :f32))
+       (throw (fe-unported "f32 literal" f))
+       (dr env (form/call1 "f64-from-bits" (form/int-form (form/bits-of f))))))
+   :default nil)
+
 ;; a call whose operator is a symbol, in the order of the host's cond chain and then its `case op`
 #?(:kotoba
    (defn desugar-head [env [:ref :fe/env] op [:ref :form/r] form [:ref :form/r] ctx [:ref :form/r]] [:ref :fe/dr]
@@ -7286,8 +7861,9 @@
        (and (document-ctx? ctx) (contextual-document-literal-k? form)) (desugar-document-literal env form)
        (form/is-int? form) (dr env form)
        (form/is-vec? form) (desugar-vector-literal env form)
-       (or (form/is-f64? form) (form/is-map? form) (form/is-set? form))
-       (throw (fe-unported "literal" form))
+       (form/is-f64? form) (desugar-f64-literal env form ctx)
+       (form/is-map? form) (desugar-map-literal env form ctx)
+       (form/is-set? form) (desugar-set-literal env form)
        (form/is-keyword? form) (dr env form)
        (form/is-bool? form) (dr env form)
        (form/is-nil? form) (dr env (form/call0 "option-none"))
