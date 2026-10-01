@@ -233,12 +233,11 @@
              (rejection-of (source 9)))))))
 
 (deftest map-patterns-name-the-receiver-they-do-not-admit
-  (testing "a record answers presence through a different primitive"
-    (is (= "match map patterns admit the bounded map only; this scrutinee is a record"
-           (rejection-of
-            (str "(ns m (:schemas {:m/p [:record :m/p [[:a :i64]]]}))"
-                 " (defn g [r [:ref :m/p]] :i64 (match r {:a n} n :else 0))"
-                 " (defn main [] :i64 (g (record-new [:ref :m/p] 1)))")))))
+  (testing "a record is read, its presence decided by its type (ADR 0353 :empty-map-literal)"
+    (is (nil? (rejection-of
+               (str "(ns m (:schemas {:m/p [:record :m/p [[:a :i64]]]}))"
+                    " (defn g [r [:ref :m/p]] :i64 (match r {:a n} n :else 0))"
+                    " (defn main [] :i64 (g (record-new [:ref :m/p] 1)))")))))
   (testing "and so does a canonical typed map"
     (is (= "match map patterns admit the bounded map only; this scrutinee is a canonical typed map"
            (rejection-of
