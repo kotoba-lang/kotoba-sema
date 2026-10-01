@@ -1,0 +1,46 @@
+(ns kotoba.compiler.max-expression-nodes-test
+  "The whole-program expression and lowered-node budgets are 2^22 (amu ADR 0360;
+  50000 and 100000 before 2026-10-01). The linked project is analysed as one
+  program, so these bound the whole compiler rather than a module. The values
+  live in `lang/guest-grammar.edn` `:admission-limits`; this checks the
+  frontend constants, and that a program past the old budgets is admitted
+  while one past a lowered budget is still refused."
+  (:require [kotoba.lang.error :as kerror]
+            [kotoba.test :refer [deftest is]]
+            [clojure.string :as str]
+            [kotoba.sema :as sema]
+            [kotoba.compiler.frontend :as frontend]))
+
+(defn- tree
+  "A balanced binary sum over 2^depth leaves: 2^(depth+1) - 1 expression nodes."
+  [depth leaf]
+  (if (zero? depth)
+    (str "(+ x " leaf ")")
+    (str "(+ " (tree (dec depth) leaf) " " (tree (dec depth) (inc leaf)) ")")))
+
+(defn- program [n depth]
+  (str "(ns m.big {:kotoba/export [main]})\n"
+       (str/join "\n" (map #(str "(defn f" % " [x :i64] :i64 " (tree depth (mod % 7)) ")") (range n)))
+       "\n(defn main [] :i64 (f" (dec n) " 0))"))
+
+(deftest the-budgets-are-two-to-the-twenty-second
+  (is (= 4194304 frontend/max-expression-nodes))
+  (is (= 4194304 frontend/max-lowered-nodes))
+  (is (= frontend/max-expression-nodes sema/max-expression-nodes))
+  (is (= frontend/max-lowered-nodes sema/max-lowered-nodes)))
+
+(deftest a-program-past-the-old-budgets-is-admitted
+  ;; 230 functions of 511 nodes: over the old 50000 expression and 100000 lowered nodes
+  (let [hir (sema/analyze (program 230 8))]
+    (is (some? hir))
+    (is (< 100000 (* 230 511)))))
+
+(deftest a-program-past-a-lowered-budget-is-still-refused
+  (with-redefs [sema/max-lowered-nodes 1000]
+    (is (thrown-with-msg? kerror/ExceptionInfo #"lowered program budget"
+                          (sema/analyze (program 8 7))))))
+
+(deftest a-program-past-the-expression-budget-is-still-refused
+  (with-redefs [sema/max-expression-nodes 1000]
+    (is (thrown-with-msg? kerror/ExceptionInfo #"expression budget"
+                          (sema/analyze (program 8 7))))))

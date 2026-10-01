@@ -972,7 +972,7 @@
 (defn vx [f [:ref :form/r] e [:ref :vx/env] nodes :i64] [:ref :vx/r]
   (let [n (+ nodes 1)]
     (cond
-      (> n 50000) (reject "program expression budget exhausted" n)
+      (> n 4194304) (reject "program expression budget exhausted" n)
       (> (env-depth e) 256) (reject "expression nesting exceeds admission limit" n)
       (form/is-int? f) (pass n)
       (form/is-string? f)
