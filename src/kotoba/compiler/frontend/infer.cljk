@@ -6803,7 +6803,7 @@
    :default nil)
 
 #?(:kotoba
-(defn- check-value-types! [ctx [:ref :ie/ctx] functions [:ref :form/r]] :i64
+(defn check-value-types! [ctx [:ref :ie/ctx] functions [:ref :form/r]] :i64
   (let [sigs (abort-signatures functions)
         _ (check-value-bodies! functions 0 (record-assoc [:ref :ie/ctx] ctx :final true) sigs)
         lit (module-literal-bytes functions 0 false 0)
@@ -7118,7 +7118,7 @@
 
 ;; {:functions [...] :used #{...}}
 #?(:kotoba
-(defn- elaborate-named-abilities [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
+(defn elaborate-named-abilities [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
   (let [sigs (abort-signatures functions)
         r (el-functions functions 0 ctx sigs (form/form-set (form/no-forms)) (form/no-forms))]
     (form/form-map (tput (tput (form/no-forms) :functions (el-form r)) :used (el-used r)))))
@@ -7501,7 +7501,7 @@
 
 ;; Give every synthesized loop-helper the result type its exits have (to a fixed point; the last round refuses).
 #?(:kotoba
-(defn- infer-loop-helper-results [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
+(defn infer-loop-helper-results [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
   (if (any-loop-helper? functions 0)
     (loop-results-fixpoint ctx functions 0 shapes)
     functions))
@@ -7626,7 +7626,7 @@
 
 ;; A `recur` argument must have the type of the binding it rebinds. Answers FUNCTIONS.
 #?(:kotoba
-(defn- check-loop-recur-argument-types! [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
+(defn check-loop-recur-argument-types! [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
   (let [sigs (loop-helper-signatures functions)
         _ (recur-check-functions ctx functions 0 shapes sigs)]
     functions))
@@ -8312,7 +8312,7 @@
 ;; graph, static calls propagate requirements to callers, and closure-valued results propagate back through aliases and
 ;; return positions; the finite function/parameter graph has a deterministic fixed point.
 #?(:kotoba
-(defn- infer-closure-refinements [ctx [:ref :ie/ctx] functions [:ref :form/r] lambda-infos [:ref :form/r]] [:ref :form/r]
+(defn infer-closure-refinements [ctx [:ref :ie/ctx] functions [:ref :form/r] lambda-infos [:ref :form/r]] [:ref :form/r]
   (let [k (fput (fput (fput (fput (empty-fmap) :lambda-ids (cs-ids lambda-infos 0 (form/no-forms))) :names (cs-names functions 0 (cs-set-empty))) :infos lambda-infos) :schemas (ctx-schemas ctx))
         seed (cs-seed functions 0 (empty-fmap))
         limit (+ 1 (form/count-of functions) (cs-total-params functions 0 0))
@@ -8486,7 +8486,7 @@
 
 ;; Give every loop-helper its :param-types. Answers FUNCTIONS with them filled in.
 #?(:kotoba
-(defn- resolve-loop-helper-param-types [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
+(defn resolve-loop-helper-param-types [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
   (let [helper-names (lh-names functions 0 (cs-set-empty))]
     (if (= 0 (form/count-of helper-names))
       functions
