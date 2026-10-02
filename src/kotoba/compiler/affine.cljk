@@ -630,10 +630,10 @@
 
   This was `linear-let-chain?` and looked for one name rebound over and over
   -- `v`, then `v`, then `v` -- which is how the same idea is written in
-  Clojure. **Kotoba refuses it**: `amu check` answers `duplicate let binding`
-  (measured 2026-09-01, amu e96dd8c6). So the first version described a
-  program that cannot be written, and would have been a gate nothing could
-  ever pass. Found by compiling one."
+  Clojure. Kotoba reads that shape as nested lets, each shadowing the one
+  before (ADR 0353 floor :let-rebinding; until then it was refused as
+  `duplicate let binding`), so a rebound name is never one `let`'s thread and
+  this looks for distinct names."
   [form names]
   (and (seq? form) (= 'let (first form)) (vector? (second form))
        (<= 2 (count names))
