@@ -5457,6 +5457,106 @@
     (vector? form) (closed-vector-literal-type form)
     :else (map-literal-value-type form)))
 
+;; ADR 0353 floor :absent-field-from-assoc. A keyword key whose value is
+;; `nil` somewhere in the module -- in a literal or in an `assoc` -- is an
+;; absent field, and its present value's type T is the ONE type the module's
+;; own source spells at that key: `(assoc s :text/composition
+;; {:composition/text ""})` says T for `{.. :text/composition nil}`. Bound
+;; per analysis by `analyze-forms**`; `{}` everywhere else.
+;;
+;;   :fields     key -> [:option T], the keys with exactly one spelled T
+;;   :conflicts  key -> [T U], the keys two values spell two types for
+(def ^:dynamic ^:private *module-absent-fields* {})
+
+(defn- absent-field-spelled-type
+  "The type ONE value written at a key spells on its own, for
+  `module-absent-fields`, or `nil` when it spells none: `nil` itself, an
+  expression only inference can type, and a keyword literal whose values
+  spell nothing (it lowers to the legacy pair map, `:map`, and is typed
+  against T where it is written instead). A literal that refuses on its own
+  contributes nothing here; it refuses where it is desugared."
+  [form]
+  (when (some? form)
+    (let [t (try (binding [*module-absent-fields* {}]
+                   (map-literal-record-field-type form))
+                 (catch #?(:clj Throwable :cljs :default) error
+                   (if (compiler-rejection? error) nil (throw error))))]
+      (when (and (some? t) (not= :map t)) t))))
+
+(defn- module-absent-fields
+  "`*module-absent-fields*` for one module's source forms: every keyword key
+  written with a `nil` value -- a keyword-keyed map literal entry or an
+  `assoc` pair -- with the types every non-nil value written at that key
+  spells (`absent-field-spelled-type`), compared with `=`, never hashed."
+  [forms]
+  (let [writes (volatile! [])
+        note! (fn [k v] (when (keyword? k) (vswap! writes conj [k v])))
+        walk (fn walk [form]
+               (cond
+                 (map? form)
+                 (do (when (every? keyword? (keys form))
+                       (doseq [[k v] form] (note! k v)))
+                     (doseq [[k v] form] (walk k) (walk v)))
+                 (seq? form)
+                 (do (when (and (= 'assoc (first form))
+                                (>= (count form) 4) (even? (count form)))
+                       (doseq [[k v] (partition 2 (drop 2 form))] (note! k v)))
+                     (doseq [x form] (walk x)))
+                 (coll? form) (doseq [x form] (walk x))
+                 :else nil))]
+    (doseq [form forms] (walk form))
+    (let [absent (reduce (fn [acc [k v]] (if (nil? v) (conj acc k) acc)) #{} @writes)]
+      (reduce (fn [acc [k v]]
+                (if-let [t (when (contains? absent k) (absent-field-spelled-type v))]
+                  (let [[known] (get-in acc [:conflicts k])
+                        known (or known (second (get-in acc [:fields k])))]
+                    (cond
+                      (nil? known) (assoc-in acc [:fields k] [:option t])
+                      (= known t) acc
+                      (contains? (:conflicts acc) k) acc
+                      :else (-> acc
+                                (update :fields dissoc k)
+                                (assoc-in [:conflicts k] [known t]))))
+                  acc))
+              {:fields {} :conflicts {}}
+              @writes))))
+
+(defn- reject-absent-field-conflict!
+  "A key the module writes `nil` at and two values of two types: which one is
+  the absent field's T is not this compiler's guess to make."
+  [k form]
+  (when-let [[t u] (get-in *module-absent-fields* [:conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " is nil in this module, which makes it an absent [:option T], "
+                  "and this module writes two types at it: "
+                  (map-literal-type-description t) " and "
+                  (map-literal-type-description u)
+                  "; an absent field holds one type when it is present")
+             form :kotoba.error/map-literal-value)))
+
+(defn- absent-field-type
+  "The `[:option T]` the module's source says key `k` is, or `nil`."
+  [k]
+  (get-in *module-absent-fields* [:fields k]))
+
+(declare desugar-map)
+
+(defn- desugar-absent-field-value
+  "A value written at an absent field of type `option-type`: `nil` is its
+  none; a value whose type the source spells, and a map or vector literal
+  (typed against T, as a record field's literal is), is its some. Anything
+  else is an expression already of some type, checked against the option as
+  written -- a present T from a call is not wrapped (no coercion)."
+  [option-type form]
+  (let [t (second option-type)]
+    (cond
+      (nil? form) (list 'option-none-of option-type)
+      (and (map? form) (record-type? t))
+      (list 'option-some-of option-type (desugar-map form t))
+      (or (map? form) (vector? form) (some? (map-literal-value-type form)))
+      (list 'option-some-of option-type (desugar-expected-value t form))
+      :else (desugar-expected-value option-type form))))
+
 (defn- keyword-map-literal-record-fields
   "The fields of the closed record a keyword-keyed literal lowers to, or
   `nil` when the literal stays the legacy untagged pair map.
@@ -5478,14 +5578,18 @@
     is spelled as one.
   * more than `max-record-fields` entries -- the bound `defrecord` has."
   [form entries]
-  (let [typed (mapv (fn [[k v]] [k (map-literal-record-field-type v)]) entries)]
+  (let [typed (mapv (fn [[k v]]
+                      (reject-absent-field-conflict! k form)
+                      [k (or (absent-field-type k) (map-literal-record-field-type v))])
+                    entries)]
     ;; ADR 0353 floor :absence -- `nil` as a value SPELLS a record: it makes
     ;; that field an absent `[:option T]`, so a literal holding one is never
     ;; the i64 pair map (where `nil` used to lower to a legacy `option-i64`
     ;; and fail as `expected i64`). With no record type in context, T is
     ;; unknown, and that is refused by name: the literal's own source does not
     ;; say what the field holds when it is present.
-    (when-let [[k _] (first (filter (fn [[_ v]] (nil? v)) entries))]
+    (when-let [[k _] (first (filter (fn [[k v]] (and (nil? v) (not (absent-field-type k))))
+                                    entries))]
       (reject! (str "map literal value at key "
                     (map-literal-key-description-for-message k)
                     " is nil, which makes the field an absent [:option T], and "
@@ -5648,8 +5752,10 @@
         (if (= :keyword kind)
           (if-let [fields (keyword-map-literal-record-fields form entries)]
             (list* 'record-new (map-literal-record-type fields)
-                   (map (fn [[_ v] [_ field-type]]
-                          (desugar-expected-value field-type v))
+                   (map (fn [[k v] [_ field-type]]
+                          (if (absent-field-type k)
+                            (desugar-absent-field-value field-type v)
+                            (desugar-expected-value field-type v)))
                         entries fields))
             (apply list 'map-new
                    (mapcat (fn [[k v]] [k (desugar-expr v)]) entries)))
@@ -7334,7 +7440,12 @@
                     (reject! "assoc requires a map followed by one or more key/value pairs" form))
                   (let [[m & kvs] args]
                     (apply list 'map-assoc (desugar-expr m)
-                           (mapcat (fn [[k v]] [(desugar-expr k) (desugar-expr v)])
+                           (mapcat (fn [[k v]]
+                                     (reject-absent-field-conflict! k form)
+                                     [(desugar-expr k)
+                                      (if-let [option-type (absent-field-type k)]
+                                        (desugar-absent-field-value option-type v)
+                                        (desugar-expr v))])
                                    (partition 2 kvs)))))
         ;; Kept on the authored head for the same reason `get` is: which
         ;; primitive answers depends on the receiver's type, which is not
@@ -19859,7 +19970,8 @@
                        per-module first pass. User source still cannot invent
                        those names — each module was checked before link.)"
   [source-forms opts]
-  (binding [*row-op-schemas* (volatile! nil)]
+  (binding [*row-op-schemas* (volatile! nil)
+            *module-absent-fields* (module-absent-fields source-forms)]
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
