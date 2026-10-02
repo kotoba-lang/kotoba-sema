@@ -731,7 +731,7 @@
      (if (>= i (vector-count clauses))
        acc
        (let [c (fl-nth clauses i)]
-         (nd-select-refer clauses want (+ i 1) (if (= want (refer-clojure-clause? c)) (form/append-form acc c) acc)))))
+         (nd-select-refer clauses want (+ i 1) (if (if want (refer-clojure-clause? c) (not (refer-clojure-clause? c))) (form/append-form acc c) acc)))))
    :default nil)
 
 ;; a clause headed by a name the namespace refuses is rejected by name
