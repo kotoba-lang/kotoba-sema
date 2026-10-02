@@ -6091,6 +6091,21 @@
                       (desugar-expr default)
                       (reverse (map vector plans arms))))))))
 
+(defn- nest-repeated-let-bindings
+  "`(let BINDINGS BODY)`, split into nested lets wherever a binder repeats one
+  bound earlier in the same group: `[a 1 b 2 a (+ a b)]` is `(let [a 1 b 2]
+  (let [a (+ a b)] ..))`. Each group's names are distinct, so the duplicate
+  check still guards a `let` nothing produced this way."
+  [bindings body]
+  (let [groups (reduce (fn [groups [b v]]
+                         (let [g (peek groups)]
+                           (if (some #(= b %) (take-nth 2 g))
+                             (conj groups [b v])
+                             (conj (pop groups) (conj g b v)))))
+                       [[]]
+                       (partition 2 bindings))]
+    (reduce (fn [inner g] (list 'let g inner)) body (rseq groups))))
+
 (defn- destructure-binding
   "Expands ONE `[pattern value-expr]` `let`/`defn`-param binding into a flat
   seq of `[symbol expr]` pairs (ADR-2607150000/ADR 0207). PATTERN is a plain
@@ -7109,8 +7124,13 @@
                     ;; offset. `validate-expr`'s "let requires one result
                     ;; expression" could never fire, because the truncation ran
                     ;; first and handed it a body of exactly one.
-                    (list 'let lowered-bindings
-                          (sequenced-body lowered-body form 'let))))
+                    ;; A name bound again in one `let` -- `[a (f) a (clamp
+                    ;; a)]`, Clojure's sequential rebinding -- is the nested
+                    ;; `let` that shadows it, which is what every later pass
+                    ;; already reads (ADR 0353 floor :browser-text-edit).
+                    (nest-repeated-let-bindings
+                     lowered-bindings
+                     (sequenced-body lowered-body form 'let))))
                 ;; Preserve malformed input so validate-expr emits its
                 ;; established even-binding-vector diagnostic.
                 (list* 'let bindings (mapv desugar-expr body))))
@@ -13858,6 +13878,43 @@
                     (contains? (row-symbols-in (drop 3 x)) param)))))
     (tree-seq coll? seq form))))
 
+(defn- row-scope
+  "FORM with every reference to PARAM that a `let` has shadowed renamed out of
+  the way, so what row inference reads off PARAM is what the parameter is
+  read for: in `(let [m (norm m)] (:a m))` the first m is the parameter and
+  the second is norm's result. A `let` binder equal to PARAM is renamed too,
+  and so is each later reference in that `let` -- its following binding
+  values and its body. browser.text-edit rebinds its state parameter this way
+  in every function (ADR 0353 floor :browser-text-edit); before, a rebinding
+  anywhere left the parameter the provisional :i64."
+  [param form]
+  (let [shadowed (symbol (str "__kotoba_row_shadowed_" (name param)))
+        rename (fn rename [x]
+                 (cond (= param x) shadowed
+                       (seq? x) (with-meta (apply list (map rename x)) (meta x))
+                       (map-entry? x) x
+                       (vector? x) (with-meta (mapv rename x) (meta x))
+                       :else x))]
+    (letfn [(scope [x]
+              (cond
+                (and (seq? x) (= 'let (first x)) (vector? (second x))
+                     (even? (count (second x))))
+                (loop [pairs (partition 2 (second x)) out []]
+                  (if-let [[b v] (first pairs)]
+                    (if (= param b)
+                      (apply list 'let
+                             (into (conj out shadowed (scope v))
+                                   (mapcat (fn [[b2 v2]] [(if (= param b2) shadowed b2) (rename v2)]))
+                                   (next pairs))
+                             (map rename (drop 2 x)))
+                      (recur (next pairs) (conj out b (scope v))))
+                    (apply list 'let out (map scope (drop 2 x)))))
+                (seq? x) (with-meta (apply list (map scope x)) (meta x))
+                (map-entry? x) x
+                (vector? x) (with-meta (mapv scope x) (meta x))
+                :else x))]
+      (scope form))))
+
 (defn- row-if-branches
   "The bare symbols FORM may evaluate to through `if` branches: `(if c m (if d
   n o))` is #{m n o}. Anything else is itself when a symbol."
@@ -14021,7 +14078,8 @@
                       (when (or loop-helper? (and source-name (seq param-types-inferred)))
                         [name (into {}
                                     (keep (fn [i]
-                                            (let [p (nth params i)]
+                                            (let [p (nth params i)
+                                                  body (if (simple-symbol? p) (row-scope p body) body)]
                                               (when (and (= :i64 (nth param-types i))
                                                          (simple-symbol? p)
                                                          (not (row-rebinds? p body))
