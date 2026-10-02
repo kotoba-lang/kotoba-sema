@@ -14215,7 +14215,10 @@
                 x (tree-seq coll? seq (:body f))
                 :when (and (coll? x) (seq x) (not (and (seq? x) (= 'quote (first x)))))
                 arg (if (seq? x) (rest x) (seq x))
-                :when (contains? generics arg)]
+                ;; symbol? first: past eight generics this is a hash map, and
+                ;; an integer literal is a ClojureScript BigInt, which has no
+                ;; hash (floor :cljs-literal-hash).
+                :when (and (symbol? arg) (contains? generics arg))]
           (reject! (str "row-polymorphic function " (label arg)
                         " cannot be used as a value: it exists only as its specializations, "
                         "one per record type a call passes it")
