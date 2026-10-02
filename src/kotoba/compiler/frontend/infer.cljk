@@ -20,7 +20,7 @@
                                  :fe/dr [:record :fe/dr [[:env [:ref :fe/env]] [:form [:ref :form/r]]]]
                                  :fe/drs [:record :fe/drs [[:env [:ref :fe/env]] [:forms [:list [:ref :form/r]]]]]
                                  ;; the inference context: the host's dynamic vars of infer.cljk, threaded by value
-                                 :ie/ctx [:record :ie/ctx [[:schemas [:ref :form/r]] [:row-schemas [:ref :form/r]] [:handlers [:ref :form/r]] [:final :bool] [:tail :bool] [:names [:ref :form/r]] [:recording :bool] [:recorded [:ref :form/r]] [:collect :bool] [:throws [:list [:ref :form/r]]] [:known [:ref :form/r]] [:tbl [:ref :form/r]]]]
+                                 :ie/ctx [:record :ie/ctx [[:schemas [:ref :form/r]] [:row-schemas [:ref :form/r]] [:handlers [:ref :form/r]] [:final :bool] [:tail :bool] [:names [:ref :form/r]] [:recording :bool] [:recorded [:ref :form/r]] [:collect :bool] [:throws [:list [:ref :form/r]]] [:known [:ref :form/r]] [:tbl [:ref :form/r]] [:rec-limit :i64] [:rec-count :i64]]]
                                  :ie/r [:record :ie/r [[:type [:ref :form/r]] [:ctx [:ref :ie/ctx]]]]
                                  ;; abort elaboration: the walk results (form + synthetic-name counter) and its context
                                  :ae/r [:record :ae/r [[:form [:ref :form/r]] [:n :i64]]]
@@ -894,7 +894,7 @@
 #?(:kotoba
 (defn ie-new-ctx [schemas [:ref :form/r] row-schemas [:ref :form/r] handlers [:ref :form/r]] [:ref :ie/ctx]
   (record-new [:ref :ie/ctx] schemas row-schemas handlers false false (form/nil-form) false (form/nil-form)
-              false (form/no-forms) (form/nil-form) (ie-tables)))
+              false (form/no-forms) (form/nil-form) (ie-tables) (- 0 1) 0))
    :default nil)
 
 #?(:kotoba
@@ -1271,9 +1271,25 @@
         expected (fget sig :param-types)
         result (fget sig :result)]
     (if (and (record-get [:ref :ie/ctx] c :recording) (fl-has? (form/kids-of (record-get [:ref :ie/ctx] c :names)) op 0))
-      (ie-r result (record-assoc [:ref :ie/ctx] c :recorded (form/assoc-form (record-get [:ref :ie/ctx] c :recorded) op types)))
+      (ie-record-call c op types result)
       (let [_ (signature-checks! args types expected 0)]
         (ie-r result c)))))
+   :default nil)
+
+;; Record the argument TYPES of a call to the unresolved loop-helper OP. A context with a record limit (>= 0) refuses to
+;; make record number LIMIT+1 and throws, carrying the recordings so far and the pending one: the host keeps the recordings
+;; made before a refusal in a volatile, and this is how `resolve-loop-helper-param-types` recovers them
+#?(:kotoba
+(defn ie-record-call [c [:ref :ie/ctx] op [:ref :form/r] types [:ref :form/r] result [:ref :form/r]] [:ref :ie/r]
+  (let [limit (record-get [:ref :ie/ctx] c :rec-limit)
+        made (record-get [:ref :ie/ctx] c :rec-count)
+        recorded (record-get [:ref :ie/ctx] c :recorded)]
+    (if (and (>= limit 0) (>= made limit))
+      (throw (fe-reject-data "record limit" "kotoba.internal/record-limit" op
+                             (fput (fput (empty-fmap) :recorded recorded) :pending (form/vec2 op types))))
+      (ie-r result (record-assoc [:ref :ie/ctx]
+                                 (record-assoc [:ref :ie/ctx] c :recorded (form/assoc-form recorded op types))
+                                 :rec-count (+ made 1))))))
    :default nil)
 
 #?(:kotoba
@@ -7222,8 +7238,9 @@
   (if (>= i (vector-count typed))
     acc
     (let [e (fl-nth typed i)
-          hit (absence-kind? (form/nth-of e 1))]
-      (loop-filter-absence typed (+ i 1) want (if (= hit want) (form/append-form acc e) acc)))))
+          hit (absence-kind? (form/nth-of e 1))
+          keep (if want hit (not hit))]
+      (loop-filter-absence typed (+ i 1) want (if keep (form/append-form acc e) acc)))))
    :default nil)
 
 #?(:kotoba
@@ -8361,7 +8378,32 @@
 #?(:kotoba
 (defn- lh-infer-body [ctx [:ref :ie/ctx] f [:ref :form/r] sigs [:ref :form/r]] [:ref :ie/ctx]
   (try (lh-infer-body-ctx ctx f sigs)
-       (catch [:ref :fe/err] e ctx)))
+       (catch [:ref :fe/err] e (lh-partial ctx f sigs 0 (record-get [:ref :ie/ctx] ctx :recorded)))))
+   :default nil)
+
+;; The host keeps the recordings a refused body made before it was refused (a volatile outlives the throw). Here they are
+;; recovered by re-running the body with a record limit K = 0, 1, ...: a run that reaches record K+1 throws it as pending
+;; (HAVE is the recordings so far), a run refused before that has exactly the recordings HAVE.
+#?(:kotoba
+(defn- lh-partial [ctx [:ref :ie/ctx] f [:ref :form/r] sigs [:ref :form/r] k :i64 have [:ref :form/r]] [:ref :ie/ctx]
+  (let [limited (record-assoc [:ref :ie/ctx] (record-assoc [:ref :ie/ctx] ctx :rec-limit k) :rec-count 0)]
+    (try (let [done (lh-infer-body-ctx limited f sigs)]
+           (lh-with-recorded ctx have))
+         (catch [:ref :fe/err] e (lh-partial-next ctx f sigs k have e)))))
+   :default nil)
+
+#?(:kotoba
+(defn- lh-partial-next [ctx [:ref :ie/ctx] f [:ref :form/r] sigs [:ref :form/r] k :i64 have [:ref :form/r] e [:ref :fe/err]] [:ref :ie/ctx]
+  (if (string=? (record-get [:ref :fe/err] e :code) "kotoba.internal/record-limit")
+    (let [pending (fget (record-get [:ref :fe/err] e :data) :pending)
+          next-have (form/assoc-form have (form/nth-of pending 0) (form/nth-of pending 1))]
+      (lh-partial ctx f sigs (+ k 1) next-have))
+    (lh-with-recorded ctx have)))
+   :default nil)
+
+#?(:kotoba
+(defn- lh-with-recorded [ctx [:ref :ie/ctx] have [:ref :form/r]] [:ref :ie/ctx]
+  (record-assoc [:ref :ie/ctx] ctx :recorded have))
    :default nil)
 
 #?(:kotoba
