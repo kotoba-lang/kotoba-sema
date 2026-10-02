@@ -11662,6 +11662,31 @@
                                        field-type item field))
           type)
         record-get
+        (if (= 2 (count args))
+          ;; ADR 0353 floor :loop-slot-beside-row. `(:k m)` is a
+          ;; descriptor-less record-get until `rewrite-record-projection`
+          ;; gives it its descriptor, and a loop's slots are typed from the
+          ;; call site BEFORE that pass: the 3-arity reading below took the
+          ;; local for the descriptor and failed inside, so a caller body that
+          ;; read a row before its loop was untypeable and the slot kept the
+          ;; `:i64` placeholder. Typed here as that rewrite will rewrite it.
+          (let [[value field] args
+                value-type (infer-expression-type value locals signatures)
+                descriptor (row-op-record value-type)]
+            (cond
+              (canonical-typed-map-type? value-type)
+              (infer-expression-type (list 'typed-map-get value-type value field) locals signatures)
+
+              (= :map value-type)
+              (infer-expression-type (list 'map-get value field 0) locals signatures)
+
+              descriptor
+              (infer-expression-type (list 'record-get descriptor value field) locals signatures)
+
+              :else
+              (reject! (str "record-get without a type descriptor requires a record "
+                            "value; got " (pr-str value-type))
+                       form :kotoba.error/record-projection-unresolved)))
         (let [[type value field] args
               field-type (first-truthy (fn [[declared-field declared-type]]
                                  (when (= declared-field field) declared-type))
@@ -11670,7 +11695,7 @@
           (require-expression-type! (infer-expression-type value locals signatures) type value)
           ;; a `[:fn ...]` field is read as the closure handle it holds; the
           ;; closure analysis (`infer-closure-refinements`) knows it is one
-          (if (callable-type? field-type) :i64 field-type))
+          (if (callable-type? field-type) :i64 field-type)))
         record-assoc
         (let [[type value field replacement] args
               field-type (first-truthy (fn [[declared-field declared-type]]
