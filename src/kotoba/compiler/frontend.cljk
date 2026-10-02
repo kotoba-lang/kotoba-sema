@@ -14300,6 +14300,8 @@
         form))
     form))
 
+(declare infer-absent-parameter-types)
+
 (defn- specialize-row-parameters
   "Monomorphize every row-polymorphic function at the record types its calls
   pass, and drop the generic. EXPORTED is the set of exported source names
@@ -14454,7 +14456,15 @@
                                           f))
                                       fs)))
               round (fn [fs final?]
-                      (let [fs (infer-results (infer-results fs))
+                      ;; Parameters first (ADR 0353 floor :rebound-row-argument):
+                      ;; this pass runs before the module-wide parameter
+                      ;; inference, so a helper's unannotated string parameter
+                      ;; is still the provisional :i64 here. A specialization
+                      ;; calling it -- normalize-selection's (code-unit-count
+                      ;; value) -- had no inferable result, kept :i64, and a
+                      ;; caller's (let [state (normalize-selection state)] ..)
+                      ;; passed that :i64 on to the next row.
+                      (let [fs (infer-results (infer-results (infer-absent-parameter-types fs)))
                             table (signatures fs)]
                         (mapv (fn [{:keys [params param-types] :as f}]
                                 (update f :body rewrite (zipmap params param-types) table final?))
