@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.state-ability
   "Module `state-ability` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (12 forms, 565 lines). Depends on: base, closure-types, expand, namespace-defs, infer."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [specialize-state-abilities state-escapes? state-first-stateful-operation state-handle-bodies state-mentions? state-refuse-impure-handler! state-split-resume thread-state-abilities]})
   (:require [kotoba.compiler.frontend-tables :as tables]
             #?@(:kotoba [[kotoba.form :as form]])
             [kotoba.compiler.frontend.base :refer [abort-form-mentions? if-parts let-body reject! reject-call-arity! synthetic #?@(:kotoba [fdrop fget fhead fkw fl-has? fl-nth fl-slice fmeta-from fname form-text fput ftruthy? pr-form] :default [first-truthy *synthetic-counter*])]]
@@ -1170,30 +1173,10 @@
    :default nil)
 
 ;; the type of FORM against the pre-threading signatures (the host's `type-of`); a refusal propagates
-#?(:kotoba
-(defn sa-ir [okay :bool ty [:ref :form/r] er [:ref :fe/err]] [:ref :ana/ir]
-  (record-new [:ref :ana/ir] okay ty er))
-   :default nil)
-
-;; a call of an imported aborting function, caught into a record and re-thrown in this module's own tail position
-#?(:kotoba
-(defn sa-unwrap [r [:ref :ana/ir]] [:ref :form/r]
-  (if (record-get [:ref :ana/ir] r :ok)
-    (record-get [:ref :ana/ir] r :val)
-    (throw (record-get [:ref :ana/ir] r :err))))
-   :default nil)
-
-#?(:kotoba
-(defn sa-infer-caught [g [:ref :ana/g] form [:ref :form/r] env [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-expression-type (sa-g-ie g) form env (sa-g-sigs g)) [:result [:ref :ie/r] [:ref :fe/err]]
-    (ok r (sa-ir true (record-get [:ref :ie/r] r :type) (sa-error "" "" form)))
-    (err e (sa-ir false form e))))
-   :default nil)
-
-;; the type of FORM against the pre-threading signatures (the host's `type-of`); a refusal propagates
+;; (infer-expression-type is imported and aborting: a plain call passes its abort on, ADR 0363)
 #?(:kotoba
 (defn sa-infer [g [:ref :ana/g] form [:ref :form/r] env [:ref :form/r]] [:ref :form/r]
-  (sa-unwrap (sa-infer-caught g form env)))
+  (record-get [:ref :ie/r] (infer-expression-type (sa-g-ie g) form env (sa-g-sigs g)) :type))
    :default nil)
 
 #?(:kotoba

@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.record-projection
   "Module `record-projection` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (23 forms, 1356 lines). Depends on: base, closure-types, expand, namespace-defs, infer."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [collection-head-advice f64-bits-literal-form? library-predicate-document-test option-presence-test option-present-value resolve-float-operator rewrite-record-projection rewrite-record-projection-or rewrite-record-projections]})
   (:require [kotoba.compiler.frontend-tables :as tables]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form]])
@@ -272,15 +275,8 @@
     :else nil)))
 
 #?(:kotoba
-(defn rp-caught-value [g [:ref :ana/g] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] locals [:ref :form/r] form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (row-op-fields (rp-g-ctx g) op args types locals (rp-g-sigs g) form) [:result [:ref :ie/r] [:ref :fe/err]]
-    (ok r (rp-ir true (record-get [:ref :ie/r] r :type) (rp-error "" "" form)))
-    (err e (rp-ir false form e))))
-   :default nil)
-
-#?(:kotoba
 (defn rp-row-op-fields [g [:ref :ana/g] op [:ref :form/r] args [:ref :form/r] types [:ref :form/r] locals [:ref :form/r] form [:ref :form/r]] [:ref :form/r]
-  (rp-unwrap (rp-caught-value g op args types locals form)))
+  (record-get [:ref :ie/r] (row-op-fields (rp-g-ctx g) op args types locals (rp-g-sigs g) form) :type))
    :default nil)
 
 ;; the record descriptor TYPE is (a declared `[:ref ..]` resolved), or nil
@@ -721,25 +717,6 @@
   (infer-type-or-nil (rp-g-ctx g) form locals (rp-g-sigs g)))
    :default nil)
 
-#?(:kotoba
-(defn rp-ir [okay :bool val [:ref :form/r] er [:ref :fe/err]] [:ref :ana/ir]
-  (record-new [:ref :ana/ir] okay val er))
-   :default nil)
-
-#?(:kotoba
-(defn rp-unwrap [r [:ref :ana/ir]] [:ref :form/r]
-  (if (record-get [:ref :ana/ir] r :ok)
-    (record-get [:ref :ana/ir] r :val)
-    (throw (record-get [:ref :ana/ir] r :err))))
-   :default nil)
-
-#?(:kotoba
-(defn rp-infer-caught [g [:ref :ana/g] form [:ref :form/r] locals [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-expression-type (rp-g-ctx g) form locals (rp-g-sigs g)) [:result [:ref :ie/r] [:ref :fe/err]]
-    (ok r (rp-ir true (record-get [:ref :ie/r] r :type) (rp-error "" "" form)))
-    (err e (rp-ir false form e))))
-   :default nil)
-
 ;; the type of the only argument when there is exactly one, else nil (the `if` is hoisted: an aborting branch cannot be a `let` value)
 #?(:kotoba
 (defn rp-infer-single [g [:ref :ana/g] args [:ref :form/r] locals [:ref :form/r]] [:ref :form/r]
@@ -749,7 +726,7 @@
 ;; the type of FORM; a refusal propagates
 #?(:kotoba
 (defn rp-infer [g [:ref :ana/g] form [:ref :form/r] locals [:ref :form/r]] [:ref :form/r]
-  (rp-unwrap (rp-infer-caught g form locals)))
+  (record-get [:ref :ie/r] (infer-expression-type (rp-g-ctx g) form locals (rp-g-sigs g)) :type))
    :default nil)
 
 #?(:kotoba
@@ -1217,17 +1194,9 @@
     (rp-r (rp-seq2 "=" (rp-seq3 "map-get" value key (form/int-form 0)) (rp-seq3 "map-get" value key (form/int-form 1))) (rp-rl-n rl))))
    :default nil)
 
-;; record-get-default-type is an imported aborting function: caught into a record, re-thrown here
-#?(:kotoba
-(defn rp-default-caught [g [:ref :ana/g] descriptor [:ref :form/r] key [:ref :form/r] dflt [:ref :form/r] form [:ref :form/r] locals [:ref :form/r]] [:ref :ana/ir]
-  (match-result (record-get-default-type (rp-g-ctx g) descriptor key dflt form locals (rp-g-sigs g)) [:result [:ref :ie/r] [:ref :fe/err]]
-    (ok r (rp-ir true (record-get [:ref :ie/r] r :type) (rp-error "" "" form)))
-    (err e (rp-ir false form e))))
-   :default nil)
-
 #?(:kotoba
 (defn rp-get-default-check [g [:ref :ana/g] descriptor [:ref :form/r] key [:ref :form/r] dflt [:ref :form/r] form [:ref :form/r] locals [:ref :form/r]] [:ref :form/r]
-  (rp-unwrap (rp-default-caught g descriptor key dflt form locals)))
+  (record-get [:ref :ie/r] (record-get-default-type (rp-g-ctx g) descriptor key dflt form locals (rp-g-sigs g)) :type))
    :default nil)
 
 #?(:kotoba
@@ -1542,30 +1511,14 @@
       :else (rp-op-call op args))))
    :default nil)
 
-;; heterogeneous-vector-index! is an imported aborting function: caught into a record, re-thrown here
-#?(:kotoba
-(defn rp-hetero-caught [index [:ref :form/r] item-types [:ref :form/r] form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (heterogeneous-vector-index! index item-types form) [:result :i64 [:ref :fe/err]]
-    (ok r (rp-ir true (form/int-form r) (rp-error "" "" form)))
-    (err e (rp-ir false form e))))
-   :default nil)
-
 #?(:kotoba
 (defn rp-hetero-index [index [:ref :form/r] item-types [:ref :form/r] form [:ref :form/r]] :i64
-  (form/int-value (rp-unwrap (rp-hetero-caught index item-types form))))
-   :default nil)
-
-;; require-expression-type! is an imported aborting function: caught into a record, re-thrown here
-#?(:kotoba
-(defn rp-require-caught [actual [:ref :form/r] expected [:ref :form/r] form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (require-expression-type! actual expected form) [:result :i64 [:ref :fe/err]]
-    (ok r (rp-ir true (form/int-form r) (rp-error "" "" form)))
-    (err e (rp-ir false form e))))
+  (heterogeneous-vector-index! index item-types form))
    :default nil)
 
 #?(:kotoba
 (defn rp-require-type [actual [:ref :form/r] expected [:ref :form/r] form [:ref :form/r]] :i64
-  (form/int-value (rp-unwrap (rp-require-caught actual expected form))))
+  (require-expression-type! actual expected form))
    :default nil)
 
 ;; a default given to a heterogeneous nth must have the item's type
@@ -1752,28 +1705,14 @@
    :default nil)
 
 #?(:kotoba
-(defn rp-document-of-caught [g [:ref :ana/g] type [:ref :form/r] operand [:ref :form/r]] [:ref :ana/ir]
-  (match-result (document-of-constructor! (rp-g-ctx g) type operand) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (rp-ir true r (rp-error "" "" operand)))
-    (err e (rp-ir false operand e))))
-   :default nil)
-
-#?(:kotoba
 (defn rp-arm-document-of [g [:ref :ana/g] form [:ref :form/r] locals [:ref :form/r] n :i64] [:ref :ana/r]
   (let [r (rp-rewrite g (form/nth-of form 1) locals n)
         operand (rp-r-form r)
         operand-type (rp-infer g operand locals)
-        constructor (rp-unwrap (rp-document-of-caught g operand-type operand))]
+        constructor (document-of-constructor! (rp-g-ctx g) operand-type operand)]
     (if (rp-kw-is? constructor :identity)
       (rp-r operand (rp-r-n r))
       (rp-r (form/form-seq (form/two-forms constructor operand)) (rp-r-n r)))))
-   :default nil)
-
-#?(:kotoba
-(defn rp-answer-caught [op [:ref :form/r] type [:ref :form/r] operand [:ref :form/r]] [:ref :ana/ir]
-  (match-result (library-predicate-answer! op type operand) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (rp-ir true r (rp-error "" "" operand)))
-    (err e (rp-ir false operand e))))
    :default nil)
 
 #?(:kotoba
@@ -1781,7 +1720,7 @@
   (let [r (rp-rewrite g (form/nth-of form 1) locals n)
         operand (rp-r-form r)
         operand-type (rp-infer g operand locals)
-        answer (rp-unwrap (rp-answer-caught op operand-type operand))]
+        answer (library-predicate-answer! op operand-type operand)]
     (cond
       (rp-kw-is? answer :operand) (rp-r operand (rp-r-n r))
       (rp-kw-is? answer :negated) (rp-r (rp-seq1 "bool-not" operand) (rp-r-n r))

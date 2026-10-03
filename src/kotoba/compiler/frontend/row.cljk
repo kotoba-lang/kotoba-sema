@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.row
   "Module `row` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (19 forms, 499 lines). Depends on: base, kernel-region, closure-types, infer, record-projection."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [row-argument-text row-field-reads row-generics row-if-branches row-joins row-name-part row-operated? row-pass-through row-rebinds? row-record-fields row-symbols-in row-text specialize-row-parameters type-literal type-literals]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
