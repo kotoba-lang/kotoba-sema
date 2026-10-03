@@ -2,7 +2,7 @@
   "Module `namespace-defs` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (95 forms, 1144 lines). Depends on: base, kernel-region, closure-types, expand."
   ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
   ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
-  #?(:kotoba {:kotoba/export [check-pure-product-source-forms! erase-slice-values expand-defdesugar-forms forbidden-heads grammar-declared-heads heads-kids heterogeneous-vector-index! internal-failure! max-functions max-namespace-capabilities max-namespace-docstring-chars namespace-parts refer-clojure-clause? reserved-binding-name? reserved-function-names unbound-symbol! unbound-symbol-error unknown-operation! unknown-operation-error]})
+  #?(:kotoba {:kotoba/export [check-pure-product-source-forms! erase-slice-values expand-defdesugar-forms forbidden-heads grammar-declared-heads heads-kids heterogeneous-vector-index! internal-failure! max-functions max-namespace-capabilities max-namespace-docstring-chars namespace-parts refer-clojure-clause? reserved-binding-name? reserved-function-name? reserved-function-names unbound-symbol! unbound-symbol-error unknown-operation! unknown-operation-error]})
   (:require [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]

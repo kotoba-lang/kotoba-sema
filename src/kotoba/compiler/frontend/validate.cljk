@@ -2,7 +2,7 @@
   "Module `validate` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (26 forms, 982 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs."
   ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
   ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
-  #?(:kotoba {:kotoba/export [def-parts holds-symbol? max-bindings max-expression-nodes max-list-items max-typed-set-items quote-form? validate-expr]})
+  #?(:kotoba {:kotoba/export [def-parts holds-symbol? max-bindings max-expression-nodes max-list-items max-typed-set-items quote-form? validate-ctx validate-expr validate-expr-in]})
   (:require [kotoba.lang.text :as str]
             [kotoba.kir.value :as value]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.validate-expr :as vx]])
