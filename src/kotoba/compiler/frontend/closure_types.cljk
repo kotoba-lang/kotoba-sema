@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.closure-types
   "Module `closure-types` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (59 forms, 832 lines). Depends on: base."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? check-linear-resource-ownership! closure-default-value-expr closure-result-type? env-schemas fe-error generic-option-type? heterogeneous-vector-type? invoke-dispatcher-name kw-text lambda-dispatchers max-record-fields parametric-result-type? record-type? resolve-type-alias! schema-ref-type? slice-element-type slice-element-widths slice-type? structured-type? type-alias-form? typed-param-parts typed-set-type? validate-value-type! variant-type?]})
   (:require [kotoba.artifact.core :as artifact]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt] [kotoba.compiler.frontend-tables :as tables]])
             [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-add fl-nth fl-slice form->document simple-symbol-form?] :default [first-truthy])]])

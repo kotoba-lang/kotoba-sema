@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.base
   "Module `base` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (93 forms, 1312 lines). Depends on: nothing in this split."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [a-normalize-aborts abort-escapes? abort-form-mentions? ascii-digit-code? capability-id->name capability-registry capability-wire-id check-abort-facet-unwind! code-point-width dr effect-capability-id elaborate-local-state env-counter expand-intrinsic-helper-forms fdistinct? fdrop fe-reject fe-reject-data fget fhas? fhead fhead-is? fkw fl-add fl-distinct? fl-drop fl-has? fl-nth fl-slice fmeta-from fname fnamespace form->document form-span form-text fprivate-symbol? fput frebuild-seq fsource-head fsym fsymbols-into ftruthy? fwith-source-head if-parts let-body pr-form read-forms refuse-reader-tagged-host-literal! reject! reject-call-arity! reject-operation-arity! simple-symbol-form? source-operation-registry synthetic try-clause-parts validate-interrupt-entries!]})
   (:require [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.compiler.kotoba-reader :as kr]

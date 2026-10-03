@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.expand
   "Module `expand` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (57 forms, 1564 lines). Depends on: base, closure-types."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [all-distinct? binding-symbols expand-closed-multimethod-forms expand-defn-parts expand-record-protocol-forms expand-state-ability-forms kotoba-integer? max-function-docstring-chars max-parameters max-symbol-chars preserve-form-meta rewrite-pure-application-forms state-rebuild-seq valid-name? variadic-params?]})
   (:require [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
@@ -131,10 +134,9 @@
   NOT here: those passes run after this one. `(ref <generated-name>)` is
   refused, which is the fail-closed direction."))
 
-;; A refusal is an abort (ADR 0007). `require-k` and the wrappers of the imported aborting
-;; functions are module-local on purpose: an aborting function IMPORTED from another module is typed
-;; [:result T E] here and its abort does not propagate through a plain call, so each import is
-;; unwrapped once, here, and re-raised.
+;; A refusal is an abort (ADR 0007). An aborting function imported from another module passes its
+;; abort on through a plain call (ADR 0363), so validate-value-type!, resolve-type-alias! and
+;; typed-param-parts are called directly.
 #?(:kotoba
    (defn fe-reject [msg :string code :string form [:ref :form/r]] [:ref :fe/err]
      (record-new [:ref :fe/err] msg code form "subset" (form/nil-form)))
@@ -143,30 +145,6 @@
 #?(:kotoba
    (defn require-k [ok :bool msg :string code :string form [:ref :form/r]] :i64
      (if ok 0 (throw (fe-reject msg code form))))
-   :default nil)
-
-#?(:kotoba
-   (defn imp-validate-value-type! [t [:ref :form/r]] :i64
-     (let [r (validate-value-type! t)]
-       (if (result-ok?-of [:result :i64 [:ref :fe/err]] r)
-         (result-value-of [:result :i64 [:ref :fe/err]] r 0)
-         (throw (result-error-of [:result :i64 [:ref :fe/err]] r (fe-reject "" "" t))))))
-   :default nil)
-
-#?(:kotoba
-   (defn imp-resolve-type-alias! [t [:ref :form/r] constants [:ref :form/r]] [:ref :form/r]
-     (let [r (resolve-type-alias! t constants)]
-       (if (result-ok?-of [:result [:ref :form/r] [:ref :fe/err]] r)
-         (result-value-of [:result [:ref :form/r] [:ref :fe/err]] r (form/nil-form))
-         (throw (result-error-of [:result [:ref :form/r] [:ref :fe/err]] r (fe-reject "" "" t))))))
-   :default nil)
-
-#?(:kotoba
-   (defn imp-typed-param-parts [raw [:ref :form/r] constants [:ref :form/r]] [:ref :form/r]
-     (let [r (typed-param-parts raw constants)]
-       (if (result-ok?-of [:result [:ref :form/r] [:ref :fe/err]] r)
-         (result-value-of [:result [:ref :form/r] [:ref :fe/err]] r (form/nil-form))
-         (throw (result-error-of [:result [:ref :form/r] [:ref :fe/err]] r (fe-reject "" "" raw))))))
    :default nil)
 
 
@@ -537,7 +515,7 @@
                                (form-text handler) " names " (pr-form (form/nth-of signature 0)))
                           "kotoba.error/state-handler-shape" form)
            state-type (form/nth-of signature 1)
-           ok4 (imp-validate-value-type! state-type)
+           ok4 (validate-value-type! state-type)
            parsed (ex-handler-clauses clauses 0 handler form (form/no-forms))
            ops (ex-handler-ops parsed 0 (form/no-forms))
            ok5 (require-k (and (= 2 (vector-count ops)) (fl-has? ops (form/keyword-form :get) 0) (fl-has? ops (form/keyword-form :put) 0))
@@ -658,7 +636,7 @@
            raw-params (if (> (vector-count declaration) 0) (fl-nth declaration 0) (form/nil-form))
            tail0 (fl-drop declaration 1)
            typed (and (> (vector-count tail0) 0) (ex-type-position? (fl-nth tail0 0)))
-           result (if typed (imp-resolve-type-alias! (fl-nth tail0 0) constants) (ex-absent))
+           result (if typed (resolve-type-alias! (fl-nth tail0 0) constants) (ex-absent))
            tail (if typed (fl-drop tail0 1) tail0)
            ceiling-form (if (> (vector-count tail) 0) (fl-nth tail 0) (form/nil-form))
            has-ceiling (ex-ceiling-map? ceiling-form)
@@ -670,7 +648,7 @@
            ok1 (require-k (or (form/is-nil? docstring) (<= (string-length (form/string-value docstring)) (max-function-docstring-chars)))
                           "function docstring exceeds admission limit" "kotoba.error/subset-reject" docstring)
            absent (form/eq result (ex-absent))
-           ok2 (if absent 0 (imp-validate-value-type! result))
+           ok2 (if absent 0 (validate-value-type! result))
            callable (and (not absent) (callable-type? result))
            p0 (fput (fput (fput (fput (form/form-map (form/no-forms)) :name name) :raw-params raw-params)
                      :result (if (or absent callable) (form/keyword-form :i64) result))
@@ -712,7 +690,7 @@
        (if (form/eq (form/nth-of raw-params i) (fsym "&")) i (ex-amp-index raw-params (+ i 1)))))
    :default nil)
 
-;; the patterns of PARTS (imp-typed-param-parts maps)
+;; the patterns of PARTS (typed-param-parts maps)
 #?(:kotoba
    (defn- ex-part-symbols [parts [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
      (if (>= i (form/count-of parts))
@@ -729,7 +707,7 @@
                           "kotoba.error/subset-reject" raw-params)
            fixed (form/form-vec (fl-slice (form/kids-of raw-params) 0 amp (form/no-forms)))
            rest-name (form/last-of raw-params)
-           fixed-parts (imp-typed-param-parts fixed constants)
+           fixed-parts (typed-param-parts fixed constants)
            min-arity (form/count-of fixed-parts)
            ok2 (require-k (and (valid-name? rest-name) (not (form/eq rest-name (fsym "&"))))
                            "variadic defn requires [fixed ... & rest]: the rest name must be a simple symbol"
@@ -773,7 +751,7 @@
          (ex-fixed-clauses raws (+ i 1) source-name public? constants
                            (form/append-form acc
                                              (fput (fput (fput raw :source-name source-name)
-                                                         :logical-arity (form/int-form (form/count-of (imp-typed-param-parts (fget raw :raw-params) constants))))
+                                                         :logical-arity (form/int-form (form/count-of (typed-param-parts (fget raw :raw-params) constants))))
                                                    :public? (form/bool-form public?)))))))
    :default nil)
 
@@ -1195,7 +1173,7 @@
      (if (>= i (form/count-of types))
        0
        (let [t (form/nth-of types i)
-             ok (if (form/is-nil? t) 0 (imp-validate-value-type! t))]
+             ok (if (form/is-nil? t) 0 (validate-value-type! t))]
          (ex-validate-types types (+ i 1)))))
    :default nil)
 
@@ -1269,7 +1247,7 @@
              type (form/nth-of fields (+ i 1))
              ok1 (require-k (valid-name? field) "defrecord field names must be unique unqualified symbols"
                             "kotoba.error/record-declaration" field)
-             ok2 (imp-validate-value-type! type)]
+             ok2 (validate-value-type! type)]
          (ex-typed-fields fields (+ i 2) (form/append-form acc (ex-field-part field type))))))
    :default nil)
 

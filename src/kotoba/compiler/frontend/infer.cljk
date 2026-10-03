@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.infer
   "Module `infer` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (97 forms, 3398 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [abort-signatures abort-type-text absence-in-tail? argc check-loop-recur-argument-types! check-value-types! ctx-row-schemas ctx-schemas document-of-constructor! elaborate-aborts elaborate-named-abilities ie-new-ctx infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-expression-type infer-loop-helper-results infer-type-or-nil kw-head? legacy-absence library-predicate-answer! nominal-type-identity option-vector-type? record-field-type record-get-default-type require-expression-type! resolve-absence-if resolve-loop-helper-param-types row-op-fields row-op-literal-entries row-op-not-record! row-op-record row-op-result-type same-expression-type? use-site-text zip-locals]})
   (:require [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]

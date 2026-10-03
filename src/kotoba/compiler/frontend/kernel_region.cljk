@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.kernel-region
   "Module `kernel-region` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (27 forms, 558 lines). Depends on: base."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [absence-marker? check-kernel-region-provenance! head-is? integer-literal? map-literal-key-order map-literal-record-type sym-is? traceable-base?]})
   (:require [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
             #?@(:kotoba [[kotoba.form :as form]])
