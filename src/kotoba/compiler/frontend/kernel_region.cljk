@@ -868,20 +868,26 @@
    (defn- kr-check-function [f [:ref :form/r] names [:ref :form/r] tainted [:ref :form/r]] :i64
      (let [params (form/form-set (form/kids-of (kr-fparams f)))
            u (kernel-base-uses (kr-fbody f) params names)
+           ;; the refusal operands are read only when there is a refusal: arguments are evaluated eagerly, so
+           ;; `(require-k ok .. (fl-nth problems 0))` read item 0 of an EMPTY list on every admitted kernel memory
+           ;; operation (list-index-out-of-bounds; the native amu-front trapped SIGILL; agent F64, 2026-10-04)
            problems (kr-problems u)
-           ok1 (require-k (= 0 (vector-count problems))
-                        "kernel memory base must name a region, not compute one"
-                        "kotoba.error/kernel-region-provenance" (fl-nth problems 0))
+           ok1 (if (= 0 (vector-count problems))
+                 0
+                 (throw (fe-reject "kernel memory base must name a region, not compute one"
+                                   "kotoba.error/kernel-region-provenance" (fl-nth problems 0))))
            overwide (kr-overwide u)
-           ok2 (require-k (= 0 (vector-count overwide))
-                        "scratch region window exceeds the 16384-byte reservation"
-                        "kotoba.error/kernel-scratch-window" (fl-nth overwide 0))
+           ok2 (if (= 0 (vector-count overwide))
+                 0
+                 (throw (fe-reject "scratch region window exceeds the 16384-byte reservation"
+                                   "kotoba.error/kernel-scratch-window" (fl-nth overwide 0))))
            alloc (kr-overwide-alloc u)
-           ok3 (require-k (= 0 (vector-count alloc))
-                        (str "window exceeds the "
-                             (string-from-i64 (form/int-value (form/form-get (fl-nth alloc 0) (form/keyword-form :allocated))))
-                             " bytes this allocation obtained")
-                        "kotoba.error/kernel-alloc-region-window" (fl-nth alloc 0))]
+           ok3 (if (= 0 (vector-count alloc))
+                 0
+                 (throw (fe-reject (str "window exceeds the "
+                                        (string-from-i64 (form/int-value (form/form-get (fl-nth alloc 0) (form/keyword-form :allocated))))
+                                        " bytes this allocation obtained")
+                                   "kotoba.error/kernel-alloc-region-window" (fl-nth alloc 0))))]
        (kr-check-calls (kr-calls u) 0 tainted params)))
    :default nil)
 
