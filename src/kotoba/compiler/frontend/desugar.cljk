@@ -3744,7 +3744,9 @@
          (form/is-nil? f) (form/vec2 (form/call0 "document-null") (form/int-form n))
          (form/is-bool? f) (form/vec2 (form/call1 "document-bool" f) (form/int-form n))
          (form/is-int? f) (form/vec2 (form/call1 "document-i64" f) (form/int-form n))
-         (form/is-f64? f) (form/vec2 (form/call1 "document-f64" f) (form/int-form n))
+         ;; the host reader's closed f64 shape `(f64-from-bits <bits>)` (desugar-f64-literal), not the bare f64 Form
+         ;; validate has no rule for (agent F64, 2026-10-04: general-document-map was refused "value type is outside the safe profile")
+         (form/is-f64? f) (form/vec2 (form/call1 "document-f64" (form/call1 "f64-from-bits" (form/int-form (form/bits-of f)))) (form/int-form n))
          (form/is-string? f) (form/vec2 (form/call1 "document-string" f) (form/int-form n))
          (form/is-keyword? f) (form/vec2 (form/call1 "document-keyword" f) (form/int-form n))
          (form/is-symbol? f) (form/vec2 (form/call1 "document-symbol" (form/call1 "symbol" (form/string-form (form/symbol-value f)))) (form/int-form n))
@@ -10610,11 +10612,38 @@
         (list '= marked 1)))
     result)))
 
+;; The Kotoba reading of `bool-predicate-answer` (agent F64, 2026-10-04). A Form has no metadata, so the
+;; `::i64-answer` mark on the head symbol is a span no reader produces (line -1, column 0): the passes carry
+;; a head symbol by value, so the mark survives exactly as the host's symbol meta does.
+#?(:kotoba
+   (defn i64-answer-mark [] :i64 -4294967296)
+   :default nil)
+
+#?(:kotoba
+   (defn i64-answer-head? [f [:ref :form/r]] :bool
+     (and (form/is-seq? f) (> (form/count-of f) 0) (form/is-symbol? (form/nth-of f 0))
+          (tables/i64-answer-predicates-has? (form/nth-of f 0))))
+   :default nil)
+
+#?(:kotoba
+   (defn bool-predicate-answer [form [:ref :form/r] result [:ref :form/r]] [:ref :form/r]
+     (if (i64-answer-head? result)
+       (let [head (form/nth-of result 0)
+             marked (form/form-seq (form/cons-onto (record-assoc [:ref :form/r] head :span (i64-answer-mark))
+                                                   (form/rest-list result)))]
+         (if (and (form/is-seq? form) (> (form/count-of form) 0) (form/is-symbol? (form/nth-of form 0))
+                  (= (form/span-of (form/nth-of form 0)) (i64-answer-mark)))
+           marked
+           (form/form-seq (form/cons-onto (form/symbol-form "=")
+                                          (form/cons-onto marked (form/cons-onto (form/int-form 1) (form/no-forms)))))))
+       result))
+   :default nil)
+
 #?(:kotoba
    (defn desugar-expr [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
      (let [ctx (env-result env)
            r (desugar-expr* (with-result env (form/nil-form)) form ctx)]
-       (dr (with-result (dr-env r) ctx) (dr-form r))))
+       (dr (with-result (dr-env r) ctx) (bool-predicate-answer form (dr-form r)))))
    :default
 (defn desugar-expr [form]
   ;; The one chokepoint every desugared node passes through, and therefore the
