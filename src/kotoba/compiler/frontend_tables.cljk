@@ -11,7 +11,7 @@
   function. So each table is a zero-argument function returning the
   kotoba.form Form of the printed table, with `table-get` / `table-has?`
   as the readers (map lookup and set/map membership)."
-  {:kotoba/export [capability-registry-cljs-fallback named-operation-default-results arithmetic i32-operations i64-operations comparisons heap-operations kgraph-operations kernel-memory-operations slice-value-operations slice-constructor-elements kernel-base-positions kernel-privileged-operations rodata-literal-operations image-symbol-operations rodata-literal-encodings list-operations predicate-operations logical-operations map-operations map-presence-operations set-operations collection-count-operations vector-end-operations map-projection-operations typed-map-operations typed-safe-value-operations parametric-result-operations variant-operations generic-option-operations canonical-list-operations bytes-operations heterogeneous-vector-operations typed-set-operations canonical-typed-map-operations record-operations typed-vector-operations contextual-string-argument-indexes contextual-document-argument-indexes contextual-f64-argument-indexes contextual-f32-argument-indexes contextual-vector-f64-argument-types typed-f64-vector-operations compact-graph-operations document-fixed-operations document-variadic-operations sequencing-operations region-operations lazy-sequence-operations string-operations xml-operations decimal-operations f64-operations f32-operations type-directed-numeric-heads float-division-heads float-arithmetic-resolution float-negation-resolution explicit-numeric-conversions definition-heads pure-product-disallowed-heads non-shadowable-special-heads str-integer-heads intrinsic-helper-heads intrinsic-helper-order map-literal-value-constructors document-returning-heads document-constructor-heads document-head-set i64-answer-predicates local-state-write-heads local-state-scope-heads local-state-conditional-heads local-state-effect-heads row-operation-heads library-predicate-heads library-predicate-document-kinds document-of-constructors row-binding-heads state-perform-heads state-handle-heads stateful-def-heads effectful-def-heads structural-heads protocol-declaration-heads grammar-declared-heads forbidden-heads capability-catalog-fallback source-operation-registry-fallback capability-id->name-fallback table-get table-has?]}
+  {:kotoba/export [capability-registry-cljs-fallback named-operation-default-results arithmetic i32-operations i64-operations comparisons heap-operations kgraph-operations kernel-memory-operations slice-value-operations slice-constructor-elements kernel-base-positions kernel-privileged-operations rodata-literal-operations image-symbol-operations rodata-literal-encodings list-operations predicate-operations logical-operations map-operations map-presence-operations set-operations collection-count-operations vector-end-operations map-projection-operations typed-map-operations typed-safe-value-operations parametric-result-operations variant-operations generic-option-operations canonical-list-operations bytes-operations heterogeneous-vector-operations typed-set-operations canonical-typed-map-operations record-operations typed-vector-operations contextual-string-argument-indexes contextual-document-argument-indexes contextual-f64-argument-indexes contextual-f32-argument-indexes contextual-vector-f64-argument-types typed-f64-vector-operations compact-graph-operations document-fixed-operations document-variadic-operations sequencing-operations region-operations lazy-sequence-operations string-operations xml-operations decimal-operations f64-operations f32-operations type-directed-numeric-heads float-division-heads float-arithmetic-resolution float-negation-resolution explicit-numeric-conversions definition-heads pure-product-disallowed-heads non-shadowable-special-heads str-integer-heads intrinsic-helper-heads intrinsic-helper-order map-literal-value-constructors document-returning-heads document-constructor-heads document-head-set i64-answer-predicates local-state-write-heads local-state-scope-heads local-state-conditional-heads local-state-effect-heads row-operation-heads library-predicate-heads library-predicate-document-kinds document-of-constructors row-binding-heads state-perform-heads state-handle-heads stateful-def-heads effectful-def-heads structural-heads protocol-declaration-heads grammar-declared-heads forbidden-heads reserved-extra-heads capability-catalog-fallback source-operation-registry-fallback capability-id->name-fallback table-get table-has? named-operation-default-results-has? arithmetic-has? i32-operations-has? i64-operations-has? comparisons-has? heap-operations-has? kgraph-operations-has? kernel-memory-operations-has? slice-value-operations-has? slice-constructor-elements-has? kernel-base-positions-has? kernel-privileged-operations-has? rodata-literal-operations-has? image-symbol-operations-has? rodata-literal-encodings-has? list-operations-has? predicate-operations-has? logical-operations-has? map-operations-has? map-presence-operations-has? set-operations-has? collection-count-operations-has? vector-end-operations-has? map-projection-operations-has? typed-map-operations-has? typed-safe-value-operations-has? parametric-result-operations-has? variant-operations-has? generic-option-operations-has? canonical-list-operations-has? bytes-operations-has? heterogeneous-vector-operations-has? typed-set-operations-has? canonical-typed-map-operations-has? record-operations-has? typed-vector-operations-has? contextual-string-argument-indexes-has? contextual-document-argument-indexes-has? contextual-f64-argument-indexes-has? contextual-f32-argument-indexes-has? contextual-vector-f64-argument-types-has? typed-f64-vector-operations-has? compact-graph-operations-has? document-fixed-operations-has? document-variadic-operations-has? sequencing-operations-has? region-operations-has? lazy-sequence-operations-has? string-operations-has? xml-operations-has? decimal-operations-has? f64-operations-has? f32-operations-has? type-directed-numeric-heads-has? float-division-heads-has? definition-heads-has? pure-product-disallowed-heads-has? non-shadowable-special-heads-has? str-integer-heads-has? intrinsic-helper-heads-has? map-literal-value-constructors-has? document-returning-heads-has? document-constructor-heads-has? document-head-set-has? i64-answer-predicates-has? local-state-write-heads-has? local-state-scope-heads-has? local-state-conditional-heads-has? local-state-effect-heads-has? row-operation-heads-has? library-predicate-heads-has? library-predicate-document-kinds-has? row-binding-heads-has? state-perform-heads-has? state-handle-heads-has? stateful-def-heads-has? effectful-def-heads-has? structural-heads-has? protocol-declaration-heads-has? grammar-declared-heads-has? reserved-extra-heads-has? forbidden-heads-has? source-operation-registry-fallback-has? named-operation-default-results-has-name? arithmetic-has-name? i32-operations-has-name? i64-operations-has-name? comparisons-has-name? heap-operations-has-name? kgraph-operations-has-name? kernel-memory-operations-has-name? slice-value-operations-has-name? slice-constructor-elements-has-name? kernel-base-positions-has-name? kernel-privileged-operations-has-name? rodata-literal-operations-has-name? image-symbol-operations-has-name? rodata-literal-encodings-has-name? list-operations-has-name? predicate-operations-has-name? logical-operations-has-name? map-operations-has-name? map-presence-operations-has-name? set-operations-has-name? collection-count-operations-has-name? vector-end-operations-has-name? map-projection-operations-has-name? typed-map-operations-has-name? typed-safe-value-operations-has-name? parametric-result-operations-has-name? variant-operations-has-name? generic-option-operations-has-name? canonical-list-operations-has-name? bytes-operations-has-name? heterogeneous-vector-operations-has-name? typed-set-operations-has-name? canonical-typed-map-operations-has-name? record-operations-has-name? typed-vector-operations-has-name? contextual-string-argument-indexes-has-name? contextual-document-argument-indexes-has-name? contextual-f64-argument-indexes-has-name? contextual-f32-argument-indexes-has-name? contextual-vector-f64-argument-types-has-name? typed-f64-vector-operations-has-name? compact-graph-operations-has-name? document-fixed-operations-has-name? document-variadic-operations-has-name? sequencing-operations-has-name? region-operations-has-name? lazy-sequence-operations-has-name? string-operations-has-name? xml-operations-has-name? decimal-operations-has-name? f64-operations-has-name? f32-operations-has-name? type-directed-numeric-heads-has-name? float-division-heads-has-name? definition-heads-has-name? pure-product-disallowed-heads-has-name? non-shadowable-special-heads-has-name? str-integer-heads-has-name? intrinsic-helper-heads-has-name? map-literal-value-constructors-has-name? document-returning-heads-has-name? document-constructor-heads-has-name? document-head-set-has-name? i64-answer-predicates-has-name? local-state-write-heads-has-name? local-state-scope-heads-has-name? local-state-conditional-heads-has-name? local-state-effect-heads-has-name? row-operation-heads-has-name? library-predicate-heads-has-name? library-predicate-document-kinds-has-name? row-binding-heads-has-name? state-perform-heads-has-name? state-handle-heads-has-name? stateful-def-heads-has-name? effectful-def-heads-has-name? structural-heads-has-name? protocol-declaration-heads-has-name? grammar-declared-heads-has-name? reserved-extra-heads-has-name? forbidden-heads-has-name? source-operation-registry-fallback-has-name?]}
   #?(:kotoba (:require [kotoba.form :as form]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -1725,6 +1725,15 @@
        variadic-comparison vector-i64-from-bytes vector-literal when when-let
        when-not when-some zero?}))
 
+;; The heads the Kotoba-route `reserved-function-names` (namespace_defs) adds to the union of the operation tables
+;; (agent ARENA 2026-10-04: a table of its own so that the membership test is generated, see the generated block).
+#?(:kotoba
+   (defn reserved-extra-heads [] [:ref :form/r]
+     (form/edn-form "#{atom swap! reset! deref let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new hetero-vector typed-set record match-result match-variant match-option}"))
+   :default
+   (def reserved-extra-heads
+     '#{atom swap! reset! deref let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new hetero-vector typed-set record match-result match-variant match-option}))
+
 #?(:kotoba
    (defn forbidden-heads [] [:ref :form/r]
      (form/edn-form "#{. .. agent alter-var-root binding compile defmacro dosync future import load load-file load-string locking new ns-resolve pmap read-string ref require resolve send send-off set! use var volatile!}"))
@@ -2047,3 +2056,2075 @@
  46 :net/read
  47 :net/write}))
 
+;; ---- generated lookups (scripts/gen-table-lookups.py; do not edit by hand) BEGIN
+;; 83 symbol tables
+
+#?(:kotoba
+   (defn named-operation-default-results-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 7273) (string=? s "io/read")
+             (= h 7283) (string=? s "sys/cwd")
+             (= h 8291) (string=? s "cli/args")
+             (= h 8293) (string=? s "env/read")
+             (= h 8297) (string=? s "io/write")
+             (= h 9315) (string=? s "clock/now")
+             (= h 11366) (string=? s "fs/app-data")
+             (= h 12389) (string=? s "entropy/draw")
+             (= h 13424) (string=? s "process/spawn")
+             (= h 14441) (string=? s "io/write-error")
+             (= h 17510) (string=? s "fs/app-data-bytes")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn named-operation-default-results-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (named-operation-default-results-has-name? (form/symbol-value k)) false))
+   :default
+   (defn named-operation-default-results-has? [k] (table-has? named-operation-default-results k)))
+
+#?(:kotoba
+   (defn arithmetic-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1066) (string=? s "*")
+             (= h 1067) (string=? s "+")
+             (= h 1069) (string=? s "-")
+             (= h 4209) (string=? s "quot")
+             (= h 6242) (string=? s "bit-or")
+             (= h 7266) (or (string=? s "bit-xor") (string=? s "bit-and"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn arithmetic-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (arithmetic-has-name? (form/symbol-value k)) false))
+   :default
+   (defn arithmetic-has? [k] (table-has? arithmetic k)))
+
+#?(:kotoba
+   (defn i32-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 7273) (string=? s "i32-xor")
+             (= h 8297) (string=? s "i32-wrap")
+             (= h 8309) (string=? s "u32-wrap")
+             (= h 10360) (string=? s "xorshift32")
+             (= h 14441) (string=? s "i32-shift-left")
+             (= h 15465) (string=? s "i32-shift-right")
+             (= h 15477) (string=? s "u32-shift-right")
+             (= h 16489) (or (string=? s "i32-wrapping-add") (string=? s "i32-wrapping-mul"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn i32-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (i32-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn i32-operations-has? [k] (table-has? i32-operations k)))
+
+#?(:kotoba
+   (defn i64-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 3181) (or (string=? s "min") (string=? s "max"))
+             (= h 7266) (string=? s "bit-not")
+             (= h 14441) (string=? s "i64-shift-left")
+             (= h 15465) (string=? s "i64-shift-right")
+             (= h 15477) (string=? s "u64-shift-right")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn i64-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (i64-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn i64-operations-has? [k] (table-has? i64-operations k)))
+
+#?(:kotoba
+   (defn comparisons-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1084) (string=? s "<")
+             (= h 1085) (string=? s "=")
+             (= h 1086) (string=? s ">")
+             (= h 2108) (string=? s "<=")
+             (= h 2110) (string=? s ">=")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn comparisons-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (comparisons-has-name? (form/symbol-value k)) false))
+   :default
+   (defn comparisons-has? [k] (table-has? comparisons k)))
+
+#?(:kotoba
+   (defn heap-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4208) (string=? s "pair")
+             (= h 10352) (string=? s "pair-first")
+             (= h 11376) (string=? s "pair-second")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn heap-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (heap-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn heap-operations-has? [k] (table-has? heap-operations k)))
+
+#?(:kotoba
+   (defn kgraph-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 10347) (string=? s "kgraph-get")
+             (= h 12395) (string=? s "kgraph-count")
+             (= h 14443) (string=? s "kgraph-assert!")
+             (= h 16491) (string=? s "kgraph-entity-at")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kgraph-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (kgraph-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn kgraph-operations-has? [k] (table-has? kgraph-operations k)))
+
+#?(:kotoba
+   (defn kernel-memory-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13427) (string=? s "slice-load-u8")
+             (= h 14443) (or (string=? s "kernel-load-u8") (string=? s "kernel-dot-f32"))
+             (= h 14451) (or (string=? s "slice-store-u8") (string=? s "slice-load-u16") (string=? s "slice-load-u32") (string=? s "slice-load-u64"))
+             (= h 15467) (or (string=? s "kernel-store-u8") (string=? s "kernel-load-u16") (string=? s "kernel-load-u32") (string=? s "kernel-load-u64") (string=? s "kernel-xchg-u32") (string=? s "kernel-xchg-u64"))
+             (= h 15475) (or (string=? s "slice-store-u16") (string=? s "slice-store-u32") (string=? s "slice-store-u64"))
+             (= h 16491) (or (string=? s "kernel-store-u16") (string=? s "kernel-store-u32") (string=? s "kernel-store-u64") (string=? s "kernel-subregion"))
+             (= h 17515) (or (string=? s "kernel-load-u8-4k") (string=? s "kernel-unlock-u32"))
+             (= h 18539) (or (string=? s "kernel-store-u8-4k") (string=? s "kernel-load-u8-16k") (string=? s "kernel-load-u8-64k") (string=? s "kernel-load-u16-4k") (string=? s "kernel-load-u32-4k") (string=? s "kernel-load-u64-4k") (string=? s "kernel-cmpxchg-u32") (string=? s "kernel-cmpxchg-u64"))
+             (= h 19563) (or (string=? s "kernel-store-u8-16k") (string=? s "kernel-store-u8-64k") (string=? s "kernel-store-u16-4k") (string=? s "kernel-load-u16-16k") (string=? s "kernel-load-u16-64k") (string=? s "kernel-store-u32-4k") (string=? s "kernel-load-u32-16k") (string=? s "kernel-load-u32-64k") (string=? s "kernel-store-u64-4k") (string=? s "kernel-load-u64-16k") (string=? s "kernel-load-u64-64k") (string=? s "kernel-try-lock-u32"))
+             (= h 20587) (or (string=? s "kernel-store-u16-16k") (string=? s "kernel-store-u16-64k") (string=? s "kernel-store-u32-16k") (string=? s "kernel-store-u32-64k") (string=? s "kernel-store-u64-16k") (string=? s "kernel-store-u64-64k"))
+             (= h 21611) (or (string=? s "kernel-atomic-add-u32") (string=? s "kernel-atomic-add-u64"))
+             (= h 23659) (or (string=? s "kernel-dequant-dot-q8-0") (string=? s "kernel-dequant-dot-q4-k") (string=? s "kernel-dequant-dot-q6-k"))
+             (= h 25707) (string=? s "kernel-dequant-dot-ptq1-0")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kernel-memory-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (kernel-memory-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn kernel-memory-operations-has? [k] (table-has? kernel-memory-operations k)))
+
+#?(:kotoba
+   (defn slice-value-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 9331) (or (string=? s "slice-get") (string=? s "slice-sub"))
+             (= h 10355) (string=? s "slice-set!")
+             (= h 11379) (string=? s "slice-of-u8")
+             (= h 12403) (or (string=? s "slice-of-u16") (string=? s "slice-of-u32") (string=? s "slice-of-u64") (string=? s "slice-length"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn slice-value-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (slice-value-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn slice-value-operations-has? [k] (table-has? slice-value-operations k)))
+
+#?(:kotoba
+   (defn slice-constructor-elements-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 11379) (string=? s "slice-of-u8")
+             (= h 12403) (or (string=? s "slice-of-u16") (string=? s "slice-of-u32") (string=? s "slice-of-u64"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn slice-constructor-elements-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (slice-constructor-elements-has-name? (form/symbol-value k)) false))
+   :default
+   (defn slice-constructor-elements-has? [k] (table-has? slice-constructor-elements k)))
+
+#?(:kotoba
+   (defn kernel-base-positions-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 14443) (string=? s "kernel-dot-f32")
+             (= h 23659) (or (string=? s "kernel-dequant-dot-q8-0") (string=? s "kernel-dequant-dot-q4-k") (string=? s "kernel-dequant-dot-q6-k"))
+             (= h 25707) (string=? s "kernel-dequant-dot-ptq1-0")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kernel-base-positions-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (kernel-base-positions-has-name? (form/symbol-value k)) false))
+   :default
+   (defn kernel-base-positions-has? [k] (table-has? kernel-base-positions k)))
+
+#?(:kotoba
+   (defn kernel-privileged-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 10347) (or (string=? s "kernel-cli") (string=? s "kernel-sti") (string=? s "kernel-hlt"))
+             (= h 12395) (or (string=? s "kernel-pause") (string=? s "kernel-in-u8") (string=? s "kernel-rdtsc"))
+             (= h 13419) (or (string=? s "kernel-invlpg") (string=? s "kernel-out-u8") (string=? s "kernel-in-u32") (string=? s "kernel-xgetbv") (string=? s "kernel-xsetbv") (string=? s "kernel-rdtscp") (string=? s "kernel-swapgs"))
+             (= h 14443) (or (string=? s "kernel-read-cs") (string=? s "kernel-out-u32") (string=? s "kernel-jump-to"))
+             (= h 15467) (or (string=? s "kernel-read-cr0") (string=? s "kernel-read-cr2") (string=? s "kernel-read-cr3") (string=? s "kernel-load-idt") (string=? s "kernel-read-msr") (string=? s "kernel-read-cr4") (string=? s "kernel-load-ptr"))
+             (= h 16491) (or (string=? s "kernel-boot-info") (string=? s "kernel-write-cr0") (string=? s "kernel-write-cr3") (string=? s "kernel-write-msr") (string=? s "kernel-cpuid-eax") (string=? s "kernel-cpuid-ebx") (string=? s "kernel-cpuid-ecx") (string=? s "kernel-cpuid-edx") (string=? s "kernel-write-cr4"))
+             (= h 17515) (or (string=? s "kernel-uefi-call2") (string=? s "kernel-uefi-call4") (string=? s "kernel-uefi-call6") (string=? s "kernel-fence-load") (string=? s "kernel-fence-full"))
+             (= h 18539) (string=? s "kernel-fence-store")
+             (= h 19563) (or (string=? s "kernel-load-gdt-tss") (string=? s "kernel-system-table"))
+             (= h 21611) (string=? s "kernel-scratch-region")
+             (= h 23659) (or (string=? s "kernel-probe-text-write") (string=? s "kernel-probe-nx-execute"))
+             (= h 24683) (or (string=? s "kernel-probe-guard-write") (string=? s "kernel-uefi-alloc-region") (string=? s "kernel-isr-entry-address"))
+             (= h 25707) (string=? s "kernel-probe-double-fault")
+             (= h 31851) (string=? s "kernel-rt-timer-handler-address")
+             (= h 33899) (or (string=? s "kernel-page-fault-handler-address") (string=? s "kernel-configure-double-fault-ist"))
+             (= h 35947) (string=? s "kernel-double-fault-handler-address")
+             (= h 36971) (or (string=? s "kernel-configure-page-fault-recovery") (string=? s "kernel-probe-recoverable-guard-write"))
+             (= h 40043) (string=? s "kernel-undefined-opcode-handler-address")
+             (= h 43115) (string=? s "kernel-page-fault-recovery-handler-address")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn kernel-privileged-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (kernel-privileged-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn kernel-privileged-operations-has? [k] (table-has? kernel-privileged-operations k)))
+
+#?(:kotoba
+   (defn rodata-literal-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4199) (string=? s "guid")
+             (= h 4213) (string=? s "ucs2")
+             (= h 13410) (string=? s "bytes-literal")
+             (= h 20578) (string=? s "bytes-literal-length")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn rodata-literal-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (rodata-literal-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn rodata-literal-operations-has? [k] (table-has? rodata-literal-operations k)))
+
+#?(:kotoba
+   (defn image-symbol-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 23659) (string=? s "kernel-function-address")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn image-symbol-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (image-symbol-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn image-symbol-operations-has? [k] (table-has? image-symbol-operations k)))
+
+#?(:kotoba
+   (defn rodata-literal-encodings-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4199) (string=? s "guid")
+             (= h 4213) (string=? s "ucs2")
+             (= h 13410) (string=? s "bytes-literal")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn rodata-literal-encodings-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (rodata-literal-encodings-has-name? (form/symbol-value k)) false))
+   :default
+   (defn rodata-literal-encodings-has? [k] (table-has? rodata-literal-encodings k)))
+
+#?(:kotoba
+   (defn list-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4195) (string=? s "cons")
+             (= h 4204) (string=? s "list")
+             (= h 4210) (string=? s "rest")
+             (= h 5222) (string=? s "first")
+             (= h 6245) (string=? s "empty?")
+             (= h 6259) (string=? s "second")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn list-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (list-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn list-operations-has? [k] (table-has? list-operations k)))
+
+#?(:kotoba
+   (defn predicate-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 3182) (string=? s "not")
+             (= h 4206) (string=? s "neg?")
+             (= h 4208) (string=? s "pos?")
+             (= h 5242) (string=? s "zero?")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn predicate-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (predicate-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn predicate-operations-has? [k] (table-has? predicate-operations k)))
+
+#?(:kotoba
+   (defn logical-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2159) (string=? s "or")
+             (= h 3169) (string=? s "and")
+             (= h 4215) (string=? s "when")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn logical-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (logical-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn logical-operations-has? [k] (table-has? logical-operations k)))
+
+#?(:kotoba
+   (defn map-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 3175) (string=? s "get")
+             (= h 5217) (string=? s "assoc")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn map-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (map-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn map-operations-has? [k] (table-has? map-operations k)))
+
+#?(:kotoba
+   (defn map-presence-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6244) (string=? s "dissoc")
+             (= h 9315) (string=? s "contains?")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn map-presence-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (map-presence-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn map-presence-operations-has? [k] (table-has? map-presence-operations k)))
+
+#?(:kotoba
+   (defn set-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4195) (string=? s "conj")
+             (= h 4196) (string=? s "disj")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn set-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (set-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn set-operations-has? [k] (table-has? set-operations k)))
+
+#?(:kotoba
+   (defn collection-count-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 5219) (string=? s "count")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn collection-count-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (collection-count-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn collection-count-operations-has? [k] (table-has? collection-count-operations k)))
+
+#?(:kotoba
+   (defn vector-end-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 3184) (string=? s "pop")
+             (= h 4208) (string=? s "peek")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn vector-end-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (vector-end-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn vector-end-operations-has? [k] (table-has? vector-end-operations k)))
+
+#?(:kotoba
+   (defn map-projection-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4203) (string=? s "keys")
+             (= h 4214) (string=? s "vals")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn map-projection-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (map-projection-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn map-projection-operations-has? [k] (table-has? map-projection-operations k)))
+
+#?(:kotoba
+   (defn typed-map-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 7277) (or (string=? s "map-new") (string=? s "map-get"))
+             (= h 9325) (string=? s "map-assoc")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn typed-map-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (typed-map-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn typed-map-operations-has? [k] (table-has? typed-map-operations k)))
+
+#?(:kotoba
+   (defn typed-safe-value-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 8290) (string=? s "bool-not")
+             (= h 9330) (string=? s "result-ok")
+             (= h 10354) (or (string=? s "result-err") (string=? s "result-ok?"))
+             (= h 11375) (or (string=? s "option-some") (string=? s "option-none"))
+             (= h 12399) (or (string=? s "option-some?") (string=? s "option-value"))
+             (= h 12402) (or (string=? s "result-value") (string=? s "result-error"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn typed-safe-value-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (typed-safe-value-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn typed-safe-value-operations-has? [k] (table-has? typed-safe-value-operations k)))
+
+#?(:kotoba
+   (defn parametric-result-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12402) (string=? s "result-ok-of")
+             (= h 13426) (or (string=? s "result-err-of") (string=? s "result-ok?-of"))
+             (= h 15474) (or (string=? s "result-value-of") (string=? s "result-error-of") (string=? s "result-match-of"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn parametric-result-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (parametric-result-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn parametric-result-operations-has? [k] (table-has? parametric-result-operations k)))
+
+#?(:kotoba
+   (defn variant-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 11382) (string=? s "variant-new")
+             (= h 13430) (string=? s "variant-match")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn variant-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (variant-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn variant-operations-has? [k] (table-has? variant-operations k)))
+
+#?(:kotoba
+   (defn generic-option-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12399) (string=? s "option-match")
+             (= h 14447) (or (string=? s "option-some-of") (string=? s "option-none-of"))
+             (= h 15471) (or (string=? s "option-some?-of") (string=? s "option-value-of"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn generic-option-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (generic-option-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn generic-option-operations-has? [k] (table-has? generic-option-operations k)))
+
+#?(:kotoba
+   (defn canonical-list-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 14452) (or (string=? s "typed-list-new") (string=? s "typed-list-nth"))
+             (= h 15476) (string=? s "typed-list-conj")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn canonical-list-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (canonical-list-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn canonical-list-operations-has? [k] (table-has? canonical-list-operations k)))
+
+#?(:kotoba
+   (defn bytes-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 8290) (string=? s "bytes-at")
+             (= h 11362) (or (string=? s "bytes-empty") (string=? s "bytes-count") (string=? s "bytes-slice"))
+             (= h 12386) (string=? s "bytes-concat")
+             (= h 16499) (string=? s "string-from-utf8")
+             (= h 21602) (string=? s "bytes-from-vector-i64")
+             (= h 21622) (string=? s "vector-i64-from-bytes")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn bytes-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (bytes-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn bytes-operations-has? [k] (table-has? bytes-operations k)))
+
+#?(:kotoba
+   (defn heterogeneous-vector-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 16488) (string=? s "hetero-vector-at")
+             (= h 17512) (string=? s "hetero-vector-new")
+             (= h 19560) (or (string=? s "hetero-vector-count") (string=? s "hetero-vector-assoc") (string=? s "hetero-vector-equal"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn heterogeneous-vector-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (heterogeneous-vector-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn heterogeneous-vector-operations-has? [k] (table-has? heterogeneous-vector-operations k)))
+
+#?(:kotoba
+   (defn typed-set-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13428) (or (string=? s "typed-set-new") (string=? s "typed-set-nth"))
+             (= h 14452) (or (string=? s "typed-set-conj") (string=? s "typed-set-disj"))
+             (= h 15476) (or (string=? s "typed-set-count") (string=? s "typed-set-equal"))
+             (= h 18548) (string=? s "typed-set-contains")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn typed-set-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (typed-set-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn typed-set-operations-has? [k] (table-has? typed-set-operations k)))
+
+#?(:kotoba
+   (defn canonical-typed-map-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13428) (or (string=? s "typed-map-new") (string=? s "typed-map-get"))
+             (= h 14452) (or (string=? s "typed-map-keys") (string=? s "typed-map-vals"))
+             (= h 15476) (or (string=? s "typed-map-count") (string=? s "typed-map-assoc") (string=? s "typed-map-equal"))
+             (= h 16500) (string=? s "typed-map-dissoc")
+             (= h 18548) (or (string=? s "typed-map-contains") (string=? s "typed-map-entry-at"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn canonical-typed-map-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (canonical-typed-map-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn canonical-typed-map-operations-has? [k] (table-has? canonical-typed-map-operations k)))
+
+#?(:kotoba
+   (defn record-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 10354) (or (string=? s "record-new") (string=? s "record-get"))
+             (= h 12402) (or (string=? s "record-assoc") (string=? s "record-equal"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn record-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (record-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn record-operations-has? [k] (table-has? record-operations k)))
+
+#?(:kotoba
+   (defn typed-vector-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 9334) (string=? s "vector-at")
+             (= h 10358) (string=? s "vector-get")
+             (= h 11382) (or (string=? s "vector-drop") (string=? s "vector-take") (string=? s "vector-conj"))
+             (= h 12406) (or (string=? s "vector-count") (string=? s "vector-assoc") (string=? s "vector-alloc"))
+             (= h 13430) (string=? s "vector-assoc!")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn typed-vector-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (typed-vector-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn typed-vector-operations-has? [k] (table-has? typed-vector-operations k)))
+
+#?(:kotoba
+   (defn contextual-string-argument-indexes-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6259) (string=? s "symbol")
+             (= h 8307) (string=? s "string=?")
+             (= h 12403) (string=? s "string-upper")
+             (= h 13412) (string=? s "document-read")
+             (= h 13427) (string=? s "string-concat")
+             (= h 13432) (or (string=? s "xml-name-text") (string=? s "xml-path-text") (string=? s "xml-path-attr"))
+             (= h 14451) (string=? s "string-compare")
+             (= h 14456) (or (string=? s "xml-path-count") (string=? s "xml-name-count"))
+             (= h 15460) (string=? s "document-string")
+             (= h 15475) (string=? s "string-index-of")
+             (= h 16499) (or (string=? s "string-substring") (string=? s "string-contains?") (string=? s "string-find-byte") (string=? s "string-fold-case") (string=? s "string-index-get"))
+             (= h 17508) (or (string=? s "document-edn-read") (string=? s "decimal-f64-parse"))
+             (= h 17523) (or (string=? s "string-fold-ascii") (string=? s "string-find-blank") (string=? s "string-skip-blank"))
+             (= h 18547) (or (string=? s "string-byte-length") (string=? s "string-replace-all") (string=? s "string-split-count") (string=? s "string-index-assoc"))
+             (= h 19556) (string=? s "decimal-f64x3-parse")
+             (= h 19563) (string=? s "keyword-from-string")
+             (= h 19571) (string=? s "string-append-range")
+             (= h 20595) (or (string=? s "string-index-of-from") (string=? s "string-compare-lines") (string=? s "string-code-point-at"))
+             (= h 21619) (string=? s "string-index-contains")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn contextual-string-argument-indexes-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (contextual-string-argument-indexes-has-name? (form/symbol-value k)) false))
+   :default
+   (defn contextual-string-argument-indexes-has? [k] (table-has? contextual-string-argument-indexes k)))
+
+#?(:kotoba
+   (defn contextual-document-argument-indexes-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12388) (string=? s "document-get")
+             (= h 13412) (string=? s "document-kind")
+             (= h 14436) (or (string=? s "document-count") (string=? s "document-print") (string=? s "document-assoc") (string=? s "document-merge"))
+             (= h 15460) (or (string=? s "document-sha256") (string=? s "document-equal?") (string=? s "document-dissoc"))
+             (= h 16484) (string=? s "document-list-at")
+             (= h 17508) (string=? s "document-contains")
+             (= h 18532) (or (string=? s "document-edn-print") (string=? s "document-vector-at") (string=? s "document-i64-value") (string=? s "document-f64-value"))
+             (= h 19556) (string=? s "document-bool-value")
+             (= h 20580) (or (string=? s "document-vector-conj") (string=? s "document-vector-drop") (string=? s "document-vector-sort"))
+             (= h 21604) (or (string=? s "document-map-entry-at") (string=? s "document-vector-assoc") (string=? s "document-string-value") (string=? s "document-symbol-value"))
+             (= h 22628) (or (string=? s "document-vector-remove") (string=? s "document-set-contains?") (string=? s "document-keyword-value"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn contextual-document-argument-indexes-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (contextual-document-argument-indexes-has-name? (form/symbol-value k)) false))
+   :default
+   (defn contextual-document-argument-indexes-has? [k] (table-has? contextual-document-argument-indexes k)))
+
+#?(:kotoba
+   (defn contextual-f64-argument-indexes-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6246) (or (string=? s "f64-eq") (string=? s "f64-lt") (string=? s "f64-le") (string=? s "f64-gt") (string=? s "f64-ge"))
+             (= h 7270) (or (string=? s "f64-add") (string=? s "f64-sub") (string=? s "f64-mul") (string=? s "f64-div") (string=? s "f64-min") (string=? s "f64-max") (string=? s "f64-neg") (string=? s "f64-abs"))
+             (= h 8294) (string=? s "f64-sqrt")
+             (= h 11366) (string=? s "f64-to-bits")
+             (= h 13414) (string=? s "f64-unordered")
+             (= h 15462) (or (string=? s "f64-sin-bounded") (string=? s "f64-cos-bounded") (string=? s "f64-exp-bounded") (string=? s "f64-log-bounded"))
+             (= h 16486) (string=? s "f64-log-near-one")
+             (= h 17510) (or (string=? s "f64-exp-near-zero") (string=? s "f64-atan2-bounded"))
+             (= h 18534) (or (string=? s "f64-to-i64-checked") (string=? s "f64-to-f32-rounded"))
+             (= h 20582) (or (string=? s "f64-sin-quarter-turn") (string=? s "f64-cos-quarter-turn"))
+             (= h 21606) (string=? s "f64-to-i64-truncating")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn contextual-f64-argument-indexes-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (contextual-f64-argument-indexes-has-name? (form/symbol-value k)) false))
+   :default
+   (defn contextual-f64-argument-indexes-has? [k] (table-has? contextual-f64-argument-indexes k)))
+
+#?(:kotoba
+   (defn contextual-f32-argument-indexes-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6246) (or (string=? s "f32-eq") (string=? s "f32-lt") (string=? s "f32-le") (string=? s "f32-gt") (string=? s "f32-ge"))
+             (= h 7270) (or (string=? s "f32-add") (string=? s "f32-sub") (string=? s "f32-mul") (string=? s "f32-div") (string=? s "f32-min") (string=? s "f32-max") (string=? s "f32-neg") (string=? s "f32-abs"))
+             (= h 8294) (string=? s "f32-sqrt")
+             (= h 11366) (string=? s "f32-to-bits")
+             (= h 13414) (string=? s "f32-unordered")
+             (= h 16486) (string=? s "f32-to-f64-exact")
+             (= h 18534) (string=? s "f32-to-i64-checked")
+             (= h 21606) (string=? s "f32-to-i64-truncating")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn contextual-f32-argument-indexes-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (contextual-f32-argument-indexes-has-name? (form/symbol-value k)) false))
+   :default
+   (defn contextual-f32-argument-indexes-has? [k] (table-has? contextual-f32-argument-indexes k)))
+
+#?(:kotoba
+   (defn contextual-vector-f64-argument-types-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13430) (string=? s "vector-f64-at")
+             (= h 14454) (string=? s "vector-f64-get")
+             (= h 15478) (or (string=? s "vector-f64-drop") (string=? s "vector-f64-take") (string=? s "vector-f64-conj"))
+             (= h 16502) (or (string=? s "vector-f64-count") (string=? s "vector-f64-assoc"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn contextual-vector-f64-argument-types-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (contextual-vector-f64-argument-types-has-name? (form/symbol-value k)) false))
+   :default
+   (defn contextual-vector-f64-argument-types-has? [k] (table-has? contextual-vector-f64-argument-types k)))
+
+#?(:kotoba
+   (defn typed-f64-vector-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13430) (string=? s "vector-f64-at")
+             (= h 14454) (string=? s "vector-f64-get")
+             (= h 15478) (or (string=? s "vector-f64-drop") (string=? s "vector-f64-take") (string=? s "vector-f64-conj"))
+             (= h 16502) (or (string=? s "vector-f64-count") (string=? s "vector-f64-assoc"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn typed-f64-vector-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (typed-f64-vector-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn typed-f64-vector-operations-has? [k] (table-has? typed-f64-vector-operations k)))
+
+#?(:kotoba
+   (defn compact-graph-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 16499) (or (string=? s "string-index-new") (string=? s "string-index-get"))
+             (= h 18547) (or (string=? s "string-index-count") (string=? s "string-index-assoc"))
+             (= h 20580) (string=? s "disjoint-set-i64-new")
+             (= h 21619) (string=? s "string-index-contains")
+             (= h 22628) (or (string=? s "disjoint-set-i64-count") (string=? s "disjoint-set-i64-union"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn compact-graph-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (compact-graph-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn compact-graph-operations-has? [k] (table-has? compact-graph-operations k)))
+
+#?(:kotoba
+   (defn document-fixed-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12388) (or (string=? s "document-i64") (string=? s "document-f64") (string=? s "document-get"))
+             (= h 13412) (or (string=? s "document-null") (string=? s "document-bool") (string=? s "document-kind") (string=? s "document-read"))
+             (= h 14436) (or (string=? s "document-count") (string=? s "document-print") (string=? s "document-assoc") (string=? s "document-merge"))
+             (= h 15460) (or (string=? s "document-string") (string=? s "document-symbol") (string=? s "document-sha256") (string=? s "document-equal?") (string=? s "document-dissoc"))
+             (= h 16484) (or (string=? s "document-keyword") (string=? s "document-list-at"))
+             (= h 17508) (or (string=? s "document-edn-read") (string=? s "document-contains"))
+             (= h 18532) (or (string=? s "document-edn-print") (string=? s "document-vector-at") (string=? s "document-i64-value") (string=? s "document-f64-value"))
+             (= h 19556) (string=? s "document-bool-value")
+             (= h 20580) (or (string=? s "document-vector-conj") (string=? s "document-vector-drop") (string=? s "document-vector-sort"))
+             (= h 21604) (or (string=? s "document-map-entry-at") (string=? s "document-vector-assoc") (string=? s "document-string-value") (string=? s "document-symbol-value"))
+             (= h 22628) (or (string=? s "document-vector-remove") (string=? s "document-set-contains?") (string=? s "document-keyword-value"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn document-fixed-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (document-fixed-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn document-fixed-operations-has? [k] (table-has? document-fixed-operations k)))
+
+#?(:kotoba
+   (defn document-variadic-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12388) (or (string=? s "document-set") (string=? s "document-map"))
+             (= h 13412) (string=? s "document-list")
+             (= h 15460) (string=? s "document-vector")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn document-variadic-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (document-variadic-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn document-variadic-operations-has? [k] (table-has? document-variadic-operations k)))
+
+#?(:kotoba
+   (defn sequencing-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2148) (string=? s "do")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn sequencing-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (sequencing-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn sequencing-operations-has? [k] (table-has? sequencing-operations k)))
+
+#?(:kotoba
+   (defn region-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 11361) (string=? s "arena-scope")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn region-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (region-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn region-operations-has? [k] (table-has? region-operations k)))
+
+#?(:kotoba
+   (defn lazy-sequence-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4196) (string=? s "drop")
+             (= h 4212) (string=? s "take")
+             (= h 8300) (string=? s "lazy-map")
+             (= h 9324) (or (string=? s "lazy-cons") (string=? s "lazy-rest"))
+             (= h 10348) (string=? s "lazy-first")
+             (= h 11372) (or (string=? s "lazy-empty?") (string=? s "lazy-filter"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn lazy-sequence-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (lazy-sequence-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn lazy-sequence-operations-has? [k] (table-has? lazy-sequence-operations k)))
+
+#?(:kotoba
+   (defn string-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6259) (string=? s "symbol")
+             (= h 8307) (string=? s "string=?")
+             (= h 11362) (string=? s "bool-result")
+             (= h 11380) (string=? s "task-ready?")
+             (= h 12395) (string=? s "keyword-name")
+             (= h 12403) (string=? s "string-upper")
+             (= h 13427) (or (string=? s "string-length") (string=? s "string-concat"))
+             (= h 14447) (string=? s "object-cas-won")
+             (= h 14451) (string=? s "string-compare")
+             (= h 15475) (or (string=? s "string-from-i64") (string=? s "string-index-of"))
+             (= h 16499) (or (string=? s "string-substring") (string=? s "string-contains?") (string=? s "string-find-byte") (string=? s "string-fold-case"))
+             (= h 17523) (or (string=? s "string-fold-ascii") (string=? s "string-find-blank") (string=? s "string-skip-blank"))
+             (= h 18547) (or (string=? s "string-byte-length") (string=? s "string-replace-all") (string=? s "string-split-count"))
+             (= h 19563) (string=? s "keyword-from-string")
+             (= h 19564) (string=? s "log-read-byte-count")
+             (= h 19571) (string=? s "string-append-range")
+             (= h 20584) (string=? s "http-response-status")
+             (= h 20595) (or (string=? s "string-index-of-from") (string=? s "string-compare-lines") (string=? s "string-code-point-at"))
+             (= h 21602) (string=? s "bytes-task-byte-count")
+             (= h 25698) (string=? s "bytes-response-byte-count")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn string-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (string-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn string-operations-has? [k] (table-has? string-operations k)))
+
+#?(:kotoba
+   (defn xml-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 13432) (or (string=? s "xml-name-text") (string=? s "xml-path-text") (string=? s "xml-path-attr"))
+             (= h 14456) (or (string=? s "xml-path-count") (string=? s "xml-name-count"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn xml-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (xml-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn xml-operations-has? [k] (table-has? xml-operations k)))
+
+#?(:kotoba
+   (defn decimal-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 17508) (string=? s "decimal-f64-parse")
+             (= h 19556) (string=? s "decimal-f64x3-parse")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn decimal-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (decimal-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn decimal-operations-has? [k] (table-has? decimal-operations k)))
+
+#?(:kotoba
+   (defn f64-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6246) (or (string=? s "f64-eq") (string=? s "f64-lt") (string=? s "f64-le") (string=? s "f64-gt") (string=? s "f64-ge"))
+             (= h 7270) (or (string=? s "f64-add") (string=? s "f64-sub") (string=? s "f64-mul") (string=? s "f64-div") (string=? s "f64-min") (string=? s "f64-max") (string=? s "f64-neg") (string=? s "f64-abs"))
+             (= h 8294) (string=? s "f64-sqrt")
+             (= h 11366) (string=? s "f64-to-bits")
+             (= h 13414) (or (string=? s "f64-from-bits") (string=? s "f64-unordered"))
+             (= h 15462) (or (string=? s "f64-sin-bounded") (string=? s "f64-cos-bounded") (string=? s "f64-exp-bounded") (string=? s "f64-log-bounded"))
+             (= h 16486) (string=? s "f64-log-near-one")
+             (= h 17510) (or (string=? s "f64-exp-near-zero") (string=? s "f64-atan2-bounded"))
+             (= h 18534) (string=? s "f64-to-i64-checked")
+             (= h 18537) (or (string=? s "i64-to-f64-checked") (string=? s "i64-to-f64-rounded"))
+             (= h 20582) (or (string=? s "f64-sin-quarter-turn") (string=? s "f64-cos-quarter-turn"))
+             (= h 21606) (string=? s "f64-to-i64-truncating")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn f64-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (f64-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn f64-operations-has? [k] (table-has? f64-operations k)))
+
+#?(:kotoba
+   (defn f32-operations-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6246) (or (string=? s "f32-eq") (string=? s "f32-lt") (string=? s "f32-le") (string=? s "f32-gt") (string=? s "f32-ge"))
+             (= h 7270) (or (string=? s "f32-add") (string=? s "f32-sub") (string=? s "f32-mul") (string=? s "f32-div") (string=? s "f32-min") (string=? s "f32-max") (string=? s "f32-neg") (string=? s "f32-abs"))
+             (= h 8294) (string=? s "f32-sqrt")
+             (= h 11366) (string=? s "f32-to-bits")
+             (= h 13414) (or (string=? s "f32-from-bits") (string=? s "f32-unordered"))
+             (= h 16486) (string=? s "f32-to-f64-exact")
+             (= h 18534) (or (string=? s "f64-to-f32-rounded") (string=? s "f32-to-i64-checked"))
+             (= h 18537) (or (string=? s "i64-to-f32-checked") (string=? s "i64-to-f32-rounded"))
+             (= h 21606) (string=? s "f32-to-i64-truncating")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn f32-operations-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (f32-operations-has-name? (form/symbol-value k)) false))
+   :default
+   (defn f32-operations-has? [k] (table-has? f32-operations k)))
+
+#?(:kotoba
+   (defn type-directed-numeric-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1066) (string=? s "*")
+             (= h 1067) (string=? s "+")
+             (= h 1069) (string=? s "-")
+             (= h 1071) (string=? s "/")
+             (= h 1084) (string=? s "<")
+             (= h 1085) (string=? s "=")
+             (= h 1086) (string=? s ">")
+             (= h 2108) (string=? s "<=")
+             (= h 2110) (string=? s ">=")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn type-directed-numeric-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (type-directed-numeric-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn type-directed-numeric-heads-has? [k] (table-has? type-directed-numeric-heads k)))
+
+#?(:kotoba
+   (defn float-division-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1071) (string=? s "/")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn float-division-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (float-division-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn float-division-heads-has? [k] (table-has? float-division-heads k)))
+
+#?(:kotoba
+   (defn definition-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2158) (string=? s "ns")
+             (= h 3172) (string=? s "def")
+             (= h 4196) (string=? s "defn")
+             (= h 5220) (string=? s "defn-")
+             (= h 8292) (string=? s "defmulti")
+             (= h 9316) (or (string=? s "defrecord") (string=? s "defmethod"))
+             (= h 10340) (string=? s "defdesugar")
+             (= h 11364) (string=? s "defprotocol")
+             (= h 11365) (string=? s "extend-type")
+             (= h 12388) (string=? s "definterface")
+             (= h 15461) (string=? s "extend-protocol")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn definition-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (definition-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn definition-heads-has? [k] (table-has? definition-heads k)))
+
+#?(:kotoba
+   (defn pure-product-disallowed-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2093) (string=? s "->")
+             (= h 3117) (string=? s "->>")
+             (= h 3188) (string=? s "try")
+             (= h 4193) (or (string=? s "atom") (string=? s "as->"))
+             (= h 4208) (string=? s "pmap")
+             (= h 4211) (string=? s "send")
+             (= h 5217) (string=? s "agent")
+             (= h 5219) (or (string=? s "catch") (string=? s "condp"))
+             (= h 5220) (or (string=? s "doseq") (string=? s "deref"))
+             (= h 5235) (string=? s "swap!")
+             (= h 5236) (string=? s "throw")
+             (= h 6243) (string=? s "cond->")
+             (= h 6246) (string=? s "future")
+             (= h 6258) (string=? s "reset!")
+             (= h 6259) (string=? s "some->")
+             (= h 7265) (string=? s "assert!")
+             (= h 7267) (string=? s "cond->>")
+             (= h 7268) (string=? s "dotimes")
+             (= h 7283) (string=? s "some->>")
+             (= h 8291) (string=? s "cap-call")
+             (= h 8292) (string=? s "defmulti")
+             (= h 8303) (string=? s "observe!")
+             (= h 8306) (string=? s "retract!")
+             (= h 8307) (string=? s "send-off")
+             (= h 9316) (string=? s "defmethod")
+             (= h 12390) (or (string=? s "facet-enter!") (string=? s "facet-leave!"))
+             (= h 14452) (string=? s "typed-cap-call")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn pure-product-disallowed-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (pure-product-disallowed-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn pure-product-disallowed-heads-has? [k] (table-has? pure-product-disallowed-heads k)))
+
+#?(:kotoba
+   (defn non-shadowable-special-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2148) (string=? s "do")
+             (= h 2150) (string=? s "fn")
+             (= h 2153) (string=? s "if")
+             (= h 3180) (string=? s "let")
+             (= h 4204) (string=? s "loop")
+             (= h 5234) (string=? s "recur")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn non-shadowable-special-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (non-shadowable-special-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn non-shadowable-special-heads-has? [k] (table-has? non-shadowable-special-heads k)))
+
+#?(:kotoba
+   (defn str-integer-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1066) (string=? s "*")
+             (= h 1067) (string=? s "+")
+             (= h 1069) (string=? s "-")
+             (= h 3172) (string=? s "dec")
+             (= h 3177) (string=? s "inc")
+             (= h 3181) (string=? s "mod")
+             (= h 3186) (string=? s "rem")
+             (= h 4209) (string=? s "quot")
+             (= h 5219) (string=? s "count")
+             (= h 6242) (string=? s "bit-or")
+             (= h 7266) (or (string=? s "bit-and") (string=? s "bit-xor"))
+             (= h 9334) (string=? s "vector-at")
+             (= h 12406) (string=? s "vector-count")
+             (= h 13427) (string=? s "string-length")
+             (= h 14434) (string=? s "bit-shift-left")
+             (= h 15458) (string=? s "bit-shift-right")
+             (= h 18547) (string=? s "string-byte-length")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn str-integer-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (str-integer-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn str-integer-heads-has? [k] (table-has? str-integer-heads k)))
+
+#?(:kotoba
+   (defn intrinsic-helper-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 6259) (string=? s "subvec")
+             (= h 7269) (or (string=? s "ex-info") (string=? s "ex-data"))
+             (= h 10341) (string=? s "ex-message")
+             (= h 10352) (string=? s "parse-long")
+             (= h 11379) (string=? s "subvec-from")
+             (= h 14451) (string=? s "string-to-utf8")
+             (= h 16499) (string=? s "string-parse-i64")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn intrinsic-helper-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (intrinsic-helper-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn intrinsic-helper-heads-has? [k] (table-has? intrinsic-helper-heads k)))
+
+#?(:kotoba
+   (defn map-literal-value-constructors-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 10354) (string=? s "record-new")
+             (= h 13428) (or (string=? s "typed-map-new") (string=? s "typed-set-new"))
+             (= h 14447) (or (string=? s "option-some-of") (string=? s "option-none-of"))
+             (= h 17512) (string=? s "hetero-vector-new")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn map-literal-value-constructors-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (map-literal-value-constructors-has-name? (form/symbol-value k)) false))
+   :default
+   (defn map-literal-value-constructors-has? [k] (table-has? map-literal-value-constructors k)))
+
+#?(:kotoba
+   (defn document-returning-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 3181) (string=? s "map")
+             (= h 3182) (string=? s "nth")
+             (= h 4201) (string=? s "into")
+             (= h 4203) (or (string=? s "keys") (string=? s "keep"))
+             (= h 4205) (string=? s "mapv")
+             (= h 4206) (string=? s "next")
+             (= h 4210) (string=? s "rest")
+             (= h 4214) (string=? s "vals")
+             (= h 5217) (string=? s "assoc")
+             (= h 5222) (string=? s "first")
+             (= h 5229) (string=? s "merge")
+             (= h 6243) (string=? s "concat")
+             (= h 6244) (string=? s "dissoc")
+             (= h 6246) (string=? s "filter")
+             (= h 6247) (string=? s "get-in")
+             (= h 6258) (string=? s "remove")
+             (= h 6259) (string=? s "second")
+             (= h 6261) (string=? s "update")
+             (= h 7270) (string=? s "filterv")
+             (= h 8289) (string=? s "assoc-in")
+             (= h 11379) (string=? s "select-keys")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn document-returning-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (document-returning-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn document-returning-heads-has? [k] (table-has? document-returning-heads k)))
+
+#?(:kotoba
+   (defn document-constructor-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12388) (or (string=? s "document-map") (string=? s "document-set") (string=? s "document-i64") (string=? s "document-f64"))
+             (= h 13412) (or (string=? s "document-list") (string=? s "document-null") (string=? s "document-bool") (string=? s "document-read"))
+             (= h 14436) (or (string=? s "document-assoc") (string=? s "document-merge"))
+             (= h 15460) (or (string=? s "document-vector") (string=? s "document-dissoc") (string=? s "document-string") (string=? s "document-symbol"))
+             (= h 16484) (string=? s "document-keyword")
+             (= h 17508) (string=? s "document-edn-read")
+             (= h 20575) (string=? s "__kotoba_document_of")
+             (= h 20580) (or (string=? s "document-vector-conj") (string=? s "document-vector-drop"))
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn document-constructor-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (document-constructor-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn document-constructor-heads-has? [k] (table-has? document-constructor-heads k)))
+
+#?(:kotoba
+   (defn document-head-set-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4201) (string=? s "into")
+             (= h 4203) (string=? s "keep")
+             (= h 4211) (string=? s "some")
+             (= h 5229) (string=? s "merge")
+             (= h 6243) (string=? s "concat")
+             (= h 6245) (or (string=? s "empty?") (string=? s "every?"))
+             (= h 6247) (string=? s "get-in")
+             (= h 6261) (string=? s "update")
+             (= h 8289) (string=? s "assoc-in")
+             (= h 11379) (string=? s "select-keys")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn document-head-set-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (document-head-set-has-name? (form/symbol-value k)) false))
+   :default
+   (defn document-head-set-has? [k] (table-has? document-head-set k)))
+
+#?(:kotoba
+   (defn i64-answer-predicates-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 11380) (string=? s "task-ready?")
+             (= h 12402) (string=? s "record-equal")
+             (= h 14447) (string=? s "object-cas-won")
+             (= h 15476) (or (string=? s "typed-set-equal") (string=? s "typed-map-equal"))
+             (= h 19560) (string=? s "hetero-vector-equal")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn i64-answer-predicates-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (i64-answer-predicates-has-name? (form/symbol-value k)) false))
+   :default
+   (defn i64-answer-predicates-has? [k] (table-has? i64-answer-predicates k)))
+
+#?(:kotoba
+   (defn local-state-write-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4193) (string=? s "atom")
+             (= h 5235) (string=? s "swap!")
+             (= h 6258) (string=? s "reset!")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn local-state-write-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (local-state-write-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn local-state-write-heads-has? [k] (table-has? local-state-write-heads k)))
+
+#?(:kotoba
+   (defn local-state-scope-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2150) (string=? s "fn")
+             (= h 3174) (string=? s "fn*")
+             (= h 4204) (string=? s "loop")
+             (= h 5220) (string=? s "doseq")
+             (= h 5234) (string=? s "recur")
+             (= h 7268) (string=? s "dotimes")
+             (= h 8300) (string=? s "lazy-seq")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn local-state-scope-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (local-state-scope-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn local-state-scope-heads-has? [k] (table-has? local-state-scope-heads k)))
+
+#?(:kotoba
+   (defn local-state-conditional-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2093) (string=? s "->")
+             (= h 2159) (string=? s "or")
+             (= h 3117) (string=? s "->>")
+             (= h 3169) (string=? s "and")
+             (= h 3188) (string=? s "try")
+             (= h 4193) (string=? s "as->")
+             (= h 5219) (or (string=? s "condp") (string=? s "catch"))
+             (= h 5229) (string=? s "match")
+             (= h 5236) (string=? s "throw")
+             (= h 6241) (string=? s "assert")
+             (= h 6243) (string=? s "cond->")
+             (= h 6249) (or (string=? s "if-not") (string=? s "if-let"))
+             (= h 6259) (string=? s "some->")
+             (= h 7267) (string=? s "cond->>")
+             (= h 7273) (string=? s "if-some")
+             (= h 7283) (string=? s "some->>")
+             (= h 8311) (or (string=? s "when-not") (string=? s "when-let"))
+             (= h 9335) (string=? s "when-some")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn local-state-conditional-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (local-state-conditional-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn local-state-conditional-heads-has? [k] (table-has? local-state-conditional-heads k)))
+
+#?(:kotoba
+   (defn local-state-effect-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 7265) (string=? s "assert!")
+             (= h 8291) (string=? s "cap-call")
+             (= h 8303) (string=? s "observe!")
+             (= h 8306) (string=? s "retract!")
+             (= h 12390) (or (string=? s "facet-enter!") (string=? s "facet-leave!"))
+             (= h 14452) (string=? s "typed-cap-call")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn local-state-effect-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (local-state-effect-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn local-state-effect-heads-has? [k] (table-has? local-state-effect-heads k)))
+
+#?(:kotoba
+   (defn row-operation-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 5229) (string=? s "merge")
+             (= h 6244) (string=? s "dissoc")
+             (= h 9325) (string=? s "map-assoc")
+             (= h 11379) (string=? s "select-keys")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn row-operation-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (row-operation-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn row-operation-heads-has? [k] (table-has? row-operation-heads k)))
+
+#?(:kotoba
+   (defn library-predicate-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4205) (string=? s "map?")
+             (= h 4211) (or (string=? s "set?") (string=? s "seq?"))
+             (= h 5219) (string=? s "coll?")
+             (= h 5228) (string=? s "list?")
+             (= h 5236) (string=? s "true?")
+             (= h 6246) (string=? s "false?")
+             (= h 7283) (or (string=? s "string?") (string=? s "symbol?"))
+             (= h 7286) (string=? s "vector?")
+             (= h 8290) (string=? s "boolean?")
+             (= h 8297) (string=? s "integer?")
+             (= h 8299) (string=? s "keyword?")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn library-predicate-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (library-predicate-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn library-predicate-heads-has? [k] (table-has? library-predicate-heads k)))
+
+#?(:kotoba
+   (defn library-predicate-document-kinds-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4205) (string=? s "map?")
+             (= h 4211) (or (string=? s "set?") (string=? s "seq?"))
+             (= h 5219) (string=? s "coll?")
+             (= h 5228) (string=? s "list?")
+             (= h 5236) (string=? s "true?")
+             (= h 6246) (string=? s "false?")
+             (= h 7283) (or (string=? s "string?") (string=? s "symbol?"))
+             (= h 7286) (string=? s "vector?")
+             (= h 8290) (string=? s "boolean?")
+             (= h 8297) (string=? s "integer?")
+             (= h 8299) (string=? s "keyword?")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn library-predicate-document-kinds-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (library-predicate-document-kinds-has-name? (form/symbol-value k)) false))
+   :default
+   (defn library-predicate-document-kinds-has? [k] (table-has? library-predicate-document-kinds k)))
+
+#?(:kotoba
+   (defn row-binding-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 12399) (string=? s "option-match")
+             (= h 13430) (string=? s "variant-match")
+             (= h 15474) (string=? s "result-match-of")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn row-binding-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (row-binding-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn row-binding-heads-has? [k] (table-has? row-binding-heads k)))
+
+#?(:kotoba
+   (defn state-perform-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 17503) (string=? s "__kotoba_state_op")
+             (= h 22623) (string=? s "__kotoba_state_perform")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn state-perform-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (state-perform-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn state-perform-heads-has? [k] (table-has? state-perform-heads k)))
+
+#?(:kotoba
+   (defn state-handle-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 19551) (string=? s "__kotoba_state_with")
+             (= h 21599) (string=? s "__kotoba_state_handle")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn state-handle-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (state-handle-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn state-handle-heads-has? [k] (table-has? state-handle-heads k)))
+
+#?(:kotoba
+   (defn stateful-def-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 4193) (string=? s "atom")
+             (= h 5217) (string=? s "agent")
+             (= h 5220) (string=? s "delay")
+             (= h 6246) (string=? s "future")
+             (= h 7280) (string=? s "promise")
+             (= h 9334) (string=? s "volatile!")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn stateful-def-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (stateful-def-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn stateful-def-heads-has? [k] (table-has? stateful-def-heads k)))
+
+#?(:kotoba
+   (defn effectful-def-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 8291) (string=? s "cap-call")
+             (= h 14452) (string=? s "typed-cap-call")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn effectful-def-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (effectful-def-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn effectful-def-heads-has? [k] (table-has? effectful-def-heads k)))
+
+#?(:kotoba
+   (defn structural-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2148) (string=? s "do")
+             (= h 2150) (string=? s "fn")
+             (= h 2153) (string=? s "if")
+             (= h 2158) (string=? s "ns")
+             (= h 3172) (string=? s "def")
+             (= h 3180) (string=? s "let")
+             (= h 3190) (string=? s "var")
+             (= h 4196) (string=? s "defn")
+             (= h 4204) (or (string=? s "let*") (string=? s "loop"))
+             (= h 5220) (string=? s "defn-")
+             (= h 5233) (string=? s "quote")
+             (= h 5234) (string=? s "recur")
+             (= h 8292) (string=? s "defmulti")
+             (= h 8306) (string=? s "recur-to")
+             (= h 9316) (or (string=? s "defmethod") (string=? s "defrecord"))
+             (= h 10340) (string=? s "defdesugar")
+             (= h 11364) (string=? s "defprotocol")
+             (= h 11365) (string=? s "extend-type")
+             (= h 12388) (string=? s "definterface")
+             (= h 15461) (string=? s "extend-protocol")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn structural-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (structural-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn structural-heads-has? [k] (table-has? structural-heads k)))
+
+#?(:kotoba
+   (defn protocol-declaration-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 11364) (string=? s "defprotocol")
+             (= h 12388) (string=? s "definterface")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn protocol-declaration-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (protocol-declaration-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn protocol-declaration-heads-has? [k] (table-has? protocol-declaration-heads k)))
+
+#?(:kotoba
+   (defn grammar-declared-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1066) (string=? s "*")
+             (= h 1067) (string=? s "+")
+             (= h 1069) (string=? s "-")
+             (= h 1071) (string=? s "/")
+             (= h 1084) (string=? s "<")
+             (= h 1085) (string=? s "=")
+             (= h 1086) (string=? s ">")
+             (= h 2093) (string=? s "->")
+             (= h 2108) (string=? s "<=")
+             (= h 2110) (string=? s ">=")
+             (= h 2148) (string=? s "do")
+             (= h 2150) (string=? s "fn")
+             (= h 2159) (string=? s "or")
+             (= h 3117) (string=? s "->>")
+             (= h 3169) (string=? s "and")
+             (= h 3172) (string=? s "dec")
+             (= h 3174) (string=? s "f32")
+             (= h 3175) (string=? s "get")
+             (= h 3177) (or (string=? s "i64") (string=? s "inc"))
+             (= h 3181) (or (string=? s "map") (string=? s "max") (string=? s "min") (string=? s "mod"))
+             (= h 3182) (or (string=? s "not") (string=? s "nth"))
+             (= h 3184) (string=? s "pop")
+             (= h 3186) (string=? s "rem")
+             (= h 3188) (string=? s "try")
+             (= h 4193) (string=? s "as->")
+             (= h 4195) (or (string=? s "case") (string=? s "cond") (string=? s "conj") (string=? s "cons"))
+             (= h 4196) (or (string=? s "disj") (string=? s "drop"))
+             (= h 4197) (string=? s "eval")
+             (= h 4198) (or (string=? s "f32*") (string=? s "f32+") (string=? s "f32-") (string=? s "f32<") (string=? s "f32=") (string=? s "f32>"))
+             (= h 4201) (or (string=? s "i64*") (string=? s "i64+") (string=? s "i64-"))
+             (= h 4203) (string=? s "keys")
+             (= h 4204) (string=? s "list")
+             (= h 4206) (or (string=? s "neg?") (string=? s "not="))
+             (= h 4208) (or (string=? s "pair") (string=? s "peek") (string=? s "pos?"))
+             (= h 4209) (string=? s "quot")
+             (= h 4210) (string=? s "rest")
+             (= h 4212) (string=? s "take")
+             (= h 4214) (string=? s "vals")
+             (= h 4215) (string=? s "when")
+             (= h 5217) (or (string=? s "alloc") (string=? s "apply") (string=? s "assoc"))
+             (= h 5218) (string=? s "bytes")
+             (= h 5219) (or (string=? s "condp") (string=? s "count"))
+             (= h 5220) (string=? s "doseq")
+             (= h 5222) (or (string=? s "f32<=") (string=? s "f32>=") (string=? s "first"))
+             (= h 5225) (string=? s "i64or")
+             (= h 5229) (string=? s "match")
+             (= h 5236) (or (string=? s "throw") (string=? s "true?"))
+             (= h 5242) (string=? s "zero?")
+             (= h 6241) (string=? s "assert")
+             (= h 6242) (string=? s "bit-or")
+             (= h 6244) (string=? s "dissoc")
+             (= h 6245) (string=? s "empty?")
+             (= h 6246) (or (string=? s "f32div") (string=? s "f32neg") (string=? s "filter") (string=? s "fn-ref"))
+             (= h 6249) (or (string=? s "i64and") (string=? s "i64shl") (string=? s "i64shr") (string=? s "i64xor") (string=? s "if-let") (string=? s "if-not") (string=? s "invoke"))
+             (= h 6258) (string=? s "reduce")
+             (= h 6259) (or (string=? s "second") (string=? s "some->") (string=? s "symbol"))
+             (= h 7266) (or (string=? s "bit-and") (string=? s "bit-xor") (string=? s "byte-at"))
+             (= h 7267) (string=? s "cond->>")
+             (= h 7268) (string=? s "dotimes")
+             (= h 7270) (or (string=? s "f32-add") (string=? s "f32-div") (string=? s "f32-max") (string=? s "f32-min") (string=? s "f32-mul") (string=? s "f32-sub") (string=? s "f32sqrt") (string=? s "f64-add") (string=? s "f64-div") (string=? s "f64-max") (string=? s "f64-min") (string=? s "f64-mul") (string=? s "f64-sub"))
+             (= h 7273) (or (string=? s "i64ushr") (string=? s "if-some"))
+             (= h 7283) (or (string=? s "some->>") (string=? s "str-len") (string=? s "str-ptr") (string=? s "string=") (string=? s "string?") (string=? s "symbol?"))
+             (= h 8290) (string=? s "bytes-at")
+             (= h 8292) (string=? s "document")
+             (= h 8297) (string=? s "integer?")
+             (= h 8299) (string=? s "keyword?")
+             (= h 8300) (string=? s "lazy-map")
+             (= h 8311) (or (string=? s "when-let") (string=? s "when-not"))
+             (= h 9314) (or (string=? s "bytes-len") (string=? s "bytes-ptr"))
+             (= h 9315) (string=? s "contains?")
+             (= h 9316) (string=? s "dataspace")
+             (= h 9324) (or (string=? s "lazy-cons") (string=? s "lazy-rest"))
+             (= h 9327) (string=? s "option-or")
+             (= h 9331) (or (string=? s "slice-get") (string=? s "slice-sub"))
+             (= h 9335) (string=? s "when-some")
+             (= h 10337) (string=? s "atom-local")
+             (= h 10340) (string=? s "defdesugar")
+             (= h 10345) (string=? s "i32-store!")
+             (= h 10347) (or (string=? s "kernel-cli") (string=? s "kernel-hlt") (string=? s "kernel-sti"))
+             (= h 10348) (or (string=? s "lazy-first") (string=? s "loop-recur"))
+             (= h 10349) (string=? s "mem-i32-at")
+             (= h 10352) (string=? s "pair-first")
+             (= h 10354) (string=? s "result-ok?")
+             (= h 10355) (string=? s "slice-set!")
+             (= h 11361) (string=? s "arena-scope")
+             (= h 11362) (or (string=? s "byte-store!") (string=? s "bytes-count") (string=? s "bytes-empty") (string=? s "bytes-slice"))
+             (= h 11363) (string=? s "cap-acquire")
+             (= h 11372) (or (string=? s "lazy-empty?") (string=? s "lazy-filter"))
+             (= h 11373) (or (string=? s "map-indexed") (string=? s "map-literal") (string=? s "mem-byte-at") (string=? s "memory-grow"))
+             (= h 11376) (string=? s "pair-second")
+             (= h 11378) (string=? s "result-err?")
+             (= h 11379) (or (string=? s "set-literal") (string=? s "slice-of-u8"))
+             (= h 12386) (string=? s "bytes-concat")
+             (= h 12395) (or (string=? s "kernel-in-u8") (string=? s "kernel-pause") (string=? s "kernel-rdtsc"))
+             (= h 12397) (string=? s "memory-pages")
+             (= h 12402) (string=? s "result-value")
+             (= h 12403) (or (string=? s "slice-length") (string=? s "slice-of-u16") (string=? s "slice-of-u32") (string=? s "slice-of-u64"))
+             (= h 13409) (string=? s "alloc-checked")
+             (= h 13411) (string=? s "call-indirect")
+             (= h 13412) (string=? s "data-host-arg")
+             (= h 13419) (or (string=? s "kernel-in-u32") (string=? s "kernel-invlpg") (string=? s "kernel-out-u8") (string=? s "kernel-rdtscp") (string=? s "kernel-swapgs") (string=? s "kernel-xgetbv") (string=? s "kernel-xsetbv"))
+             (= h 13426) (or (string=? s "result-status") (string=? s "result-write!"))
+             (= h 13427) (or (string=? s "slice-load-u8") (string=? s "state-ability") (string=? s "string-concat") (string=? s "string-length"))
+             (= h 14434) (string=? s "bit-shift-left")
+             (= h 14443) (or (string=? s "kernel-dot-f32") (string=? s "kernel-jump-to") (string=? s "kernel-load-u8") (string=? s "kernel-out-u32") (string=? s "kernel-read-cs"))
+             (= h 14451) (or (string=? s "slice-load-u16") (string=? s "slice-load-u32") (string=? s "slice-load-u64") (string=? s "slice-store-u8") (string=? s "string-compare"))
+             (= h 14454) (string=? s "vector-literal")
+             (= h 15458) (string=? s "bit-shift-right")
+             (= h 15464) (string=? s "has-capability?")
+             (= h 15467) (or (string=? s "kernel-load-idt") (string=? s "kernel-load-ptr") (string=? s "kernel-load-u16") (string=? s "kernel-load-u32") (string=? s "kernel-load-u64") (string=? s "kernel-read-cr0") (string=? s "kernel-read-cr2") (string=? s "kernel-read-cr3") (string=? s "kernel-read-cr4") (string=? s "kernel-read-msr") (string=? s "kernel-store-u8") (string=? s "kernel-xchg-u32") (string=? s "kernel-xchg-u64") (string=? s "keyword-literal"))
+             (= h 15475) (or (string=? s "slice-store-u16") (string=? s "slice-store-u32") (string=? s "slice-store-u64") (string=? s "string-equality") (string=? s "string-host-arg") (string=? s "string-index-of"))
+             (= h 15476) (string=? s "type-predicates")
+             (= h 16491) (or (string=? s "kernel-boot-info") (string=? s "kernel-cpuid-eax") (string=? s "kernel-cpuid-ebx") (string=? s "kernel-cpuid-ecx") (string=? s "kernel-cpuid-edx") (string=? s "kernel-store-u16") (string=? s "kernel-store-u32") (string=? s "kernel-store-u64") (string=? s "kernel-subregion") (string=? s "kernel-write-cr0") (string=? s "kernel-write-cr3") (string=? s "kernel-write-cr4") (string=? s "kernel-write-msr"))
+             (= h 16499) (or (string=? s "string-contains?") (string=? s "string-find-byte") (string=? s "string-from-utf8") (string=? s "string-substring"))
+             (= h 17515) (or (string=? s "kernel-fence-full") (string=? s "kernel-fence-load") (string=? s "kernel-load-u8-4k") (string=? s "kernel-uefi-call2") (string=? s "kernel-uefi-call4") (string=? s "kernel-uefi-call6") (string=? s "kernel-unlock-u32"))
+             (= h 17520) (string=? s "protocol-dispatch")
+             (= h 17523) (or (string=? s "string-find-blank") (string=? s "string-fold-ascii") (string=? s "string-skip-blank"))
+             (= h 18531) (string=? s "closed-multimethod")
+             (= h 18533) (string=? s "expression-absence")
+             (= h 18536) (string=? s "host-i64-roundtrip")
+             (= h 18537) (or (string=? s "inline-fn-callback") (string=? s "interface-contract"))
+             (= h 18539) (or (string=? s "kernel-cmpxchg-u32") (string=? s "kernel-cmpxchg-u64") (string=? s "kernel-fence-store") (string=? s "kernel-load-u16-4k") (string=? s "kernel-load-u32-4k") (string=? s "kernel-load-u64-4k") (string=? s "kernel-load-u8-16k") (string=? s "kernel-load-u8-64k") (string=? s "kernel-store-u8-4k"))
+             (= h 18544) (string=? s "protocol-extension")
+             (= h 18546) (string=? s "record-constructor")
+             (= h 18547) (string=? s "string-split-count")
+             (= h 19563) (or (string=? s "kernel-load-gdt-tss") (string=? s "kernel-load-u16-16k") (string=? s "kernel-load-u16-64k") (string=? s "kernel-load-u32-16k") (string=? s "kernel-load-u32-64k") (string=? s "kernel-load-u64-16k") (string=? s "kernel-load-u64-64k") (string=? s "kernel-store-u16-4k") (string=? s "kernel-store-u32-4k") (string=? s "kernel-store-u64-4k") (string=? s "kernel-store-u8-16k") (string=? s "kernel-store-u8-64k") (string=? s "kernel-system-table") (string=? s "kernel-try-lock-u32"))
+             (= h 19571) (string=? s "string-append-range")
+             (= h 19574) (string=? s "variadic-comparison")
+             (= h 20587) (or (string=? s "kernel-store-u16-16k") (string=? s "kernel-store-u16-64k") (string=? s "kernel-store-u32-16k") (string=? s "kernel-store-u32-64k") (string=? s "kernel-store-u64-16k") (string=? s "kernel-store-u64-64k"))
+             (= h 20590) (string=? s "nested-destructuring")
+             (= h 20595) (or (string=? s "string-compare-lines") (string=? s "string-index-of-from"))
+             (= h 21602) (string=? s "bytes-from-vector-i64")
+             (= h 21611) (or (string=? s "kernel-atomic-add-u32") (string=? s "kernel-atomic-add-u64") (string=? s "kernel-scratch-region"))
+             (= h 21620) (string=? s "typed-capability-call")
+             (= h 21622) (string=? s "vector-i64-from-bytes")
+             (= h 22640) (string=? s "pure-s-expression-core")
+             (= h 23659) (or (string=? s "kernel-dequant-dot-q4-k") (string=? s "kernel-dequant-dot-q6-k") (string=? s "kernel-dequant-dot-q8-0") (string=? s "kernel-probe-nx-execute") (string=? s "kernel-probe-text-write"))
+             (= h 24683) (or (string=? s "kernel-isr-entry-address") (string=? s "kernel-probe-guard-write") (string=? s "kernel-uefi-alloc-region"))
+             (= h 24692) (string=? s "type-directed-arithmetic")
+             (= h 24693) (string=? s "unsigned-bit-shift-right")
+             (= h 25707) (or (string=? s "kernel-dequant-dot-ptq1-0") (string=? s "kernel-probe-double-fault"))
+             (= h 29808) (string=? s "portable-string-symbol-values")
+             (= h 31851) (string=? s "kernel-rt-timer-handler-address")
+             (= h 33899) (or (string=? s "kernel-configure-double-fault-ist") (string=? s "kernel-page-fault-handler-address"))
+             (= h 35947) (string=? s "kernel-double-fault-handler-address")
+             (= h 36971) (or (string=? s "kernel-configure-page-fault-recovery") (string=? s "kernel-probe-recoverable-guard-write"))
+             (= h 40043) (string=? s "kernel-undefined-opcode-handler-address")
+             (= h 43115) (string=? s "kernel-page-fault-recovery-handler-address")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn grammar-declared-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (grammar-declared-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn grammar-declared-heads-has? [k] (table-has? grammar-declared-heads k)))
+
+#?(:kotoba
+   (defn reserved-extra-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 2153) (string=? s "if")
+             (= h 2158) (string=? s "ns")
+             (= h 3180) (string=? s "let")
+             (= h 4193) (string=? s "atom")
+             (= h 4196) (string=? s "defn")
+             (= h 4206) (string=? s "nil?")
+             (= h 4211) (string=? s "some")
+             (= h 5220) (or (string=? s "deref") (string=? s "defn-"))
+             (= h 5235) (or (string=? s "swap!") (string=? s "some?"))
+             (= h 6258) (or (string=? s "reset!") (string=? s "record"))
+             (= h 8291) (string=? s "cap-call")
+             (= h 9327) (string=? s "option-or")
+             (= h 9332) (string=? s "typed-set")
+             (= h 10358) (or (string=? s "vector-i64") (string=? s "vector-f64") (string=? s "vector-new"))
+             (= h 12397) (or (string=? s "match-result") (string=? s "match-option"))
+             (= h 13416) (string=? s "hetero-vector")
+             (= h 13421) (string=? s "match-variant")
+             (= h 14452) (string=? s "typed-cap-call")
+             (= h 14454) (string=? s "vector-f64-new")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn reserved-extra-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (reserved-extra-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn reserved-extra-heads-has? [k] (table-has? reserved-extra-heads k)))
+
+#?(:kotoba
+   (defn forbidden-heads-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 1070) (string=? s ".")
+             (= h 2094) (string=? s "..")
+             (= h 3182) (string=? s "new")
+             (= h 3186) (string=? s "ref")
+             (= h 3189) (string=? s "use")
+             (= h 3190) (string=? s "var")
+             (= h 4204) (string=? s "load")
+             (= h 4208) (string=? s "pmap")
+             (= h 4211) (or (string=? s "send") (string=? s "set!"))
+             (= h 5217) (string=? s "agent")
+             (= h 6244) (string=? s "dosync")
+             (= h 6246) (string=? s "future")
+             (= h 6249) (string=? s "import")
+             (= h 7266) (string=? s "binding")
+             (= h 7267) (string=? s "compile")
+             (= h 7276) (string=? s "locking")
+             (= h 7282) (or (string=? s "require") (string=? s "resolve"))
+             (= h 8292) (string=? s "defmacro")
+             (= h 8307) (string=? s "send-off")
+             (= h 9324) (string=? s "load-file")
+             (= h 9334) (string=? s "volatile!")
+             (= h 10350) (string=? s "ns-resolve")
+             (= h 11372) (string=? s "load-string")
+             (= h 11378) (string=? s "read-string")
+             (= h 14433) (string=? s "alter-var-root")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn forbidden-heads-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (forbidden-heads-has-name? (form/symbol-value k)) false))
+   :default
+   (defn forbidden-heads-has? [k] (table-has? forbidden-heads k)))
+
+#?(:kotoba
+   (defn source-operation-registry-fallback-has-name? [s :string] :bool
+     (let [n (string-byte-length s)]
+       (if (= n 0)
+         false
+         (let [h (+ (* n 1024) (string-code-point-at s 0))]
+           (cond
+             (= h 7271) (string=? s "git/run")
+             (= h 7273) (string=? s "io/read")
+             (= h 7283) (string=? s "sys/cwd")
+             (= h 8291) (string=? s "cli/args")
+             (= h 8293) (string=? s "env/read")
+             (= h 8297) (string=? s "io/write")
+             (= h 8300) (string=? s "log/read")
+             (= h 8302) (or (string=? s "net/dial") (string=? s "net/read"))
+             (= h 9315) (or (string=? s "can/frame") (string=? s "clock/now") (string=? s "code/eval"))
+             (= h 9318) (string=? s "fs/browse")
+             (= h 9320) (string=? s "http/post")
+             (= h 9326) (string=? s "net/write")
+             (= h 9333) (string=? s "ui/commit")
+             (= h 10344) (string=? s "http/reply")
+             (= h 10348) (or (string=? s "link/frame") (string=? s "log/append"))
+             (= h 10350) (or (string=? s "net/accept") (string=? s "net/listen"))
+             (= h 10355) (or (string=? s "screen/act") (string=? s "secret/get"))
+             (= h 11366) (or (string=? s "fs/app-data") (string=? s "fs/transact"))
+             (= h 11367) (string=? s "gpu/compute")
+             (= h 11368) (or (string=? s "hash/sha256") (string=? s "http/accept"))
+             (= h 11379) (string=? s "stream/send")
+             (= h 12389) (string=? s "entropy/draw")
+             (= h 12396) (string=? s "llm/generate")
+             (= h 12398) (string=? s "net/datagram")
+             (= h 13414) (string=? s "fs/browse-dir")
+             (= h 13417) (string=? s "identity/sign")
+             (= h 13424) (string=? s "process/spawn")
+             (= h 13427) (string=? s "stream/accept")
+             (= h 13429) (string=? s "ui/next-event")
+             (= h 14441) (string=? s "io/write-error")
+             (= h 14451) (or (string=? s "screen/observe") (string=? s "state/transact"))
+             (= h 15464) (string=? s "http/get-stream")
+             (= h 15465) (string=? s "identity/verify")
+             (= h 16495) (string=? s "object/put-block")
+             (= h 16499) (string=? s "storage/transact")
+             (= h 17510) (string=? s "fs/app-data-bytes")
+             (= h 17519) (string=? s "object/get-stream")
+             (= h 18532) (string=? s "dataspace/transact")
+             (= h 26735) (string=? s "object/compare-and-set-ref")
+             :else false)))))
+   :default nil)
+
+#?(:kotoba
+   (defn source-operation-registry-fallback-has? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k) (source-operation-registry-fallback-has-name? (form/symbol-value k)) false))
+   :default
+   (defn source-operation-registry-fallback-has? [k] (table-has? source-operation-registry-fallback k)))
+;; ---- generated lookups END

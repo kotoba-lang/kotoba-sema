@@ -636,7 +636,17 @@
 ;; clojure.core/some -- the first logical-true (pred x), in order, stopping
 ;; there -- so the host answer is unchanged on nbb and the JVM.
 #?(:kotoba
-   (defn- fget [m [:ref :form/r] k :keyword] [:ref :form/r] (form-form-get m (form-keyword-form k)))
+   ;; (form-form-get m (form-keyword-form k)) without minting the key Form (agent ARENA 2026-10-04: the
+   ;; module-linear-returning fixpoint reads :name/:params/:body per pair and function)
+   (defn- fget [m [:ref :form/r] k :keyword] [:ref :form/r]
+     (let [kids (form-kids-of m) n (vector-count kids)]
+       (loop [j 0]
+         (if (>= (+ j 1) n)
+           (form-nil-form)
+           (let [x (typed-list-nth [:list [:ref :form/r]] kids j)]
+             (if (and (form-is-keyword? x) (= (form-keyword-value x) k))
+               (typed-list-nth [:list [:ref :form/r]] kids (+ j 1))
+               (recur (+ j 2))))))))
    :default
    (defn- first-truthy [pred coll]
      (loop [s (seq coll)]
@@ -708,7 +718,7 @@
 
 #?(:kotoba
    (defn- consuming-head? [f [:ref :form/r]] :bool
-     (sym-in? f "[vector-assoc vector-f64-assoc vector-conj vector-f64-conj vector-drop vector-f64-drop vector-assoc! vector-f64-assoc!]")))
+     (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "vector-assoc") (string=? sn "vector-f64-assoc") (string=? sn "vector-conj") (string=? sn "vector-f64-conj") (string=? sn "vector-drop") (string=? sn "vector-f64-drop") (string=? sn "vector-assoc!") (string=? sn "vector-f64-assoc!")))))))
 
 
 
@@ -745,7 +755,7 @@
 
 #?(:kotoba
    (defn- producing-head? [f [:ref :form/r]] :bool
-     (sym-in? f "[vector-alloc vector-new vector-assoc vector-assoc! vector-conj vector-drop vector-f64-alloc vector-f64-new vector-f64-assoc vector-f64-assoc! vector-f64-conj vector-f64-drop]")))
+     (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "vector-alloc") (string=? sn "vector-new") (string=? sn "vector-assoc") (string=? sn "vector-assoc!") (string=? sn "vector-conj") (string=? sn "vector-drop") (string=? sn "vector-f64-alloc") (string=? sn "vector-f64-new") (string=? sn "vector-f64-assoc") (string=? sn "vector-f64-assoc!") (string=? sn "vector-f64-conj") (string=? sn "vector-f64-drop")))))))
 
 
 
@@ -769,7 +779,7 @@
 
 #?(:kotoba
    (defn- reading-head? [f [:ref :form/r]] :bool
-     (sym-in? f "[vector-count vector-f64-count vector-at vector-f64-at vector-get vector-f64-get nth bytes-from-vector-i64]")))
+     (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "vector-count") (string=? sn "vector-f64-count") (string=? sn "vector-at") (string=? sn "vector-f64-at") (string=? sn "vector-get") (string=? sn "vector-f64-get") (string=? sn "nth") (string=? sn "bytes-from-vector-i64")))))))
 
 
 
@@ -900,14 +910,14 @@
 ;; expanded first -- the same rewrite the frontend's `thread-form` makes.
 
 #?(:kotoba
-   (defn- in-place-head? [f [:ref :form/r]] :bool (sym-in? f "[vector-assoc! vector-f64-assoc!]"))
+   (defn- in-place-head? [f [:ref :form/r]] :bool (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "vector-assoc!") (string=? sn "vector-f64-assoc!"))))))
    :default
    (def ^:private in-place-heads '#{vector-assoc! vector-f64-assoc!}))
 
 
 
 #?(:kotoba
-   (defn- unexpanded-thread? [f [:ref :form/r]] :bool (sym-in? f "[cond-> cond->> some-> some->> doto]"))
+   (defn- unexpanded-thread? [f [:ref :form/r]] :bool (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "cond->") (string=? sn "cond->>") (string=? sn "some->") (string=? sn "some->>") (string=? sn "doto"))))))
    :default
    (def ^:private unexpanded-threads
      "Threading heads this analysis does not expand. They rebind a hidden name
@@ -957,7 +967,7 @@
 #?(:kotoba
    (defn- contains-thread? [f [:ref :form/r]] :bool
      (cond
-       (form-is-seq? f) (or (sym-in? (form-first-of f) "[-> ->> as->]") (any-thread? (form-kids-of f)))
+       (form-is-seq? f) (or (let [sx (form-first-of f)] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "->") (string=? sn "->>") (string=? sn "as->"))))) (any-thread? (form-kids-of f)))
        (or (form-is-map? f) (form-is-vec? f) (form-is-set? f)) (any-thread? (form-kids-of f))
        :else false)))
 
@@ -1022,7 +1032,7 @@
      [f [:ref :form/r]] [:ref :form/r]
      (cond
        (not (contains-thread? f)) f
-       (and (form-is-seq? f) (sym-in? (form-first-of f) "[-> ->>]") (> (form-count-of f) 1))
+       (and (form-is-seq? f) (let [sx (form-first-of f)] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "->") (string=? sn "->>"))))) (> (form-count-of f) 1))
        (expand-threads (fold-thread (form-nth-of f 1) (drop-list (form-kids-of f) 2) (sym-is? (form-first-of f) "->>")))
        (and (form-is-seq? f) (sym-is? (form-first-of f) "as->") (<= 3 (form-count-of f)) (form-is-symbol? (form-nth-of f 2)))
        (expand-threads (fold-as (form-nth-of f 1) (form-nth-of f 2) (drop-list (form-kids-of f) 3)))
@@ -1095,7 +1105,7 @@
 ;; docstring for why this replaced a use COUNT.
 
 #?(:kotoba
-   (defn- deferred-head? [f [:ref :form/r]] :bool (sym-in? f "[fn fn* letfn delay lazy-seq for reify]"))
+   (defn- deferred-head? [f [:ref :form/r]] :bool (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "fn") (string=? sn "fn*") (string=? sn "letfn") (string=? sn "delay") (string=? sn "lazy-seq") (string=? sn "for") (string=? sn "reify"))))))
    :default
    (def ^:private deferred
      "Heads whose body runs later than it is written, or not at all, or more
@@ -1106,7 +1116,7 @@
 
 
 #?(:kotoba
-   (defn- repeating-head? [f [:ref :form/r]] :bool (sym-in? f "[loop doseq dotimes while]"))
+   (defn- repeating-head? [f [:ref :form/r]] :bool (let [sx f] (and (form-is-symbol? sx) (let [sn (form-symbol-value sx)] (or (string=? sn "loop") (string=? sn "doseq") (string=? sn "dotimes") (string=? sn "while"))))))
    :default
    (def ^:private repeating
      "Heads whose body runs zero or more times in place. Reads inside are fine
@@ -1938,11 +1948,12 @@
                         (param-index-assumed? params caller argument assumed)))))))
 
 #?(:kotoba
+   ;; FUNCTION is a prepared entry [name params body whole] (see `prepare-functions`)
    (defn- function-gives-up? [function [:ref :form/r] name [:ref :form/r] index :i64 assumed [:ref :form/r]] :bool
-     (let [caller (fget function :name)
-           params (fget function :params)
-           body (fget function :body)
-           whole (form-form-seq (form-cons-onto (form-symbol-form "do") (form-kids-of body)))
+     (let [caller (form-nth-of function 0)
+           params (form-nth-of function 1)
+           body (form-nth-of function 2)
+           whole (form-nth-of function 3)
            calls (calls-into whole name (form-no-forms))
            n (vector-count calls)]
        (loop [i 0]
@@ -2014,19 +2025,35 @@
      (let [n (form-count-of functions)]
        (loop [i 0]
          (if (>= i n) (form-nil-form)
-           (if (form-eq (fget (form-nth-of functions i) :name) name) (form-nth-of functions i) (recur (inc i))))))))
+           (if (form-eq (form-nth-of (form-nth-of functions i) 0) name) (form-nth-of functions i) (recur (inc i))))))))
+
+;; Each function once as the vector [name params body whole], whole = (do body...) (agent ARENA 2026-10-04): the
+;; fixpoint below asks about every [name index] pair against every function, and rebuilding these per question was
+;; the largest cost of a native analyze of compiler-sized modules (measured, docs/selfhost-arena-20261004.md).
+#?(:kotoba
+   (defn- prepare-functions [functions [:ref :form/r]] [:ref :form/r]
+     (let [n (form-count-of functions)]
+       (loop [i 0 acc (form-no-forms)]
+         (if (>= i n)
+           (form-form-vec acc)
+           (let [f (form-nth-of functions i)
+                 body (fget f :body)]
+             (recur (inc i)
+                    (form-append-form acc (form-form-vec
+                                           (form-append-form
+                                            (form-three-forms (fget f :name) (fget f :params) body)
+                                            (form-form-seq (form-cons-onto (form-symbol-form "do") (form-kids-of body)))))))))))))
 
 #?(:kotoba
    (defn- pair-survives? [pair [:ref :form/r] functions [:ref :form/r] assumed [:ref :form/r]] :bool
      (let [name (form-nth-of pair 0)
            index (form-int-value (form-nth-of pair 1))
            f (function-named functions name)
-           params (fget f :params)
-           target (form-nth-of params index)
-           body (fget f :body)]
+           params (form-nth-of f 1)
+           target (form-nth-of params index)]
        (and (< index (form-count-of params))
             (form-is-symbol? target)
-            (linear-returning? (form-form-seq (form-cons-onto (form-symbol-form "do") (form-kids-of body))) target assumed)
+            (linear-returning? (form-nth-of f 3) target assumed)
             (caller-gives-it-up? functions name index assumed)))))
 
 #?(:kotoba
@@ -2043,6 +2070,7 @@
      "The `[name parameter-index]` pairs a module may treat as linear-returning:
      a greatest fixpoint, shrinking from every parameter of every function."
      [functions [:ref :form/r]] [:ref :form/r]
-     (loop [assumed (initial-pairs functions)]
-       (let [surviving (surviving-pairs functions assumed)]
-         (if (form-eq surviving assumed) assumed (recur surviving))))))
+     (let [prepared (prepare-functions functions)]
+       (loop [assumed (initial-pairs functions)]
+         (let [surviving (surviving-pairs prepared assumed)]
+           (if (form-eq surviving assumed) assumed (recur surviving)))))))

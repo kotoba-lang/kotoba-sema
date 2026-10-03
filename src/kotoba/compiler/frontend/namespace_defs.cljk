@@ -271,6 +271,62 @@
              '#{atom swap! reset! deref}
              '#{let if cap-call typed-cap-call ns defn defn- some some? nil? option-or vector-i64 vector-f64 vector-new vector-f64-new
                 hetero-vector typed-set record match-result match-variant match-option})))
+
+;; (table-has? (reserved-function-names) k) without building the union (agent ARENA 2026-10-04): the union is a set
+;; of symbols, so k is reserved iff it is a symbol whose name is in one of its tables (the generated allocation-free
+;; tests of frontend-tables). The union was built per definition and was the largest single cost of a native analyze.
+#?(:kotoba
+   (defn reserved-function-name? [k [:ref :form/r]] :bool
+     (if (form/is-symbol? k)
+       (let [s (form/symbol-value k)]
+         (or (tables/forbidden-heads-has-name? s)
+             (tables/arithmetic-has-name? s)
+             (tables/comparisons-has-name? s)
+             (tables/float-division-heads-has-name? s)
+             (tables/heap-operations-has-name? s)
+             (tables/kgraph-operations-has-name? s)
+             (tables/kernel-memory-operations-has-name? s)
+             (tables/slice-value-operations-has-name? s)
+             (tables/kernel-privileged-operations-has-name? s)
+             (tables/rodata-literal-operations-has-name? s)
+             (tables/image-symbol-operations-has-name? s)
+             (tables/list-operations-has-name? s)
+             (tables/predicate-operations-has-name? s)
+             (tables/logical-operations-has-name? s)
+             (tables/map-operations-has-name? s)
+             (tables/map-presence-operations-has-name? s)
+             (tables/set-operations-has-name? s)
+             (tables/collection-count-operations-has-name? s)
+             (tables/vector-end-operations-has-name? s)
+             (tables/map-projection-operations-has-name? s)
+             (tables/typed-map-operations-has-name? s)
+             (tables/typed-safe-value-operations-has-name? s)
+             (tables/parametric-result-operations-has-name? s)
+             (tables/variant-operations-has-name? s)
+             (tables/generic-option-operations-has-name? s)
+             (tables/canonical-list-operations-has-name? s)
+             (tables/bytes-operations-has-name? s)
+             (tables/heterogeneous-vector-operations-has-name? s)
+             (tables/typed-set-operations-has-name? s)
+             (tables/canonical-typed-map-operations-has-name? s)
+             (tables/record-operations-has-name? s)
+             (tables/typed-vector-operations-has-name? s)
+             (tables/typed-f64-vector-operations-has-name? s)
+             (tables/compact-graph-operations-has-name? s)
+             (tables/document-fixed-operations-has-name? s)
+             (tables/document-variadic-operations-has-name? s)
+             (tables/string-operations-has-name? s)
+             (tables/region-operations-has-name? s)
+             (tables/xml-operations-has-name? s)
+             (tables/decimal-operations-has-name? s)
+             (tables/f64-operations-has-name? s)
+             (tables/f32-operations-has-name? s)
+             (tables/i32-operations-has-name? s)
+             (tables/i64-operations-has-name? s)
+             (tables/lazy-sequence-operations-has-name? s)
+             (tables/reserved-extra-heads-has-name? s)))
+       false))
+   :default nil)
 #?(:kotoba
    (defn max-functions [] :i64 16384)
    :default
@@ -622,8 +678,8 @@
    (defn- nd-pure-product-node [node [:ref :form/r]] :i64
      (let [head (pure-product-form-head node)
            ok (require-k (or (form/is-nil? head)
-                             (not (or (tables/table-has? (forbidden-heads) head)
-                                      (tables/table-has? (tables/pure-product-disallowed-heads) head))))
+                             (not (or (tables/forbidden-heads-has? head)
+                                      (tables/pure-product-disallowed-heads-has? head))))
                          (str "form outside pure-product profile: " (form-text (pure-product-reported-head node head)))
                          "kotoba.error/pure-product-forbidden" node)]
        (nd-pure-product-kids (form/kids-of node) 0)))
@@ -903,7 +959,7 @@
 ;; mean: declared by the grammar but unlowered, or unknown with the nearest names beside it
 #?(:kotoba
    (defn unknown-operation-error [op [:ref :form/r] form [:ref :form/r] functions [:ref :form/r]] [:ref :fe/err]
-     (if (tables/table-has? (grammar-declared-heads) op)
+     (if (tables/grammar-declared-heads-has? op)
        (fe-reject (str (form-text op) " is named by the language grammar (lang/guest-grammar.edn) "
                        "but this analyser has no lowering for it -- not implemented on "
                        "this compile path")
@@ -949,7 +1005,7 @@
 #?(:kotoba
    (defn- nd-uses-slice? [f [:ref :form/r] slice-parameters [:ref :form/r]] :bool
      (if (and (form/is-seq? f) (> (form/count-of f) 0)
-              (or (tables/table-has? (tables/slice-value-operations) (form/nth-of f 0))
+              (or (tables/slice-value-operations-has? (form/nth-of f 0))
                   (form/form-has? slice-parameters (form/nth-of f 0))))
        true
        (nd-uses-slice-kids? (form/kids-of f) 0 slice-parameters)))
@@ -1030,7 +1086,7 @@
        (and (form/is-symbol? expr) (form/form-has? env expr)) (form/form-get env expr)
 
        (and (form/is-seq? expr) (> (form/count-of expr) 0)
-            (tables/table-has? (tables/slice-constructor-elements) (form/nth-of expr 0)))
+            (tables/slice-constructor-elements-has? (form/nth-of expr 0)))
        (let [ok1 (require-k (= 3 (form/count-of expr)) "slice constructor arity mismatch"
                             "kotoba.error/slice-arity" expr)
              base (form/nth-of expr 1)
@@ -1177,7 +1233,7 @@
                                                                 index)
                                               value)))
 
-           (or (tables/table-has? (tables/slice-constructor-elements) op) (string=? head "slice-sub"))
+           (or (tables/slice-constructor-elements-has? op) (string=? head "slice-sub"))
            (let [ok (require-k false "a slice value can only be indexed, narrowed, measured, or passed to a slice parameter"
                                "kotoba.error/slice-escape" expr)]
              expr)
@@ -1302,8 +1358,8 @@
            tail (fdrop form 3)
            ok1 (require-k (simple-symbol-form? name) "desugar template requires a simple name" "kotoba.error/subset-reject" form)
            ok2 (require-k (not (reserved-binding-name? name)) "symbol uses the reserved __kotoba_ prefix" "kotoba.error/subset-reject" name)
-           ok3 (require-k (not (or (tables/table-has? (tables/structural-heads) name)
-                                   (tables/table-has? (forbidden-heads) name)
+           ok3 (require-k (not (or (tables/structural-heads-has? name)
+                                   (tables/forbidden-heads-has? name)
                                    (tables/table-has? (reserved-function-names) name)))
                           "desugar template may not take a reserved head name" "kotoba.error/subset-reject" name)
            ok4 (require-k (form/is-vec? params) "desugar template requires a parameter vector" "kotoba.error/subset-reject" form)
