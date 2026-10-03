@@ -36,9 +36,9 @@
   with `kotoba.compiler.value-type` (the port of `validate-value-type!`), in
   the host's order: shape, descriptor, descriptor kind, operands.
 
-  What is not. The rodata literals need `rodata-literal-content?`; reaching one
-  returns the code `vx/unsupported` instead of guessing, and the differential
-  harness counts those cases apart."
+  The rodata literals (`ucs2`, `guid`, `bytes-literal`, `bytes-literal-length`)
+  check their source text as the host's `rodata-literal-content?` does
+  (vx-rodata; until 2026-10-04 they answered `vx/unsupported`)."
   {:kotoba/export [run-batch check-form make-ctx check-form-in]}
   (:require [kotoba.form :as form]
             [kotoba.compiler.frontend-tables :as tables]
@@ -582,6 +582,49 @@
               "kernel-uefi-alloc-region page count must be between 1 and 1099511627776" n)
       :else (vx-from f e n 1))))
 
+;; ---- rodata literals (boot-lit): the argument is source, not an expression ----------
+;; The host's `rodata-literal-content?` (frontend/validate.cljk, its Kotoba arm): UCS-2 text without a
+;; surrogate, an 8-4-4-4-12 hex GUID, an even-length hex byte string. Agent F64, 2026-10-04 (was vx/unsupported).
+(defn- rl-hex-code? [c :i64] :bool
+  (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102)) (and (>= c 65) (<= c 70))))
+
+(defn- rl-hex-range? [s :string i :i64 end :i64] :bool
+  (loop [j i]
+    (cond (>= j end) true
+          (rl-hex-code? (string-code-point-at s j)) (recur (+ j 1))
+          :else false)))
+
+(defn- rl-width [c :i64] :i64 (if (< c 128) 1 (if (< c 2048) 2 (if (< c 65536) 3 4))))
+
+(defn- rl-surrogate-free? [s :string] :bool
+  (loop [i 0]
+    (if (>= i (string-length s))
+      true
+      (let [c (string-code-point-at s i)]
+        (if (and (>= c 55296) (<= c 57343)) false (recur (+ i (rl-width c))))))))
+
+(defn- rl-guid? [t :string] :bool
+  (and (= 36 (string-length t))
+       (= 45 (string-code-point-at t 8)) (= 45 (string-code-point-at t 13))
+       (= 45 (string-code-point-at t 18)) (= 45 (string-code-point-at t 23))
+       (rl-hex-range? t 0 8) (rl-hex-range? t 9 13) (rl-hex-range? t 14 18)
+       (rl-hex-range? t 19 23) (rl-hex-range? t 24 36)))
+
+(defn- rl-content? [op :string t :string] :bool
+  (cond (string=? op "ucs2") (rl-surrogate-free? t)
+        (string=? op "guid") (rl-guid? t)
+        (or (string=? op "bytes-literal") (string=? op "bytes-literal-length"))
+        (and (= 0 (rem (string-length t) 2)) (rl-hex-range? t 0 (string-length t)))
+        :else false))
+
+(defn- vx-rodata [f [:ref :form/r] e [:ref :vx/env] n :i64 op :string argc :i64] [:ref :vx/r]
+  (let [expected (op-arity e op)]
+    (cond
+      (not= expected argc) (reject-operation-arity "rodata literal" op expected argc n)
+      (not (form/is-string? (form/nth-of f 1))) (reject "rodata literal requires a string literal" n)
+      (not (rl-content? op (form/string-value (form/nth-of f 1)))) (reject "rodata literal is malformed for its encoding" n)
+      :else (pass n))))
+
 (defn- vx-image-symbol [f [:ref :form/r] e [:ref :vx/env] n :i64 op :string argc :i64] [:ref :vx/r]
   (let [expected (op-arity e op)
         a (form/nth-of f 1)]
@@ -949,7 +992,7 @@
     (= fam 20) (vx-family "kernel memory operation" f e n op argc)
     (string=? op "kernel-uefi-alloc-region") (vx-alloc-region f e n op argc)
     (= fam 21) (vx-family "kernel privileged operation" f e n op argc)
-    (= fam 22) (unsupported op n)
+    (= fam 22) (vx-rodata f e n op argc)
     (= fam 23) (vx-image-symbol f e n op argc)
     (in-functions? e op)
     (let [expected (form/int-value (tables/table-get (env-functions e) (form/symbol-form op)))]

@@ -355,8 +355,8 @@
 
 ;; Admission of one desugared expression (the Kotoba reading is `kotoba.compiler.validate-expr`,
 ;; the port of `validate-expr-impl`): answers the node count after FORM, or refuses. NODES is the
-;; count already charged to the program; the rodata literals are the one family that port does not
-;; cover ("vx/unsupported").
+;; count already charged to the program; the rodata literals are checked there too (vx-rodata, agent F64
+;; 2026-10-04; they answered "vx/unsupported" before).
 #?(:kotoba
    (defn validate-expr [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
      (let [r (vx/check-form form locals functions (forbidden-heads) (grammar-declared-heads) nodes)
