@@ -277,7 +277,7 @@
 ;; there.
 #?(:kotoba
    (defn kernel-memory-op? [op [:ref :form/r]] :bool
-     (tables/table-has? (tables/kernel-memory-operations) op))
+     (tables/kernel-memory-operations-has? op))
    :default
 (defn kernel-memory-op? [op]
   (contains? kernel-memory-operations op)))
@@ -305,7 +305,7 @@
               (string=? (form/symbol-value head) "kernel-scratch-region")
               (string=? (form/symbol-value head) "kernel-uefi-alloc-region")
               (string=? (form/symbol-value head) "kernel-subregion")
-              (tables/table-has? (tables/rodata-literal-encodings) head))))
+              (tables/rodata-literal-encodings-has? head))))
    :default nil)
 
 #?(:kotoba
