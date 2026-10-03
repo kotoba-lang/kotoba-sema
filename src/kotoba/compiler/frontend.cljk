@@ -11598,7 +11598,11 @@
                   (canonical-typed-map-type? value-type)
                   (canonical-list-type? value-type))
             :i64
-            (infer-call-type op args locals signatures)))
+            (do
+              ;; ADR 0353 floor :vector-parameter, as `nth` below.
+              (when (= :i64 value-type)
+                (require-expression-type! value-type :vector-i64 (first args)))
+              (infer-call-type op args locals signatures))))
         ;; `peek`/`pop`/`keys`/`vals` need a type here for the same reason
         ;; `count` and `nth` do: `infer-absent-parameter-types` runs BEFORE
         ;; `rewrite-record-projections` and reads a refused operand's required
@@ -11670,6 +11674,15 @@
             (canonical-list-type? value-type)
             (if (= 2 (count args)) (second value-type)
                 (infer-call-type op args locals signatures))
+
+            ;; ADR 0353 floor :vector-parameter. `nth` never indexed an
+            ;; :i64, so an :i64 receiver is a number where a vector is
+            ;; required: say so as a type mismatch on the receiver, which is
+            ;; what lets `infer-absent-parameter-types` refine an unannotated
+            ;; parameter -- `(defn- f [[x y]] ..)`, `(nth p 0)` -- to the
+            ;; :vector-i64 its callers pass. A number stays refused.
+            (= :i64 value-type)
+            (require-expression-type! value-type :vector-i64 value)
 
             :else (infer-call-type op args locals signatures)))
         hetero-vector-assoc
@@ -14745,10 +14758,18 @@
                                    expected :kotoba.error/expected
                                    actual :kotoba.error/actual
                                    use-site :kotoba.error/use-site} (ex-data error)
+                                  ;; A vector-destructured parameter is read
+                                  ;; through the synthetic temp bound to it
+                                  ;; (`(let [destr-vector p] (nth destr-vector
+                                  ;; 0))`, floor :vector-parameter): a refused
+                                  ;; temp is a refused parameter.
                                   index (when (simple-symbol? form)
                                           (first (keep-indexed
                                                   (fn [index parameter]
-                                                    (when (= parameter form) index))
+                                                    (when (or (= parameter form)
+                                                              (and (simple-symbol? parameter)
+                                                                   (contains? (row-aliases parameter body) form)))
+                                                      index))
                                                   params)))]
                               (when (and index
                                          (contains? param-types-inferred index)
