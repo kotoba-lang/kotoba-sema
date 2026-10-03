@@ -1637,10 +1637,13 @@
      (let [[_ type-id fields] type]
        (when-not (and (keyword? type-id) (namespace type-id))
          (reject! "record type id must be a qualified keyword" type :kotoba.error/record-type-id))
-       (when-not (and (vector? fields) (seq fields) (<= (count fields) max-record-fields)
+       ;; ADR 0353 floor :options-map-argument: the record with no fields is
+       ;; what `{}` is where a row says it is a record -- an options map
+       ;; passed empty, `(move-caret state delta {})`.
+       (when-not (and (vector? fields) (<= (count fields) max-record-fields)
                       (every? #(and (vector? %) (= 2 (count %)) (keyword? (first %))) fields)
                       (= (count fields) (count (distinct (map first fields)))))
-         (reject! "record fields must be a non-empty unique bounded vector" type :kotoba.error/record-fields))
+         (reject! "record fields must be a unique bounded vector" type :kotoba.error/record-fields))
        (vswap! nodes + (+ 2 (* 2 (count fields))))
        (when (> @nodes max-type-nodes)
          (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
@@ -5437,8 +5440,11 @@
   reproducible."
   [fields]
   [:record (keyword map-literal-record-namespace
-                    (str/join "+" (map (comp map-literal-record-field-segment first)
-                                       fields)))
+                    (if (empty? fields)
+                      ;; `{}` at a row argument (floor :options-map-argument).
+                      "empty"
+                      (str/join "+" (map (comp map-literal-record-field-segment first)
+                                         fields))))
    fields])
 
 (declare map-literal-lowered-type)
@@ -11519,8 +11525,14 @@
                                         (nth value-type 2) default)
               (nth value-type 2))
 
+            ;; floor :options-map-argument: a key the record lacks is
+            ;; absence -- its :or default, or nothing.
             (record-type? descriptor)
             (or (record-field-type descriptor key)
+                (when (and (keyword? key) (= 3 (count args)))
+                  (record-get-default-type descriptor key default form locals signatures))
+                (when (keyword? key)
+                  (infer-expression-type '(__kotoba_absent :nil) locals signatures))
                 (reject! "record field is not declared"
                          form :kotoba.error/record-field))
 
@@ -12485,6 +12497,10 @@
   (cond
     (option-vector-type? test-type) (list 'option-some?-of test-type test)
     (= :option-i64 test-type) (list 'option-some? test)
+    ;; A literal nothing -- a destructured key the record lacks, in a row
+    ;; specialization (floor :options-map-argument) -- is never present, so
+    ;; the test is the constant false: no option is built to be asked.
+    (= nil-kind test-type) false
     :else test))
 
 (defn- option-present-value
@@ -12681,6 +12697,8 @@
     (vector? form) (with-meta (mapv retire-absence-markers form) (meta form))
     :else form))
 
+(declare row-symbols-in)
+
 (defn- rewrite-record-projection
   "Type-directed rewrite: `(record-get value :field)` -> the canonical
   `(record-get SCHEMA value :field)`, recovering SCHEMA from the value's
@@ -12745,7 +12763,29 @@
                                        (catch #?(:clj Exception :cljs :default) _ nil)))]))
                       [[] locals]
                       (partition 2 bindings))]
-          (list 'let (vec pairs) (rewrite-record-projection body locals' signatures schemas)))
+          (let [body' (rewrite-record-projection body locals' signatures schemas)
+                pairs (partition 2 pairs)
+                ;; floor :options-map-argument: a destructured key the record
+                ;; lacks is bound to a literal nothing, and a presence test of
+                ;; it folded to false above. A binding of a nothing nothing
+                ;; reads any more is dropped, so no option is built (and the
+                ;; typed Wasm target, which has no option-none, is not asked
+                ;; for one).
+                nothing? (fn [v] (and (seq? v) (= 'do (first v)) (= 3 (count v))
+                                      (symbol? (second v))
+                                      (= '(__kotoba_absent :nil) (nth v 2))))
+                kept (loop [ps pairs out []]
+                       (if-let [[nm v] (first ps)]
+                         (recur (next ps)
+                                (if (and (simple-symbol? nm) (nothing? v)
+                                         (not (contains? (row-symbols-in (list (map second (next ps)) body'))
+                                                         nm)))
+                                  out
+                                  (conj out nm v)))
+                         out))]
+            (if (empty? kept)
+              body'
+              (list 'let kept body'))))
 
         ;; ADR 0353 floor :absence. Truthiness exists on `:bool` and on
         ;; `[:option T]` only: an option test is presence. `when`, `if-not`,
@@ -13013,7 +13053,12 @@
               (when-not (keyword? key)
                 (reject! "record destructuring requires keyword fields"
                          form :kotoba.error/record-projection-unresolved))
-              (list 'record-get descriptor value key))
+              (cond
+                (record-field-type descriptor key) (list 'record-get descriptor value key)
+                ;; floor :options-map-argument: a record's fields are static,
+                ;; so a key it lacks is its :or default or nothing.
+                (= 3 (count rewritten-args)) (list 'do value default)
+                :else (list 'do value '(__kotoba_absent :nil))))
 
             :else
             (list 'map-get value key
@@ -14071,7 +14116,11 @@
   [aliases x]
   (and (seq? x)
        (or (and (= 'get (first x)) (<= 3 (count x) 4))
-           (= match-has-marker (first x)))
+           (= match-has-marker (first x))
+           ;; floor :options-map-argument: `{:keys [extend?]}` over a
+           ;; parameter. It reads a row as `(get m :k)` with an absent key
+           ;; does -- not requiring the key.
+           (= '__kotoba_destructure_get (first x)))
        (contains? aliases (second x))))
 
 (defn- row-field-reads
@@ -14254,6 +14303,23 @@
         (use-site-text arg)))
     (use-site-text arg)))
 
+(defn- row-param-text
+  "PARAM as the author wrote it: a destructured parameter is a synthetic name
+  (`param-name+wrap`), so it is shown as the `{:keys [..]}` its body reads
+  off it (floor :options-map-argument)."
+  [param body]
+  (if (and (reserved-binding-name? param)
+           (str/starts-with? (name param) "__kotoba_param-destr"))
+    (let [aliases (row-aliases param body)
+          ks (into [] (comp (filter #(and (seq? %) (= '__kotoba_destructure_get (first %))
+                                          (contains? aliases (second %))
+                                          (keyword? (nth % 2 nil))))
+                            (map #(symbol (name (nth % 2))))
+                            (distinct))
+                   (tree-seq coll? seq body))]
+      (str "{:keys " (pr-str ks) "}"))
+    param))
+
 (defn- row-generic-call-refusal!
   [generic index param reads arg arg-type]
   (let [row (row-text reads)]
@@ -14288,7 +14354,7 @@
   T]]] 1 x)`, T read off x. Anything else, or a literal a value of which has
   no type known here, is returned unchanged (and refused as a map)."
   [form type-of]
-  (if (and (seq? form) (= 'map-new (first form)) (seq (rest form))
+  (if (and (seq? form) (= 'map-new (first form))
            (even? (count (rest form)))
            (every? keyword? (take-nth 2 (rest form))))
     (let [entries (partition 2 (rest form))
@@ -14428,7 +14494,9 @@
                           split (apply list op args)
                           (nil? bad) (apply list (instantiate! op types) args)
                           final? (row-generic-call-refusal!
-                                  (label op) bad (nth (:params (get by-name op)) bad)
+                                  (label op) bad
+                                  (row-param-text (nth (:params (get by-name op)) bad)
+                                                  (:body (get by-name op)))
                                   (get rows bad) (nth args bad) (get types bad))
                           :else (apply list op args)))
                       :else (keep-meta form (apply list op (map #(rw % locals table final?) args)))))
