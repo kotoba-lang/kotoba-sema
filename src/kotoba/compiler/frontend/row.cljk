@@ -1294,7 +1294,7 @@
       (cond
         (rw-sym-is? op "quote") (rw-r form rs)
         (and (rw-sym-is? op "let") (form/is-vec? (form/nth-of form 1))) (rw-rewrite-let g form locals table final? rs)
-        (rw-set-has? (tables/row-binding-heads) op)
+        (tables/row-binding-heads-has? op)
         (let [inner (rw-dissoc-all locals (form/form-vec (form/kids-of (row-symbols-in (form/form-vec (fdrop form 3))))) 0)
               r (rw-kids g form 1 inner table final? (form/no-forms) rs)]
           (rw-r (form/form-seq (form/cons-onto op (rw-rl-forms r))) (rw-rl-rs r)))
@@ -1806,7 +1806,7 @@
       (cond
         (rw-sym-is? op "quote") form
         (and (rw-sym-is? op "let") (form/is-vec? (form/nth-of form 1))) (tl-rewrite-let ctx form locals table)
-        (rw-set-has? (tables/row-binding-heads) op)
+        (tables/row-binding-heads-has? op)
         (let [inner (rw-dissoc-all locals (form/form-vec (form/kids-of (row-symbols-in (form/form-vec (fdrop form 3))))) 0)
               kids (tl-kids ctx form 1 inner table (form/no-forms))]
           (tl-keep-meta form (form/form-seq (form/cons-onto op kids))))

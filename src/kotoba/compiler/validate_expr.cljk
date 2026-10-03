@@ -39,7 +39,7 @@
   What is not. The rodata literals need `rodata-literal-content?`; reaching one
   returns the code `vx/unsupported` instead of guessing, and the differential
   harness counts those cases apart."
-  {:kotoba/export [run-batch check-form]}
+  {:kotoba/export [run-batch check-form make-ctx check-form-in]}
   (:require [kotoba.form :as form]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.compiler.value-type :as vt])
@@ -1003,6 +1003,26 @@
         index (build-index tabs)
         e (record-new [:ref :vx/env] locals functions tabs index
                       (build-set-index forbidden) (build-set-index declared) 0)
+        r (vx f e nodes)]
+    (form/vec4 (form/bool-form (r-ok? r))
+               (form/string-form (record-get [:ref :vx/r] r :code))
+               (form/string-form (record-get [:ref :vx/r] r :msg))
+               (form/int-form (r-nodes r)))))
+
+;; ---- shared context (agent ARENA, 2026-10-04) -----------------------------
+;; check-form folds the 24 operation tables, the operator index and the two head-set indexes on every
+;; call; the frontend calls it once per function body, so a program of N functions rebuilt them N times
+;; (measured: the majority of the native analyze's vector handles and pairs, docs/selfhost-analyze-memory-
+;; 20261003.md). make-ctx folds them once into the Form vector [tabs index forbidden-index declared-index];
+;; check-form-in answers exactly what check-form answers for the same FORBIDDEN / DECLARED.
+(defn make-ctx [forbidden [:ref :form/r] declared [:ref :form/r]] [:ref :form/r]
+  (let [tabs (build-tabs)]
+    (form/vec4 tabs (build-index tabs) (build-set-index forbidden) (build-set-index declared))))
+
+(defn check-form-in [ctx [:ref :form/r] f [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r]
+                     nodes :i64] [:ref :form/r]
+  (let [e (record-new [:ref :vx/env] locals functions (form/nth-of ctx 0) (form/nth-of ctx 1)
+                      (form/nth-of ctx 2) (form/nth-of ctx 3) 0)
         r (vx f e nodes)]
     (form/vec4 (form/bool-form (r-ok? r))
                (form/string-form (record-get [:ref :vx/r] r :code))

@@ -1307,10 +1307,26 @@
 ;; pure-head rewrite replaced it (host: meta :kotoba/pure-source-head), and a symbol Form's :n
 ;; is 1 when the author wrote it ^:private (host: meta :private).
 
+;; fget / fhas? read a keyword key without minting its Form (agent ARENA 2026-10-04: the minted key was ~20% of the
+;; native analyze's pairs); the same answers as form-get / form-has? on (keyword-form key): the first even-index kid
+;; that is a keyword equal to KEY.
+#?(:kotoba
+   (defn fkw-index [kids [:list [:ref :form/r]] key :keyword] :i64
+     (let [n (vector-count kids)]
+       (loop [j 0]
+         (if (>= (+ j 1) n)
+           -1
+           (let [x (typed-list-nth [:list [:ref :form/r]] kids j)]
+             (if (and (form/is-keyword? x) (= (form/keyword-value x) key))
+               j
+               (recur (+ j 2))))))))
+   :default nil)
+
 ;; the value of a keyword key in a Form map (nil when absent)
 #?(:kotoba
    (defn fget [m [:ref :form/r] key :keyword] [:ref :form/r]
-     (form/form-get m (form/keyword-form key)))
+     (let [kids (form/kids-of m) j (fkw-index kids key)]
+       (if (< j 0) (form/nil-form) (typed-list-nth [:list [:ref :form/r]] kids (+ j 1)))))
    :default nil)
 
 ;; M with KEY bound to V
@@ -1321,7 +1337,7 @@
 
 #?(:kotoba
    (defn fhas? [m [:ref :form/r] key :keyword] :bool
-     (form/form-has? m (form/keyword-form key)))
+     (>= (fkw-index (form/kids-of m) key) 0))
    :default nil)
 
 ;; Clojure truthiness of a Form: neither nil nor false
@@ -1557,10 +1573,10 @@
        (if (form/is-nil? head)
          false
          (cond
-           (= kind 0) (or (tables/table-has? (tables/local-state-write-heads) head) (ls-deref-head? head))
-           (= kind 1) (tables/table-has? (tables/local-state-write-heads) head)
+           (= kind 0) (or (tables/local-state-write-heads-has? head) (ls-deref-head? head))
+           (= kind 1) (tables/local-state-write-heads-has? head)
            (= kind 2) (ls-deref-head? head)
-           :else (or (tables/table-has? (tables/local-state-effect-heads) head)
+           :else (or (tables/local-state-effect-heads-has? head)
                      (tables/table-has? (source-operation-registry) head))))))
    :default nil)
 
@@ -1730,7 +1746,7 @@
                               "kotoba.error/local-state-arity" form)]
              (ls-cell-ref "deref" (form/nth-of form 1) cells form))
 
-           (tables/table-has? (tables/local-state-scope-heads) head)
+           (tables/local-state-scope-heads-has? head)
            (let [m (ls-mention form cells)
                  _ (require-k (form/is-nil? m)
                               (str "atom `" (form-text m) "` escapes its let scope (" local-state-note ")")
@@ -2139,8 +2155,8 @@
          (string=? hs "when") (ls-tx-when form cells st)
          (string=? hs "cond") (ls-tx-cond form cells st)
          (string=? hs "case") (ls-tx-case form cells st)
-         (or (tables/table-has? (tables/local-state-scope-heads) head)
-             (tables/table-has? (tables/local-state-conditional-heads) head))
+         (or (tables/local-state-scope-heads-has? head)
+             (tables/local-state-conditional-heads-has? head))
          (let [_ (ls-position head form)]
            (ls-r (form/no-forms) form cells st (form/nil-form)))
          :else

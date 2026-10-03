@@ -362,6 +362,21 @@
        (form/int-value (form/nth-of r 3))))
    :default nil)
 
+;; The same admission against a context folded once per analyze run (`validate-ctx`, agent ARENA
+;; 2026-10-04): the operation tables and head-set indexes are built once, not once per function body.
+#?(:kotoba
+   (defn validate-ctx [] [:ref :form/r]
+     (vx/make-ctx (forbidden-heads) (grammar-declared-heads)))
+   :default nil)
+
+#?(:kotoba
+   (defn validate-expr-in [ctx [:ref :form/r] form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
+     (let [r (vx/check-form-in ctx form locals functions nodes)
+           ok (form/bool-value (form/nth-of r 0))
+           ck (require-k ok (form/string-value (form/nth-of r 2)) (form/string-value (form/nth-of r 1)) form)]
+       (form/int-value (form/nth-of r 3))))
+   :default nil)
+
 ;; ---- constants ----
 #?(:kotoba
    (defn- cl-all? [xs [:ref :form/r] i :i64] :bool

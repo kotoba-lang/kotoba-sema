@@ -2173,7 +2173,7 @@
        acc
        (let [f (fl-nth forms i)]
          (ex-protocol-forms forms (+ i 1)
-                            (if (and (form/is-seq? f) (tables/table-has? (tables/protocol-declaration-heads) (form/nth-of f 0)))
+                            (if (and (form/is-seq? f) (tables/protocol-declaration-heads-has? (form/nth-of f 0)))
                               (form/append-form acc f)
                               acc)))))
    :default nil)

@@ -13,8 +13,8 @@
             [kotoba.compiler.frontend.kernel-region :refer [#?@(:kotoba [absence-marker? check-kernel-region-provenance!] :default [absence-marker? check-kernel-region-provenance!])]]
             [kotoba.compiler.frontend.closure-types :refer [#?@(:kotoba [callable-type? canonical-closure-result-type check-linear-resource-ownership! closure-result-type? invoke-dispatcher-name lambda-dispatchers record-type? schema-ref-type? structured-type? type-alias-form? typed-param-parts variant-type?] :default [*schemas* callable-type? canonical-closure-result-type check-linear-resource-ownership! closure-result-type? invoke-dispatcher-name lambda-dispatchers record-type? schema-ref-type? structured-type? type-alias-form? typed-param-parts variant-type?])]]
             [kotoba.compiler.frontend.expand :refer [#?@(:kotoba [binding-symbols expand-closed-multimethod-forms expand-defn-parts expand-record-protocol-forms expand-state-ability-forms kotoba-integer? max-parameters rewrite-pure-application-forms valid-name? variadic-params?] :default [binding-symbols expand-closed-multimethod-forms expand-defn-parts expand-record-protocol-forms expand-state-ability-forms kotoba-integer? max-parameters rewrite-pure-application-forms valid-name? variadic-params?])]]
-            [kotoba.compiler.frontend.namespace-defs :refer [#?@(:kotoba [check-pure-product-source-forms! erase-slice-values expand-defdesugar-forms max-functions namespace-parts reserved-binding-name? reserved-function-names] :default [check-pure-product-source-forms! compiler-rejection? erase-slice-values expand-defdesugar-forms max-functions namespace-parts reserved-binding-name? reserved-function-names bytes-operations canonical-list-operations canonical-typed-map-operations decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations generic-option-operations heap-operations heterogeneous-vector-operations i32-operations kgraph-operations lazy-sequence-operations list-operations parametric-result-operations record-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations variant-operations])]]
-            [kotoba.compiler.frontend.validate :refer [#?@(:kotoba [def-parts quote-form? validate-expr] :default [constant-literal? def-parts quote-form? validate-expr])]]
+            [kotoba.compiler.frontend.namespace-defs :refer [#?@(:kotoba [check-pure-product-source-forms! erase-slice-values expand-defdesugar-forms max-functions namespace-parts reserved-binding-name? reserved-function-names reserved-function-name?] :default [check-pure-product-source-forms! compiler-rejection? erase-slice-values expand-defdesugar-forms max-functions namespace-parts reserved-binding-name? reserved-function-names bytes-operations canonical-list-operations canonical-typed-map-operations decimal-operations definition-heads document-fixed-operations document-variadic-operations f32-operations f64-operations generic-option-operations heap-operations heterogeneous-vector-operations i32-operations kgraph-operations lazy-sequence-operations list-operations parametric-result-operations record-operations typed-f64-vector-operations typed-map-operations typed-safe-value-operations typed-set-operations typed-vector-operations variant-operations])]]
+            [kotoba.compiler.frontend.validate :refer [#?@(:kotoba [def-parts quote-form? validate-ctx validate-expr validate-expr-in] :default [constant-literal? def-parts quote-form? validate-expr])]]
             [kotoba.compiler.frontend.infer :refer [#?@(:kotoba [abort-signatures absence-in-tail? check-loop-recur-argument-types! check-value-types! elaborate-aborts elaborate-named-abilities ie-new-ctx infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-loop-helper-results infer-type-or-nil legacy-absence resolve-absence-if resolve-loop-helper-param-types same-expression-type? use-site-text zip-locals] :default [*loop-helper-names* *loop-helper-recorder* *row-op-schemas* *state-handlers* absence-in-tail? check-loop-recur-argument-types! check-value-types! elaborate-aborts elaborate-named-abilities infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-expression-type infer-loop-helper-results legacy-absence resolve-absence-if same-expression-type? use-site-text])]]
             [kotoba.compiler.frontend.record-projection :refer [#?@(:kotoba [rewrite-record-projections] :default [doc-keys-helper-name doc-nth-helper-name doc-rest-helper-name doc-vals-helper-name rewrite-record-projections])]]
             [kotoba.compiler.frontend.desugar :refer [#?@(:kotoba [desugar-expr desugar-result-expr dr-env dr-form expression-callable-contract put2] :default [*absence-mode* *document-functions* *expected-callable-contract* *function-arities* *function-callable-param-contracts* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *local-option-types* *local-types* *loop-counter* *loop-helper-shapes* *pending-lambdas* *pending-loop-helpers* *required-closure-dispatchers* *used-capability-keywords* *uses-apply?* *uses-lazy?* char-helper-name desugar-expr desugar-result-expr doc-append-from-helper-name expression-callable-contract lazy-drop-helper-name lazy-take-helper-name realized-lowering string-from-i64-helper-name])]]
@@ -787,7 +787,7 @@
           parts (an-c-def-parts form)
           name (fget parts :name)
           u_1 (an-fail (not (valid-name? name)) "invalid constant name" "kotoba.error/subset-reject" name)
-          u_2 (an-fail (an-set-has? (reserved-function-names) name) "reserved constant name" "kotoba.error/subset-reject" name)]
+          u_2 (an-fail (reserved-function-name? name) "reserved constant name" "kotoba.error/subset-reject" name)]
       (an-def-declarations consts (+ i 1) (form/append-form acc (fput parts :form form))))))
    :default nil)
 
@@ -1494,7 +1494,7 @@
         raw (fget part :raw-params)
         body (fget part :body)
         u_1 (an-fail (not (valid-name? name)) "invalid function name" "kotoba.error/subset-reject" name)
-        u_2 (an-fail (an-set-has? (reserved-function-names) name) "reserved function name" "kotoba.error/subset-reject" name)
+        u_2 (an-fail (reserved-function-name? name) "reserved function name" "kotoba.error/subset-reject" name)
         u_3 (an-fail (not (form/is-vec? raw)) "function parameters must be a vector" "kotoba.error/subset-reject" raw)]
     (an-fail (not (= 1 (form/count-of body)))
              "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
@@ -4237,7 +4237,7 @@
 #?(:kotoba
 (defn an-fold-checks [name [:ref :form/r] value-form [:ref :form/r] later [:ref :form/r] functions [:ref :form/r] form [:ref :form/r]] :i64
   (let [head (if (and (form/is-seq? value-form) (> (form/count-of value-form) 0)) (form/nth-of value-form 0) (form/nil-form))
-        c1 (an-fail-stateful (an-set-has? (tables/stateful-def-heads) head) name head form)
+        c1 (an-fail-stateful (tables/stateful-def-heads-has? head) name head form)
         c2 (an-fold-checks-2 name value-form later functions form)]
     c2))
    :default nil)
@@ -4642,17 +4642,17 @@
 
 ;; validate-expr over every function with one shared node budget, then the eager-recursion check on source functions
 #?(:kotoba
-(defn an-validate-loop [fns [:ref :form/r] i :i64 sigs [:ref :form/r] nodes :i64] :i64
+(defn an-validate-loop [vctx [:ref :form/r] fns [:ref :form/r] i :i64 sigs [:ref :form/r] nodes :i64] :i64
   (if (>= i (form/count-of fns))
     nodes
     (let [f (form/nth-of fns i)
-          n2 (an-c-validate-expr (fget f :body) (form/form-set (form/kids-of (fget f :params))) sigs nodes)
+          n2 (an-c-validate-expr-in vctx (fget f :body) (form/form-set (form/kids-of (fget f :params))) sigs nodes)
           sn (fget f :source-name)
           name (fget f :name)
           shown (if (ftruthy? sn) sn name)
           selfs (if (ftruthy? sn) (form/form-set (form/two-forms name sn)) (form/form-set (form/one-form name)))
           u_1 (an-eager-gate (an-has-dunder? (form-text name)) shown selfs (fget f :body))]
-      (an-validate-loop fns (+ i 1) sigs n2))))
+      (an-validate-loop vctx fns (+ i 1) sigs n2))))
    :default nil)
 
 #?(:kotoba
@@ -5011,7 +5011,7 @@
         u_13 (an-fail (> (form/count-of missing) 0) "value type references a schema outside the closed namespace table" "kotoba.error/subset-reject" missing)
         mismatched (an-mismatch-kids parsed 0 schemas)
         u_14 (an-fail (not (form/is-nil? mismatched)) "inline nominal descriptor differs from closed namespace schema" "kotoba.error/subset-reject" mismatched)
-        u_15 (an-validate-loop parsed 0 (an-arity-table parsed 0 (an-empty-map)) 0)
+        u_15 (an-validate-loop (validate-ctx) parsed 0 (an-arity-table parsed 0 (an-empty-map)) 0)
         ctx0 (ie-new-ctx (form/nil-form) (fget d :merged) (fget d :handlers))
         u_16 (an-c-check-value-types! ctx0 parsed)
         u_17 (an-c-check-linear-resource-ownership! (form/kids-of parsed))
@@ -6496,6 +6496,19 @@
 #?(:kotoba
 (defn an-c-validate-expr [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
   (form/int-value (an-unwrap (an-c-validate-expr-caught form locals functions nodes))))
+   :default nil)
+
+;; validate-expr against the once-per-run context (agent ARENA 2026-10-04; validate-ctx)
+#?(:kotoba
+(defn an-c-validate-expr-in-caught [vctx [:ref :form/r] form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] [:ref :ana/ir]
+  (match-result (validate-expr-in vctx form locals functions nodes) [:result :i64 [:ref :fe/err]]
+    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
+    (err e (an-ir false (form/nil-form) e))))
+   :default nil)
+
+#?(:kotoba
+(defn an-c-validate-expr-in [vctx [:ref :form/r] form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
+  (form/int-value (an-unwrap (an-c-validate-expr-in-caught vctx form locals functions nodes))))
    :default nil)
 
 #?(:kotoba
