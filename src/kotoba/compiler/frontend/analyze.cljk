@@ -1,5 +1,8 @@
 (ns kotoba.compiler.frontend.analyze
   "Module `analyze` of kotoba.compiler.frontend, cut from the original namespace by amu refactor split (89 forms, 2609 lines). Depends on: base, kernel-region, closure-types, expand, namespace-defs, validate, infer, record-projection, desugar, row, state-ability."
+  ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
+  ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
+  #?(:kotoba {:kotoba/export [an-c-read-forms an-constants-stage an-desugar-loop an-empty-map an-expand-source an-hir-gate an-initial-env an-namespace-info an-parts-stage an-st-env an-st-flag an-st-form an-stage-finish an-stage-lambdas an-stage-passes analyze]})
   (:require #?@(:default [[kotoba.lang.coll :as set]])
             #?@(:default [[kotoba.lang.text :as str]])
             [kotoba.compiler.affine :as affine]
@@ -273,13 +276,6 @@
 #?(:kotoba
 (defn an-ir [okay :bool val [:ref :form/r] er [:ref :fe/err]] [:ref :ana/ir]
   (record-new [:ref :ana/ir] okay val er))
-   :default nil)
-
-#?(:kotoba
-(defn an-unwrap [r [:ref :ana/ir]] [:ref :form/r]
-  (if (record-get [:ref :ana/ir] r :ok)
-    (record-get [:ref :ana/ir] r :val)
-    (throw (record-get [:ref :ana/ir] r :err))))
    :default nil)
 
 #?(:kotoba
@@ -1276,9 +1272,8 @@
 ;; typed-param-parts, or an empty vector when it refuses (the same refusal is raised where the clause is parsed)
 #?(:kotoba
 (defn an-typed-param-parts-or-nil [raw [:ref :form/r] constants [:ref :form/r]] [:ref :form/r]
-  (match-result (typed-param-parts raw constants) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r r)
-    (err e (form/form-vec (form/no-forms)))))
+  (try (typed-param-parts raw constants)
+       (catch [:ref :fe/err] e (form/form-vec (form/no-forms)))))
    :default nil)
 
 #?(:kotoba
@@ -1337,11 +1332,6 @@
    :default nil)
 
 #?(:kotoba
-(defn an-st-err [env [:ref :fe/env] form [:ref :form/r] e [:ref :fe/err]] [:ref :ana/ird]
-  (record-new [:ref :ana/ird] false env form e false))
-   :default nil)
-
-#?(:kotoba
 (defn an-st-flag [s [:ref :ana/ird]] :bool (record-get [:ref :ana/ird] s :flag))
    :default nil)
 
@@ -1353,51 +1343,26 @@
 (defn an-st-form [s [:ref :ana/ird]] [:ref :form/r] (record-get [:ref :ana/ird] s :form))
    :default nil)
 
-;; imported aborting functions that answer a record: caught into :ana/ird
-#?(:kotoba
-(defn an-c-desugar-expr-caught [env [:ref :fe/env] form [:ref :form/r]] [:ref :ana/ird]
-  (match-result (desugar-expr env form) [:result [:ref :fe/dr] [:ref :fe/err]]
-    (ok r (an-st true (dr-env r) (dr-form r)))
-    (err e (an-st-err env form e))))
-   :default nil)
-
-#?(:kotoba
-(defn an-st-unwrap [s [:ref :ana/ird]] [:ref :ana/ird]
-  (if (record-get [:ref :ana/ird] s :ok)
-    s
-    (throw (record-get [:ref :ana/ird] s :err))))
-   :default nil)
-
+;; imported aborting functions are plain calls (ADR 0363: the abort passes on); these answer an :ana/ird
 #?(:kotoba
 (defn an-c-desugar-expr [env [:ref :fe/env] form [:ref :form/r]] [:ref :ana/ird]
-  (an-st-unwrap (an-c-desugar-expr-caught env form)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-desugar-result-expr-caught [env [:ref :fe/env] result [:ref :form/r] form [:ref :form/r]] [:ref :ana/ird]
-  (match-result (desugar-result-expr env result form) [:result [:ref :fe/dr] [:ref :fe/err]]
-    (ok r (an-st true (dr-env r) (dr-form r)))
-    (err e (an-st-err env form e))))
+  (let [r (desugar-expr env form)]
+    (an-st true (dr-env r) (dr-form r))))
    :default nil)
 
 #?(:kotoba
 (defn an-c-desugar-result-expr [env [:ref :fe/env] result [:ref :form/r] form [:ref :form/r]] [:ref :ana/ird]
-  (an-st-unwrap (an-c-desugar-result-expr-caught env result form)))
+  (let [r (desugar-result-expr env result form)]
+    (an-st true (dr-env r) (dr-form r))))
    :default nil)
 
 ;; elaborate-local-state: the body rewritten, the environment after it, and whether a cell was elaborated
 #?(:kotoba
-(defn an-c-elaborate-local-state-caught [body [:ref :form/r] env [:ref :fe/env]] [:ref :ana/ird]
-  (match-result (elaborate-local-state body env) [:result [:ref :ls/r] [:ref :fe/err]]
-    (ok r (an-st (record-get [:ref :ls/s] (record-get [:ref :ls/r] r :st) :used)
-                 (record-get [:ref :ls/s] (record-get [:ref :ls/r] r :st) :env)
-                 (record-get [:ref :ls/r] r :value)))
-    (err e (an-st-err env body e))))
-   :default nil)
-
-#?(:kotoba
 (defn an-c-elaborate-local-state [body [:ref :form/r] env [:ref :fe/env]] [:ref :ana/ird]
-  (an-st-unwrap (an-c-elaborate-local-state-caught body env)))
+  (let [r (elaborate-local-state body env)]
+    (an-st (record-get [:ref :ls/s] (record-get [:ref :ls/r] r :st) :used)
+           (record-get [:ref :ls/s] (record-get [:ref :ls/r] r :st) :env)
+           (record-get [:ref :ls/r] r :value))))
    :default nil)
 
 ;; one parameter pattern: a plain symbol is kept; any other pattern gets a fresh name (`param-destr`) and the pattern is bound from it by a `let`
@@ -6175,421 +6140,176 @@
            (:functions hir))))))
 
 #?(:kotoba
-(defn an-c-def-parts-caught [form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (def-parts form) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
-   :default nil)
-
-#?(:kotoba
 (defn an-c-def-parts [form [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-def-parts-caught form)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-namespace-parts-caught [form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (namespace-parts form) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (def-parts form))
    :default nil)
 
 #?(:kotoba
 (defn an-c-namespace-parts [form [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-namespace-parts-caught form)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-record-protocol-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (expand-record-protocol-forms forms) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (namespace-parts form))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-record-protocol-forms [forms [:list [:ref :form/r]]] [:ref :form/r]
-  (an-unwrap (an-c-expand-record-protocol-forms-caught forms)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-closed-multimethod-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (expand-closed-multimethod-forms forms) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-record-protocol-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-closed-multimethod-forms [forms [:list [:ref :form/r]]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-expand-closed-multimethod-forms-caught forms))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-defdesugar-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (expand-defdesugar-forms forms) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-closed-multimethod-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-defdesugar-forms [forms [:list [:ref :form/r]]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-expand-defdesugar-forms-caught forms))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-defn-parts-caught [form [:ref :form/r] constants [:ref :form/r] call-arities [:ref :form/r]] [:ref :ana/ir]
-  (match-result (expand-defn-parts form constants call-arities) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-defdesugar-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-defn-parts [form [:ref :form/r] constants [:ref :form/r] call-arities [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-expand-defn-parts-caught form constants call-arities)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-typed-param-parts-caught [raw-params [:ref :form/r] constants [:ref :form/r]] [:ref :ana/ir]
-  (match-result (typed-param-parts raw-params constants) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-defn-parts form constants call-arities))
    :default nil)
 
 #?(:kotoba
 (defn an-c-typed-param-parts [raw-params [:ref :form/r] constants [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-typed-param-parts-caught raw-params constants)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-pure-product-source-forms!-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (check-pure-product-source-forms! forms) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (typed-param-parts raw-params constants))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-pure-product-source-forms! [forms [:list [:ref :form/r]]] :i64
-  (form/int-value (an-unwrap (an-c-check-pure-product-source-forms!-caught forms))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-intrinsic-helper-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (expand-intrinsic-helper-forms forms) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-pure-product-source-forms! forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-intrinsic-helper-forms [forms [:list [:ref :form/r]]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-expand-intrinsic-helper-forms-caught forms))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-rewrite-pure-application-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (rewrite-pure-application-forms forms) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-intrinsic-helper-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-rewrite-pure-application-forms [forms [:list [:ref :form/r]]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-rewrite-pure-application-forms-caught forms))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-expand-state-ability-forms-caught [forms [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (expand-state-ability-forms forms) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (rewrite-pure-application-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-expand-state-ability-forms [forms [:list [:ref :form/r]]] [:ref :form/r]
-  (an-unwrap (an-c-expand-state-ability-forms-caught forms)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-erase-slice-values-caught [functions [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (erase-slice-values functions) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (expand-state-ability-forms forms))
    :default nil)
 
 #?(:kotoba
 (defn an-c-erase-slice-values [functions [:list [:ref :form/r]]] [:ref :form/r]
-  (an-unwrap (an-c-erase-slice-values-caught functions)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-infer-loop-helper-results-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-loop-helper-results ctx functions shapes) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (erase-slice-values functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-infer-loop-helper-results [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-infer-loop-helper-results-caught ctx functions shapes)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-loop-recur-argument-types!-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :ana/ir]
-  (match-result (check-loop-recur-argument-types! ctx functions shapes) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (infer-loop-helper-results ctx functions shapes))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-loop-recur-argument-types! [ctx [:ref :ie/ctx] functions [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-check-loop-recur-argument-types!-caught ctx functions shapes)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-specialize-state-abilities-caught [functions [:ref :form/r] lambda-helpers [:ref :form/r] handlers [:ref :form/r] exported [:ref :form/r] shapes [:ref :form/r]] [:ref :ana/ir]
-  (match-result (specialize-state-abilities functions lambda-helpers handlers exported shapes) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-loop-recur-argument-types! ctx functions shapes))
    :default nil)
 
 #?(:kotoba
 (defn an-c-specialize-state-abilities [functions [:ref :form/r] lambda-helpers [:ref :form/r] handlers [:ref :form/r] exported [:ref :form/r] shapes [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-specialize-state-abilities-caught functions lambda-helpers handlers exported shapes)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-thread-state-abilities-caught [ie [:ref :ie/ctx] functions [:ref :form/r] clones [:ref :form/r] handlers [:ref :form/r]] [:ref :ana/ir]
-  (match-result (thread-state-abilities ie functions clones handlers) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (specialize-state-abilities functions lambda-helpers handlers exported shapes))
    :default nil)
 
 #?(:kotoba
 (defn an-c-thread-state-abilities [ie [:ref :ie/ctx] functions [:ref :form/r] clones [:ref :form/r] handlers [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-thread-state-abilities-caught ie functions clones handlers)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-specialize-row-parameters-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] exported [:ref :form/r]] [:ref :ana/ir]
-  (match-result (specialize-row-parameters ctx functions exported) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (thread-state-abilities ie functions clones handlers))
    :default nil)
 
 #?(:kotoba
 (defn an-c-specialize-row-parameters [ctx [:ref :ie/ctx] functions [:ref :form/r] exported [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-specialize-row-parameters-caught ctx functions exported)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-type-literals-caught [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :ana/ir]
-  (match-result (type-literals ctx functions) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (specialize-row-parameters ctx functions exported))
    :default nil)
 
 #?(:kotoba
 (defn an-c-type-literals [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-type-literals-caught ctx functions)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-infer-absent-parameter-types-caught [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-absent-parameter-types ctx functions) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (type-literals ctx functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-infer-absent-parameter-types [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-infer-absent-parameter-types-caught ctx functions)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-a-normalize-aborts-caught [functions [:list [:ref :form/r]] abort-error-types [:ref :form/r] prefix :string] [:ref :ana/ir]
-  (match-result (a-normalize-aborts functions abort-error-types prefix) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (infer-absent-parameter-types ctx functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-a-normalize-aborts [functions [:list [:ref :form/r]] abort-error-types [:ref :form/r] prefix :string] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-a-normalize-aborts-caught functions abort-error-types prefix))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-infer-abort-error-types-caught [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-abort-error-types ctx functions) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (a-normalize-aborts functions abort-error-types prefix))
    :default nil)
 
 #?(:kotoba
 (defn an-c-infer-abort-error-types [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-infer-abort-error-types-caught ctx functions)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-elaborate-aborts-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] abort-error-types [:ref :form/r]] [:ref :ana/ir]
-  (match-result (elaborate-aborts ctx functions abort-error-types) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (infer-abort-error-types ctx functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-elaborate-aborts [ctx [:ref :ie/ctx] functions [:ref :form/r] abort-error-types [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-elaborate-aborts-caught ctx functions abort-error-types)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-rewrite-record-projections-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] schemas [:ref :form/r] dispatch [:ref :form/r]] [:ref :ana/ir]
-  (match-result (rewrite-record-projections ctx functions schemas dispatch) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (elaborate-aborts ctx functions abort-error-types))
    :default nil)
 
 #?(:kotoba
 (defn an-c-rewrite-record-projections [ctx [:ref :ie/ctx] functions [:ref :form/r] schemas [:ref :form/r] dispatch [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-rewrite-record-projections-caught ctx functions schemas dispatch)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-validate-interrupt-entries!-caught [functions [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (validate-interrupt-entries! functions) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (rewrite-record-projections ctx functions schemas dispatch))
    :default nil)
 
 #?(:kotoba
 (defn an-c-validate-interrupt-entries! [functions [:list [:ref :form/r]]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-validate-interrupt-entries!-caught functions))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-elaborate-named-abilities-caught [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :ana/ir]
-  (match-result (elaborate-named-abilities ctx functions) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (validate-interrupt-entries! functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-elaborate-named-abilities [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-elaborate-named-abilities-caught ctx functions)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-infer-closure-refinements-caught [ctx [:ref :ie/ctx] functions [:ref :form/r] lambda-infos [:ref :form/r]] [:ref :ana/ir]
-  (match-result (infer-closure-refinements ctx functions lambda-infos) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (elaborate-named-abilities ctx functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-infer-closure-refinements [ctx [:ref :ie/ctx] functions [:ref :form/r] lambda-infos [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-infer-closure-refinements-caught ctx functions lambda-infos)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-validate-expr-caught [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] [:ref :ana/ir]
-  (match-result (validate-expr form locals functions nodes) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (infer-closure-refinements ctx functions lambda-infos))
    :default nil)
 
 #?(:kotoba
 (defn an-c-validate-expr [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
-  (form/int-value (an-unwrap (an-c-validate-expr-caught form locals functions nodes))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-value-types!-caught [ctx [:ref :ie/ctx] functions [:ref :form/r]] [:ref :ana/ir]
-  (match-result (check-value-types! ctx functions) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (validate-expr form locals functions nodes))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-value-types! [ctx [:ref :ie/ctx] functions [:ref :form/r]] :i64
-  (form/int-value (an-unwrap (an-c-check-value-types!-caught ctx functions))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-linear-resource-ownership!-caught [functions [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (check-linear-resource-ownership! functions) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-value-types! ctx functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-linear-resource-ownership! [functions [:list [:ref :form/r]]] :i64
-  (form/int-value (an-unwrap (an-c-check-linear-resource-ownership!-caught functions))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-kernel-region-provenance!-caught [functions [:list [:ref :form/r]]] [:ref :ana/ir]
-  (match-result (check-kernel-region-provenance! functions) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-linear-resource-ownership! functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-kernel-region-provenance! [functions [:list [:ref :form/r]]] :i64
-  (form/int-value (an-unwrap (an-c-check-kernel-region-provenance!-caught functions))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-check-abort-facet-unwind!-caught [functions [:list [:ref :form/r]] function-effects [:ref :form/r]] [:ref :ana/ir]
-  (match-result (check-abort-facet-unwind! functions function-effects) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-kernel-region-provenance! functions))
    :default nil)
 
 #?(:kotoba
 (defn an-c-check-abort-facet-unwind! [functions [:list [:ref :form/r]] function-effects [:ref :form/r]] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-check-abort-facet-unwind!-caught functions function-effects))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-invoke-dispatcher-name-caught [result-type [:ref :form/r] arity :i64 parameter-types [:ref :form/r]] [:ref :ana/ir]
-  (match-result (invoke-dispatcher-name result-type arity parameter-types) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (check-abort-facet-unwind! functions function-effects))
    :default nil)
 
 #?(:kotoba
 (defn an-c-invoke-dispatcher-name [result-type [:ref :form/r] arity :i64 parameter-types [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-invoke-dispatcher-name-caught result-type arity parameter-types)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-lambda-dispatchers-caught [lambda-infos [:ref :form/r] required-dispatchers [:ref :form/r]] [:ref :ana/ir]
-  (match-result (lambda-dispatchers lambda-infos required-dispatchers) [:result [:ref :form/r] [:ref :fe/err]]
-    (ok r (an-ir true r (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (invoke-dispatcher-name result-type arity parameter-types))
    :default nil)
 
 #?(:kotoba
 (defn an-c-lambda-dispatchers [lambda-infos [:ref :form/r] required-dispatchers [:ref :form/r]] [:ref :form/r]
-  (an-unwrap (an-c-lambda-dispatchers-caught lambda-infos required-dispatchers)))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-state-refuse-impure-handler!-caught [hnd [:ref :form/r] op [:ref :form/r] operations [:ref :form/r] form [:ref :form/r]] [:ref :ana/ir]
-  (match-result (state-refuse-impure-handler! hnd op operations form) [:result :i64 [:ref :fe/err]]
-    (ok r (an-ir true (form/int-form r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (lambda-dispatchers lambda-infos required-dispatchers))
    :default nil)
 
 #?(:kotoba
 (defn an-c-state-refuse-impure-handler! [hnd [:ref :form/r] op [:ref :form/r] operations [:ref :form/r] form [:ref :form/r]] :i64
-  (form/int-value (an-unwrap (an-c-state-refuse-impure-handler!-caught hnd op operations form))))
-   :default nil)
-
-#?(:kotoba
-(defn an-c-read-forms-caught [source :string] [:ref :ana/ir]
-  (match-result (read-forms source) [:result [:list [:ref :form/r]] [:ref :fe/err]]
-    (ok r (an-ir true (form/form-vec r) (an-error "" "" (form/nil-form))))
-    (err e (an-ir false (form/nil-form) e))))
+  (state-refuse-impure-handler! hnd op operations form))
    :default nil)
 
 #?(:kotoba
 (defn an-c-read-forms [source :string] [:list [:ref :form/r]]
-  (form/kids-of (an-unwrap (an-c-read-forms-caught source))))
+  (read-forms source))
    :default nil)
