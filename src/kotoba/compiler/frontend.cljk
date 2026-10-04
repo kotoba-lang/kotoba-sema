@@ -6718,6 +6718,92 @@
                                 (map symbol-literal-form datum))
           (reject-quoted-symbol-datum! form))))))
 
+;; ADR 0353 floor :record-list-sequence.
+;;
+;; browser.input's window-at is (first (filter #(point-in-rect? point (:window/rect %))
+;; (reverse (:surface/windows surface)))) over a vector literal of window
+;; records -- a [:list R]. `filter` desugars to the T4.5 loop that builds a
+;; bounded i64 vector, and a [:list R] has no builder, so nothing of that
+;; shape could take the windows. `first` of a filter / remove / reverse chain
+;; needs no built sequence at all: it is a search. So the chain is fused into
+;; one loop that walks the source by index -- from its end when the chain
+;; reverses an odd number of times -- and answers the first item every
+;; predicate admits, innermost predicate first, as Clojure's lazy filter
+;; tests it. `count` and `nth` dispatch on the source's type, and the two
+;; exits are typed by it (`sequence-first-exit-type`): over a [:list T] the
+;; search answers [:option T], absent when nothing is found; over a bounded
+;; vector it answers the item and traps on an empty result, exactly as
+;; (vector-at (filter ..) 0) did, so a vector program keeps its value.
+(defn- sequence-first-chain
+  "The filter / remove / reverse chain `first` is asked of, outermost step
+  first, or nil when the operand is not one (or a step is a module's own
+  function, or has another arity)."
+  [form]
+  (loop [form form steps []]
+    (let [head (when (seq? form) (first form))]
+      (cond
+        (and (= 'reverse head) (= 2 (count form))
+             (not (contains? *function-arities* 'reverse)))
+        (recur (second form) (conj steps [:reverse]))
+
+        (and (contains? '#{filter remove} head) (= 3 (count form))
+             (not (contains? *function-arities* head)))
+        (recur (nth form 2) (conj steps [head (second form)]))
+
+        (seq steps) {:source form :steps steps}
+        :else nil))))
+
+(defn- desugar-sequence-first
+  [{:keys [source steps]}]
+  (let [items (synthetic "seq_v")
+        i (synthetic "seq_i")
+        x (synthetic "seq_x")
+        backward? (odd? (count (filter #(= :reverse (first %)) steps)))
+        tests (for [[op p-form] (reverse steps)
+                    :when (not= :reverse op)]
+                (let [named? (top-level-function-symbol? p-form)
+                      inline? (and (seq? p-form) (= 'fn (first p-form)))
+                      callback (when-not (or named? inline?) (synthetic "seq_callback"))
+                      test (cond
+                             inline?
+                             (let [[_ params & body] p-form]
+                               (when-not (and (vector? params) (= 1 (count params))
+                                              (every? symbol? params)
+                                              (seq body))
+                                 (reject! (str op " pred must be (fn [x] single-expr)") p-form))
+                               (list 'let [(first params) x]
+                                     (binding [*lexical-bindings* (into *lexical-bindings* params)
+                                               *abort-lexical-context* :fn]
+                                       (desugar-expr (implicit-do-body body)))))
+                             named? (list p-form x)
+                             :else (list (invoke-dispatcher-name :bool 1) callback x))]
+                  {:callback callback :p-form p-form
+                   :test (if (= 'remove op) (list 'not test) test)}))
+        callbacks (filter :callback tests)
+        index (if backward? (list '- (list '- (list 'count items) 1) i) i)
+        found (list '__kotoba_seq_found items x)
+        absent (list '__kotoba_seq_absent items)
+        search (if (seq tests)
+                 (list 'loop [i 0]
+                       (list 'if (list '< i (list 'count items))
+                             (list 'let [x (list 'nth items index)]
+                                   (list 'if (if (next tests)
+                                               (cons 'and (map :test tests))
+                                               (:test (first tests)))
+                                         found
+                                         (list 'recur (list '+ i 1))))
+                             absent))
+                 (list 'if (list '< 0 (list 'count items))
+                       (list 'let [x (list 'nth items (if backward?
+                                                       (list '- (list 'count items) 1)
+                                                       0))]
+                             found)
+                       absent))]
+    (binding [*loop-known-types* (into {i :i64} (map (fn [t] [(:callback t) :i64])) callbacks)]
+      (desugar-expr
+       (list 'let (vec (concat (mapcat (juxt :callback :p-form) callbacks) [items source]))
+             search)))))
+
 (defn- desugar-expr* [form contextual-result-type]
   (cond
     ;; An absence marker is already desugared (see `absence-type`).
@@ -7340,7 +7426,23 @@
         cons (do (when-not (= 2 (count args)) (reject! "cons requires two operands" form))
                  (list 'pair (desugar-expr (first args)) (desugar-expr (second args))))
         first (do (when-not (= 1 (count args)) (reject! "first requires one operand" form))
-                  (list 'pair-first (desugar-expr (first args))))
+                  (if-let [chain (sequence-first-chain (first args))]
+                    (desugar-sequence-first chain)
+                    (list 'pair-first (desugar-expr (first args)))))
+        ;; ADR 0353 floor :record-list-sequence. `reverse` is admitted where
+        ;; `first` reads it (`desugar-sequence-first`): the search walks the
+        ;; sequence from its end and nothing is built. A reversed sequence of
+        ;; its own would be a new [:list T] or vector, and this profile has no
+        ;; list builder to make one with.
+        reverse
+        (if (contains? *function-arities* 'reverse)
+          (desugar-ordinary-call op args)
+          (reject! (str "reverse is admitted only where first reads it -- "
+                        "(first (reverse s)), (first (filter p (reverse s))) -- "
+                        "which searches s from its end and builds nothing; a "
+                        "reversed sequence of its own needs a list builder this "
+                        "profile does not have")
+                   form :kotoba.error/reverse-unfused))
         second (do (when-not (= 1 (count args)) (reject! "second requires one operand" form))
                    (list 'pair-first (list 'pair-second (desugar-expr (first args)))))
         rest (do (when-not (= 1 (count args)) (reject! "rest requires one operand" form))
@@ -11170,6 +11272,23 @@
           field-type)
       default-type)))
 
+(defn- sequence-first-exit-type
+  "ADR 0353 floor :record-list-sequence: the type of an exit of a fused
+  `first` search over `items`. Over a [:list T], [:option T]; over a bounded
+  i64 / f64 vector the item's type. An unannotated parameter (the provisional
+  :i64) is required to be the :vector-i64 its callers pass, as `nth` does;
+  any other receiver is refused by name."
+  [op [items] locals signatures]
+  (let [value-type (infer-expression-type items locals signatures)]
+    (cond
+      (canonical-list-type? value-type) [:option (second value-type)]
+      (= :vector-i64 value-type) :i64
+      (= :vector-f64 value-type) :f64
+      (= :i64 value-type) (require-expression-type! value-type :vector-i64 items)
+      :else (reject! (str "first of filter / remove / reverse searches a bounded "
+                          "vector or a [:list T]; got " (pr-str value-type))
+                     items :kotoba.error/sequence-first-receiver))))
+
 (defn- infer-expression-type-impl [form locals signatures]
   (cond
     (kotoba-integer? form) :i64
@@ -11627,12 +11746,21 @@
         (pair-first pair-second)
         (let [value-type (when (= 1 (count args))
                            (infer-expression-type (first args) locals signatures))]
-          (case [op value-type]
-            [pair-first :vector-i64] :i64
-            [pair-first :vector-f64] :f64
-            [pair-second :vector-i64] :vector-i64
-            [pair-second :vector-f64] :vector-f64
-            (infer-call-type op args locals signatures)))
+          (if (and (= op 'pair-first) (canonical-list-type? value-type))
+            ;; ADR 0353 floor :record-list-sequence: the first item of a
+            ;; [:list T], absent on an empty list.
+            [:option (second value-type)]
+            (case [op value-type]
+              [pair-first :vector-i64] :i64
+              [pair-first :vector-f64] :f64
+              [pair-second :vector-i64] :vector-i64
+              [pair-second :vector-f64] :vector-f64
+              (infer-call-type op args locals signatures))))
+        ;; ADR 0353 floor :record-list-sequence: the two exits of a fused
+        ;; `(first (filter p (reverse s)))` search (`desugar-sequence-first`),
+        ;; typed by the sequence searched -- see `sequence-first-exit-type`.
+        (__kotoba_seq_found __kotoba_seq_absent)
+        (sequence-first-exit-type op args locals signatures)
         nth
         (let [[value index & defaults] args
               value-type (infer-expression-type value locals signatures)]
@@ -13660,6 +13788,20 @@
             (= :vector-i64 value-type)
             (if first? (list 'vector-at receiver 0) (list 'vector-drop receiver 1))
 
+            ;; ADR 0353 floor :record-list-sequence: `first` of a [:list T]
+            ;; is [:option T] -- absent on an empty list, which Clojure
+            ;; answers nil -- read through the list's own accessor. The
+            ;; receiver is bound once. `rest` of a list stays refused: the
+            ;; list has no drop.
+            (and first? (canonical-list-type? value-type))
+            (let [items (synthetic "first_list")
+                  option-type [:option (second value-type)]]
+              (list 'let [items receiver]
+                    (list 'if (list '< 0 (list 'vector-count items))
+                          (list 'option-some-of option-type
+                                (list 'typed-list-nth value-type items 0))
+                          (list 'option-none-of option-type))))
+
             (= :vector-f64 value-type)
             (if first?
               (list 'vector-f64-at receiver 0)
@@ -13675,6 +13817,25 @@
                             :kotoba.error/pair-second-receiver))
 
             :else (cons op rewritten-args)))
+
+        ;; ADR 0353 floor :record-list-sequence: the exits of a fused
+        ;; `first` search, resolved by the sequence searched. A bounded vector
+        ;; keeps what `(first (filter ..))` always answered on it -- the item,
+        ;; and the trap `(vector-at <empty result> 0)` raised when nothing
+        ;; was found, index 0 of an empty vector -- and a [:list T] answers
+        ;; [:option T].
+        (contains? '#{__kotoba_seq_found __kotoba_seq_absent} op)
+        (let [[items item] (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              value-type (infer-expression-type items locals signatures)
+              found? (= op '__kotoba_seq_found)]
+          (cond
+            (canonical-list-type? value-type)
+            (if found?
+              (list 'option-some-of [:option (second value-type)] item)
+              (list 'option-none-of [:option (second value-type)]))
+            found? item
+            (= :vector-f64 value-type) (list 'vector-f64-at (list 'vector-f64-new) 0)
+            :else (list 'vector-at (list 'vector-new) 0)))
 
         ;; Type-directed numeric resolution: `(+ a b)` on two f64 operands is
         ;; `(f64-add a b)`, on two f32 `(f32-add a b)`; i64 operands are left
@@ -14744,11 +14905,23 @@
         total-params (reduce + 0 (map #(count (:params %)) functions))]
     (loop [fs functions
            budget (+ 1 (count functions) total-params)]
-      (if (or (zero? budget) (not-any? :param-types-inferred fs))
+      (if (or (zero? budget) (not-any? #(or (:param-types-inferred %) (:loop-helper? %)) fs))
         fs
         (let [table (signature-table fs)
               refinement
-              (first-truthy (fn [{:keys [name params param-types body param-types-inferred]}]
+              (first-truthy (fn [{:keys [name params param-types body loop-helper?]
+                                  :as function}]
+                      ;; A loop helper has no written parameter at all (ADR
+                      ;; 0353 floor :record-list-sequence): a capture typed
+                      ;; the provisional :i64 off its call site is refined by
+                      ;; what the loop body requires, as an unannotated
+                      ;; parameter is, and the call site then refines the
+                      ;; enclosing function's own parameter -- window-at's
+                      ;; point, read as a vector only inside the search.
+                      (let [param-types-inferred
+                            (if loop-helper?
+                              (set (range (count params)))
+                              (:param-types-inferred function))]
                       (when (seq param-types-inferred)
                         (try
                           (do (infer-expression-type body (zipmap params param-types) table)
@@ -14779,7 +14952,7 @@
                                 {:function name :index index :type expected
                                  :first-use {:expected expected :actual actual
                                              :form form :span span
-                                             :use-site use-site}}))))))
+                                             :use-site use-site}})))))))
                     fs)]
           (if-not refinement
             fs
@@ -20582,14 +20755,25 @@
         ;; before any type was inferred is typed by its items, before rows
         ;; read it (a let-bound literal passed to a row is its record).
         parsed (type-literals-and-loop-slots parsed @loop-helper-shapes)
-        parsed (binding [*schemas* (:schemas namespace-info)]
-                 (specialize-row-parameters
-                  parsed
-                  (cond
-                    (some? (:exports namespace-info)) (set (:exports namespace-info))
-                    (first-truthy (complement :public?) def-parts)
-                    (set (map :source-name (filter :public? def-parts)))
-                    :else nil)))
+        parsed (let [specialized
+                     (binding [*schemas* (:schemas namespace-info)]
+                       (specialize-row-parameters
+                        parsed
+                        (cond
+                          (some? (:exports namespace-info)) (set (:exports namespace-info))
+                          (first-truthy (complement :public?) def-parts)
+                          (set (map :source-name (filter :public? def-parts)))
+                          :else nil)))]
+                 ;; ADR 0353 floor :record-list-sequence: a loop helper's
+                 ;; captures were typed from its call site in the generic,
+                 ;; where a row's field is not yet known -- window-at's
+                 ;; (:surface/windows surface) was the placeholder :i64. The
+                 ;; call site is now in a specialization, whose row is its
+                 ;; record, so the helpers are settled again from there. A
+                 ;; module with no row-polymorphic function is unchanged.
+                 (if (= specialized parsed)
+                   specialized
+                   (resolve-loop-helper-signatures specialized @loop-helper-shapes)))
         parsed (infer-absent-parameter-types parsed)
         ;; ADR 0189: resolve `(record-get value :field)` to the canonical
         ;; 3-arity form. This must precede every later pass that runs type
