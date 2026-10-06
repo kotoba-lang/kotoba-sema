@@ -5607,7 +5607,25 @@
 ;;
 ;;   :fields     key -> [:list R]
 ;;   :conflicts  key -> [T U], the keys whose items spell two types
+;;   :open       the keys written `[]` whose items spell no type but `:i64`:
+;;               floor :list-item-from-expression types them by inference
 (def ^:dynamic ^:private *module-list-fields* {})
+
+;; ADR 0353 floor :list-item-from-expression. What the module's source does not
+;; spell at an open `[]` key, inference says: browser.surface conj's only
+;; expressions there -- register-app's app parameter, open-window's merged
+;; window. A conj onto such a field notes the type its item is inferred to
+;; have (`note-list-item-type!`), and `analyze-forms*` analyses the module
+;; again with those types, as if spelled: one non-`:i64` type R makes the
+;; field `[:list R]`; two types, or R beside an integer literal the module
+;; conj's there, are the conflict a spelled pair is. The notes are facts about
+;; the source -- the type an item has where it is conj'd -- so an analysis
+;; that refuses still contributes them.
+;;
+;;   *module-list-inferred*  key -> [T ...], the types noted by earlier passes
+;;   *list-item-notes*       a volatile of [key T] noted by this pass, or nil
+(def ^:dynamic ^:private *module-list-inferred* {})
+(def ^:dynamic ^:private *list-item-notes* nil)
 
 (defn- module-list-fields
   "`*module-list-fields*` for one module's source forms (floor
@@ -5617,12 +5635,16 @@
   [forms]
   (let [empties (volatile! #{})
         items (volatile! [])
+        literal-i64 (volatile! #{})
+        note-item! (fn [k x]
+                     (vswap! items conj [k x])
+                     (when (integer? x) (vswap! literal-i64 conj k)))
         note! (fn [k v]
                 (when (keyword? k)
                   (when (vector? v)
                     (if (empty? v)
                       (vswap! empties conj k)
-                      (doseq [x v] (vswap! items conj [k x]))))))
+                      (doseq [x v] (note-item! k x))))))
         walk (fn walk [form]
                (cond
                  (map? form)
@@ -5635,7 +5657,7 @@
                        (doseq [[k v] (partition 2 (drop 2 form))] (note! k v)))
                      (when (and (= 'update (first form)) (>= (count form) 5)
                                 (keyword? (nth form 2)) (= 'conj (nth form 3)))
-                       (doseq [x (drop 4 form)] (vswap! items conj [(nth form 2) x])))
+                       (doseq [x (drop 4 form)] (note-item! (nth form 2) x)))
                      (doseq [x form] (walk x)))
                  (coll? form) (doseq [x form] (walk x))
                  :else nil))]
@@ -5644,14 +5666,51 @@
                           (if-let [t (when (contains? @empties k) (absent-field-spelled-type x))]
                             (update acc k (fn [ts] (if (some #(= t %) ts) ts (conj (or ts []) t))))
                             acc))
-                        {} @items)]
+                        {} @items)
+          spelled (reduce-kv (fn [acc k ts]
+                               (cond
+                                 (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
+                                 (= :i64 (first ts)) acc
+                                 :else (assoc-in acc [:fields k] [:list (first ts)])))
+                             {:fields {} :conflicts {}}
+                             types)
+          open (into #{} (remove #(or (contains? (:fields spelled) %)
+                                      (contains? (:conflicts spelled) %)))
+                     @empties)]
+      ;; floor :list-item-from-expression: an open key's inferred types.
       (reduce-kv (fn [acc k ts]
-                   (cond
-                     (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
-                     (= :i64 (first ts)) acc
-                     :else (assoc-in acc [:fields k] [:list (first ts)])))
-                 {:fields {} :conflicts {}}
-                 types))))
+                   (if-not (contains? open k)
+                     acc
+                     (let [ts (cond->> (vec (distinct ts))
+                                (contains? @literal-i64 k) (into [:i64]))]
+                       (cond
+                         (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
+                         (= :i64 (first ts)) acc
+                         :else (assoc-in acc [:fields k] [:list (first ts)])))))
+                 (assoc spelled :open open)
+                 *module-list-inferred*))))
+
+(defn- list-field-read-key
+  "The keyword key RECEIVER reads, `(record-get m k)` / `(get m k)` / `(k m)`,
+  or nil."
+  [receiver]
+  (when (seq? receiver)
+    (let [[op & args] receiver]
+      (cond
+        (and (contains? '#{record-get get} op) (keyword? (last args))) (last args)
+        (and (keyword? op) (= 1 (count args))) op
+        :else nil))))
+
+(defn- note-list-item-type!
+  "floor :list-item-from-expression: an item of type T is conj'd onto the field
+  RECEIVER reads. Noted when that is an open `[]` key and T is known and not
+  `:i64`."
+  [receiver t]
+  (when-let [notes *list-item-notes*]
+    (when-let [k (list-field-read-key receiver)]
+      (when (and (some? t) (not= :i64 t)
+                 (contains? (:open *module-list-fields*) k))
+        (vswap! notes conj [k t])))))
 
 (defn- reject-list-field-conflict!
   "A key the module writes `[]` at and conj's items of two types at: which one
@@ -13591,8 +13650,11 @@
             ;; Clojure -- was refused. `disj` stays set-only: it has no vector
             ;; meaning in Clojure either.
             (and conj? (= :vector-i64 value-type))
-            (reduce (fn [accumulated item] (list 'vector-conj accumulated item))
-                    receiver items)
+            (do (doseq [item items]
+                  (note-list-item-type! (first args) (try (infer-expression-type item locals signatures)
+                                                          (catch #?(:clj Exception :cljs :default) _ nil))))
+                (reduce (fn [accumulated item] (list 'vector-conj accumulated item))
+                        receiver items))
 
             (and conj? (= :vector-f64 value-type))
             (reduce (fn [accumulated item] (list 'vector-f64-conj accumulated item))
@@ -13602,8 +13664,11 @@
             ;; appends at the end, as on the vector the source wrote. The item
             ;; is checked against T by `typed-list-conj`'s own inference.
             (and conj? (canonical-list-type? value-type))
-            (reduce (fn [accumulated item] (list 'typed-list-conj value-type accumulated item))
-                    receiver items)
+            (do (doseq [item items]
+                  (note-list-item-type! (first args) (try (infer-expression-type item locals signatures)
+                                                          (catch #?(:clj Exception :cljs :default) _ nil))))
+                (reduce (fn [accumulated item] (list 'typed-list-conj value-type accumulated item))
+                        receiver items))
 
             :else
             (do
@@ -14489,6 +14554,18 @@
                       :else nil)))
           (tree-seq coll? seq form))))
 
+(defn- row-list-item?
+  "Is PARAM an item `(conj (record-get m k) .. PARAM ..)` conj's onto an open
+  `[]` key k of the module (floor :list-item-from-expression)?"
+  [param form]
+  (boolean
+   (first-truthy
+    (fn [x]
+      (and (seq? x) (= 'conj (first x))
+           (contains? (:open *module-list-fields*) (list-field-read-key (second x)))
+           (first-truthy #{param} (drop 2 x))))
+    (tree-seq coll? seq form))))
+
 (defn- row-operated?
   "Is PARAM the receiver of a row operation in FORM, or merged by one (ADR
   0353 floor :row-operations)? Either makes it a row even when no field is
@@ -14584,6 +14661,7 @@
                                                                (row-pass-through p body))))
                                                 [i {:reads (row-field-reads p body)
                                                     :operated? (row-operated? p body)
+                                                    :list-item? (row-list-item? p body)
                                                     :passes (row-pass-through p body)
                                                     :joins (into #{}
                                                                  (map (zipmap params (range)))
@@ -14620,7 +14698,27 @@
                                            slots)]
                             (when (seq rows) [fname rows]))))
                   candidates)]
-        (if (= next-known known) known (recur next-known))))))
+        (if (= next-known known)
+          ;; floor :list-item-from-expression: a parameter of a row function
+          ;; that is only conj'd onto an open `[]` field rides along with the
+          ;; row -- specialized at the record a call passes it, left as it is
+          ;; for anything else. Added after the fixed point, so passing it on
+          ;; makes nothing else a row.
+          (into {}
+                (map (fn [[fname rows]]
+                       [fname (reduce-kv (fn [rows i {:keys [list-item?]}]
+                                           (if (and list-item? (not (contains? rows i)))
+                                             (assoc rows i (with-meta (sorted-set) {::list-item true}))
+                                             rows))
+                                         rows (get candidates fname))]))
+                known)
+          (recur next-known))))))
+
+(defn- row-list-item-slot?
+  "Is the row slot READS (`row-generics`) a parameter only conj'd onto an open
+  `[]` field (floor :list-item-from-expression)?"
+  [reads]
+  (boolean (::list-item (meta reads))))
 
 (defn- row-argument-text
   "ARG as written: a map literal the row typed (`row-map-literal-record`) is
@@ -14750,6 +14848,14 @@
                           base (str g "__row_"
                                     (str/join "_" (map (fn [[i t]] (str i "_" (row-name-part t)))
                                                        types)))
+                          ;; A name is at most `max-symbol-chars` (the verifier
+                          ;; refuses a longer one, "runtime KIR function shape
+                          ;; rejected"): two record parameters spell past it
+                          ;; (floor :list-item-from-expression). Cut with room for
+                          ;; the `_k` that keeps a cut name distinct below.
+                          base (if (< (- max-symbol-chars 4) (count base))
+                                 (subs base 0 (- max-symbol-chars 4))
+                                 base)
                           sname (loop [k 1]
                                   (let [n (symbol (if (= 1 k) base (str base "_" k)))]
                                     (if (contains? @taken n) (recur (inc k)) n)))
@@ -14800,7 +14906,13 @@
                                              a)))
                                        args))
                             types (into (sorted-map)
-                                        (map (fn [[i _]] [i (arg-type (nth args i) locals table)]))
+                                        (keep (fn [[i reads]]
+                                                (let [t (arg-type (nth args i) locals table)]
+                                                  ;; A list-item slot takes a record's type, and
+                                                  ;; nothing else's.
+                                                  (when (or (not (row-list-item-slot? reads))
+                                                            (row-record-fields t))
+                                                    [i t]))))
                                         rows)
                             bad (first (keep (fn [[i t]]
                                                (let [fields (row-record-fields t)
@@ -21258,10 +21370,26 @@
 
 (defn- analyze-forms*
   "`analyze-forms**` with this analysis's state handler table bound: a probe
-  module analysed from inside it (`fold-def-value!`) gets a table of its own."
+  module analysed from inside it (`fold-def-value!`) gets a table of its own.
+
+  ADR 0353 floor :list-item-from-expression: analysed again while a pass notes
+  an item type at an open `[]` key that the passes before it had not, each
+  pass with every type noted so far; the keys are finite, and so are the
+  passes."
   [source-forms opts]
-  (binding [*state-handlers* (volatile! {})]
-    (analyze-forms** source-forms opts)))
+  (loop [inferred {} passes 0]
+    (let [notes (volatile! [])
+          outcome (binding [*state-handlers* (volatile! {})
+                            *module-list-inferred* inferred
+                            *list-item-notes* notes]
+                    (try {:hir (analyze-forms** source-forms opts)}
+                         (catch #?(:clj Throwable :cljs :default) error {:error error})))
+          inferred' (reduce (fn [acc [k t]]
+                              (if (some #(= t %) (get acc k)) acc (update acc k (fnil conj []) t)))
+                            inferred @notes)]
+      (if (and (not= inferred' inferred) (< passes 16))
+        (recur inferred' (inc passes))
+        (if-let [error (:error outcome)] (throw error) (:hir outcome))))))
 
 (defn analyze
   "Analyze Kotoba source into HIR, refusing in this language's own vocabulary
