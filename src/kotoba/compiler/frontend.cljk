@@ -4926,6 +4926,46 @@
      (reduce (fn [value step] (list 'let [name value] step))
              initial steps))))
 
+;; ADR 0353 floor :record-field-update. kotoba-lang/browser's browser.surface
+;; writes a field through the function that changes it -- (update surface
+;; :surface/apps conj app), (update surface :surface/next-window-id inc),
+;; (update w :window/rect (fn [[_ _ ww hh]] [x y ww hh])) -- and `update` was
+;; no head at all: it fell through to a call of an undefined function, whose
+;; first refusal was its function argument, "unbound symbol has no value type:
+;; inc". It is the read and the write the author would otherwise spell:
+;; (let [m <map>] (assoc m k (f (k m) x ..))), so the field keeps its type
+;; (assoc's rule) and the read is the required read (k m) already is.
+(defn- desugar-update
+  "`(update m k f x ..)` as `(assoc m k (f (k m) x ..))`, the map named once.
+  A keyword key reads with `(k m)`, any other with `(get m k)`. A `fn` literal
+  with one parameter vector of the call's arity is applied as a `let` -- its
+  parameters bound to the read value and the extra arguments in order -- so a
+  destructuring parameter means what it means in `let`; any other function is
+  called as it would be written."
+  [args form]
+  (when (< (count args) 3)
+    (reject! "update requires a map, a key and a function: (update m k f x ..)"
+             form :kotoba.error/update-arity))
+  (let [[target k f & extra] args
+        bound (if (simple-symbol? target) target (synthetic "update_target"))
+        read (if (keyword? k) (list k bound) (list 'get bound k))
+        fn-parts (when (and (seq? f) (= 'fn (first f)))
+                   (let [parts (rest f)
+                         parts (if (simple-symbol? (first parts)) (rest parts) parts)]
+                     (when (vector? (first parts)) parts)))
+        params (first fn-parts)
+        applied (if (and params
+                         (= (count params) (inc (count extra)))
+                         (not-any? #{'&} params)
+                         (seq (rest fn-parts)))
+                  (list* 'let (vec (interleave params (cons read extra)))
+                         (rest fn-parts))
+                  (list* f read extra))
+        written (list 'assoc bound k applied)]
+    (desugar-expr (if (= bound target)
+                    written
+                    (list 'let [bound target] written)))))
+
 (defn- resolve-ref-type
   "Expand `[:ref :schema/name]` through `*schemas*` when available."
   [type]
@@ -7040,7 +7080,9 @@
         ;; `remove` joined the set 2026-09-25 when it gained its lowering
         ;; (the `(filter remove)` arm below): lang/stdlib/core defines its own
         ;; `remove`, and that definition must keep winning.
-        (and (contains? '#{mapv filterv remove} op)
+        ;; `update` joined it 2026-10-06 with its desugar (floor
+        ;; :record-field-update), on the same terms.
+        (and (contains? '#{mapv filterv remove update} op)
              (top-level-function-symbol? op))
         (apply list op (map desugar-expr args))
 
@@ -7487,6 +7529,7 @@
         -> (desugar-thread args form false)
         ->> (desugar-thread args form true)
         as-> (desugar-as-thread args form)
+        update (desugar-update args form)
         some-> (desugar-some-thread args form false)
         some->> (desugar-some-thread args form true)
         cond (desugar-cond args form)
