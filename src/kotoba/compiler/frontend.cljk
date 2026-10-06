@@ -14803,6 +14803,8 @@
 
 (declare infer-absent-parameter-types)
 
+(declare type-literals)
+
 (defn- specialize-row-parameters
   "Monomorphize every row-polymorphic function at the record types its calls
   pass, and drop the generic. EXPORTED is the set of exported source names
@@ -14981,7 +14983,17 @@
                       ;; value) -- had no inferable result, kept :i64, and a
                       ;; caller's (let [state (normalize-selection state)] ..)
                       ;; passed that :i64 on to the next row.
-                      (let [fs (infer-results (infer-results (infer-absent-parameter-types fs)))
+                      ;;
+                      ;; Literals next (ADR 0353 floor
+                      ;; :merge-literal-reads-its-row): a literal whose item is
+                      ;; a field read off a row -- open-window's (merge
+                      ;; {:window/title (or title app-id id) ..} window) -- has
+                      ;; no type in the generic, where that field is not known,
+                      ;; so `type-literals` left it untyped there. In a
+                      ;; specialization the field is its record's: typed here,
+                      ;; the literal is the record its result is, and a caller
+                      ;; passing that result on to the next row passes a record.
+                      (let [fs (infer-results (infer-results (type-literals (infer-absent-parameter-types fs))))
                             table (signatures fs)]
                         (mapv (fn [{:keys [params param-types] :as f}]
                                 (update f :body rewrite (zipmap params param-types) table final?))
@@ -15062,6 +15074,28 @@
                      (map-literal-record-type (mapv (fn [[k _] t] [k t]) entries types))
                      (map second entries)))
           form))
+
+      ;; ADR 0353 floor :merge-literal-reads-its-row. A keyword literal one
+      ;; of whose values SPELLS a type -- open-window's :window/state
+      ;; :normal -- was lowered to its record at desugar, and each value that
+      ;; spells none took :i64 there (`keyword-map-literal-record-fields`).
+      ;; A field read off a row is such a value, and in a specialization,
+      ;; where the row is its record, it has the type of its record's field:
+      ;; that field is that type. Only a literal's own anonymous record, and
+      ;; only a field it defaulted: a value whose type is not :i64 at an :i64
+      ;; field was otherwise a mismatch, so nothing admitted moves.
+      (and (= 'record-new op) (record-type? (first args))
+           (= map-literal-record-namespace (namespace (second (first args))))
+           (= (count (nth (first args) 2)) (count (rest args))))
+      (let [fields (nth (first args) 2)
+            values (rest args)
+            fields' (mapv (fn [[k t] v]
+                            (let [u (when (= :i64 t) (literal-item-type v locals table))]
+                              (if (and (some? u) (not= :i64 u)) [k u] [k t])))
+                          fields values)]
+        (if (= fields' fields)
+          form
+          (list* 'record-new (map-literal-record-type fields') values)))
 
       (and (= 'vector-new op) (seq args))
       (let [types (mapv #(literal-item-type % locals table) args)]
