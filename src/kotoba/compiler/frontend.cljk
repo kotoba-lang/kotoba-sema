@@ -14987,7 +14987,7 @@
                       ;; Literals next (ADR 0353 floor
                       ;; :merge-literal-reads-its-row): a literal whose item is
                       ;; a field read off a row -- open-window's (merge
-                      ;; {:window/title (or title app-id id) ..} window) -- has
+                      ;; {:window/title title ..} (dissoc window ..)) -- has
                       ;; no type in the generic, where that field is not known,
                       ;; so `type-literals` left it untyped there. In a
                       ;; specialization the field is its record's: typed here,
