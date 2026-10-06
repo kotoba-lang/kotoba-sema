@@ -1056,7 +1056,7 @@
 ;; a `[:list T]`. There is deliberately no `typed-list-count`: `vector-count`
 ;; already does that work.
 (def canonical-list-operations
-  '#{typed-list-new typed-list-nth})
+  '#{typed-list-new typed-list-nth typed-list-conj})
 ;; `:bytes` is the language's byte string: a distinct type from `:vector-i64`
 ;; (a CBOR byte string and an array of small ints are different values, and
 ;; every checker here refuses one where the other is expected). The last three
@@ -3201,9 +3201,20 @@
 (defn- desugar-bool-expr [form]
   (desugar-result-expr :bool form))
 
+(declare desugar-map)
+
 (defn- desugar-expected-value [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
     (cond
+      ;; ADR 0353 floor :empty-vector-field: a vector literal where a
+      ;; `[:list T]` is expected -- `[]` at a list field -- is that list, each
+      ;; item typed against T (a map literal against a record T, as an absent
+      ;; field's is).
+      (and (canonical-list-type? result-type) (vector? form))
+      (let [t (second result-type)]
+        (list* 'typed-list-new result-type
+               (mapv #(if (and (map? %) (record-type? t)) (desugar-map % t) (desugar-expected-value t %))
+                     form)))
       (closure-result-type? result-type {})
       (desugar-result-expr result-type form)
       ;; ADR 0353 floor :function-values: a `fn` written where a `[:fn ...]`
@@ -5585,6 +5596,81 @@
   [k]
   (get-in *module-absent-fields* [:fields k]))
 
+;; ADR 0353 floor :empty-vector-field. A keyword key written `[]` somewhere in
+;; the module -- in a literal or in an `assoc` -- is a list field when the
+;; module's own source spells what it holds: the items `(update m k conj v ..)`
+;; conj's at that key, and the items of a vector literal written there. One
+;; spelled item type R other than `:i64` makes the field `[:list R]`, and `[]`
+;; there `(typed-list-new [:list R])`; spelled `:i64` items, or none, leave it
+;; the bounded `:vector-i64` it always was, its definition CID unmoved. Bound
+;; per analysis by `analyze-forms**`; `{}` everywhere else.
+;;
+;;   :fields     key -> [:list R]
+;;   :conflicts  key -> [T U], the keys whose items spell two types
+(def ^:dynamic ^:private *module-list-fields* {})
+
+(defn- module-list-fields
+  "`*module-list-fields*` for one module's source forms (floor
+  :empty-vector-field): every keyword key written `[]`, with the item types
+  the module's `conj`s and vector literals at that key spell
+  (`absent-field-spelled-type`), compared with `=`, never hashed."
+  [forms]
+  (let [empties (volatile! #{})
+        items (volatile! [])
+        note! (fn [k v]
+                (when (keyword? k)
+                  (when (vector? v)
+                    (if (empty? v)
+                      (vswap! empties conj k)
+                      (doseq [x v] (vswap! items conj [k x]))))))
+        walk (fn walk [form]
+               (cond
+                 (map? form)
+                 (do (when (every? keyword? (keys form))
+                       (doseq [[k v] form] (note! k v)))
+                     (doseq [[k v] form] (walk k) (walk v)))
+                 (seq? form)
+                 (do (when (and (= 'assoc (first form))
+                                (>= (count form) 4) (even? (count form)))
+                       (doseq [[k v] (partition 2 (drop 2 form))] (note! k v)))
+                     (when (and (= 'update (first form)) (>= (count form) 5)
+                                (keyword? (nth form 2)) (= 'conj (nth form 3)))
+                       (doseq [x (drop 4 form)] (vswap! items conj [(nth form 2) x])))
+                     (doseq [x form] (walk x)))
+                 (coll? form) (doseq [x form] (walk x))
+                 :else nil))]
+    (doseq [form forms] (walk form))
+    (let [types (reduce (fn [acc [k x]]
+                          (if-let [t (when (contains? @empties k) (absent-field-spelled-type x))]
+                            (update acc k (fn [ts] (if (some #(= t %) ts) ts (conj (or ts []) t))))
+                            acc))
+                        {} @items)]
+      (reduce-kv (fn [acc k ts]
+                   (cond
+                     (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
+                     (= :i64 (first ts)) acc
+                     :else (assoc-in acc [:fields k] [:list (first ts)])))
+                 {:fields {} :conflicts {}}
+                 types))))
+
+(defn- reject-list-field-conflict!
+  "A key the module writes `[]` at and conj's items of two types at: which one
+  the list holds is not this compiler's guess to make."
+  [k form]
+  (when-let [[t u] (get-in *module-list-fields* [:conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " is [] in this module, which makes it a list of what the module "
+                  "conj's at it, and this module conj's two types at it: "
+                  (map-literal-type-description t) " and "
+                  (map-literal-type-description u)
+                  "; a list holds one type")
+             form :kotoba.error/map-literal-value)))
+
+(defn- list-field-type
+  "The `[:list R]` the module's source says key `k` is, or `nil`."
+  [k]
+  (get-in *module-list-fields* [:fields k]))
+
 (declare desugar-map)
 
 (defn- desugar-absent-field-value
@@ -5626,7 +5712,9 @@
   [form entries]
   (let [typed (mapv (fn [[k v]]
                       (reject-absent-field-conflict! k form)
-                      [k (or (absent-field-type k) (map-literal-record-field-type v))])
+                      (reject-list-field-conflict! k form)
+                      [k (or (absent-field-type k) (list-field-type k)
+                             (map-literal-record-field-type v))])
                     entries)]
     ;; ADR 0353 floor :absence -- `nil` as a value SPELLS a record: it makes
     ;; that field an absent `[:option T]`, so a literal holding one is never
@@ -7593,10 +7681,13 @@
                     (apply list 'map-assoc (desugar-expr m)
                            (mapcat (fn [[k v]]
                                      (reject-absent-field-conflict! k form)
+                                     (reject-list-field-conflict! k form)
                                      [(desugar-expr k)
                                       (if-let [option-type (absent-field-type k)]
                                         (desugar-absent-field-value option-type v)
-                                        (desugar-expr v))])
+                                        (if-let [list-type (and (vector? v) (list-field-type k))]
+                                          (desugar-expected-value list-type v)
+                                          (desugar-expr v)))])
                                    (partition 2 kvs)))))
         ;; Kept on the authored head for the same reason `get` is: which
         ;; primitive answers depends on the receiver's type, which is not
@@ -7858,6 +7949,12 @@
             (list 'typed-list-nth (first args)
                   (desugar-expected-value (first args) (second args))
                   (desugar-expr (nth args 2))))
+        typed-list-conj
+        (do (when-not (= 3 (count args))
+              (reject! "typed-list-conj requires type, value, and item" form))
+            (list 'typed-list-conj (first args)
+                  (desugar-expected-value (first args) (second args))
+                  (desugar-expected-value (second (first args)) (nth args 2))))
         typed-set-count
         (do (when-not (= 2 (count args))
               (reject! "typed-set-count requires type and value" form))
@@ -9646,6 +9743,15 @@
             (reject! "typed list nth requires [:list item-type]" form))
           (validate-expr value locals functions (inc depth) budget)
           (validate-expr index locals functions (inc depth) budget))
+
+        (= op 'typed-list-conj)
+        (let [[type value item] args]
+          (when-not (= 3 (count args)) (reject! "typed list conj shape is invalid" form))
+          (validate-value-type! type)
+          (when-not (canonical-list-type? type)
+            (reject! "typed list conj requires [:list item-type]" form))
+          (validate-expr value locals functions (inc depth) budget)
+          (validate-expr item locals functions (inc depth) budget))
 
         (= op 'bytes-empty)
         (when-not (empty? args)
@@ -11586,6 +11692,13 @@
           (require-expression-type! (infer-expression-type value locals signatures) type value)
           (require-expression-type! (infer-expression-type index locals signatures) :i64 index)
           (second type))
+        typed-list-conj
+        (let [[type value item] args]
+          (validate-value-type! type)
+          (require-expression-type! (infer-expression-type value locals signatures) type value)
+          (require-expression-type! (infer-expression-type item locals signatures)
+                                    (second type) item)
+          type)
         bytes-empty :bytes
         bytes-count
         (let [[value] args]
@@ -13483,6 +13596,13 @@
 
             (and conj? (= :vector-f64 value-type))
             (reduce (fn [accumulated item] (list 'vector-f64-conj accumulated item))
+                    receiver items)
+
+            ;; ADR 0353 floor :empty-vector-field: `conj` onto a `[:list T]`
+            ;; appends at the end, as on the vector the source wrote. The item
+            ;; is checked against T by `typed-list-conj`'s own inference.
+            (and conj? (canonical-list-type? value-type))
+            (reduce (fn [accumulated item] (list 'typed-list-conj value-type accumulated item))
                     receiver items)
 
             :else
@@ -20286,7 +20406,8 @@
                        those names — each module was checked before link.)"
   [source-forms opts]
   (binding [*row-op-schemas* (volatile! nil)
-            *module-absent-fields* (module-absent-fields source-forms)]
+            *module-absent-fields* (module-absent-fields source-forms)
+            *module-list-fields* (module-list-fields source-forms)]
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
