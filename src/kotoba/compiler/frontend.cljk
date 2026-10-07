@@ -6104,28 +6104,79 @@
 
 (def ^:private string-from-i64-nat-helper
   "Unsigned decimal digits for string-from-i64 (Product Value ABI v1).
-  Uses only string-substring/string-concat already qualified for wasm."
+  Uses only string-substring/string-concat already qualified for wasm.
+
+  Flat, not recursive: a non-negative i64 is three chunks -- the top digit
+  and two of 9 digits -- printed zero-padded to 19 digits, then the suffix
+  that drops the leading zeros. Each concat and each width test is a
+  balanced tree. Three measured limits shape it (amu's
+  str-formats-an-integer-test, ADR 0353 floor :integer-str): the recursive
+  printer took a frame per digit, and the reference interpreter's 32 frames
+  ran out under 19 of them; a 19-deep concat or if chain ran out the same
+  way; and native lowering refuses a literal past 2^53 (10^18 measured), so
+  no literal here exceeds 10^9."
   {:name string-from-i64-nat-helper-name
    :params '[n]
    :param-types [:i64]
    :result :string
    :effects #{}
-   :body '(if (< n 10)
-            (string-substring "0123456789" n (+ n 1))
-            (string-concat
-             (__kotoba_string_from_i64_nat (quot n 10))
-             (string-substring "0123456789" (- n (* (quot n 10) 10))
-                               (+ (- n (* (quot n 10) 10)) 1))))})
+   :body (let [billion 1000000000
+               powers (vec (take 9 (iterate #(* 10 %) 1)))
+               balanced (fn balanced [f items]
+                          (if (= 1 (count items))
+                            (first items)
+                            (let [half (quot (count items) 2)]
+                              (f (balanced f (subvec items 0 half))
+                                 (balanced f (subvec items half))))))
+               concat-all (fn [items]
+                            (balanced (fn [a b] (list 'string-concat a b)) (vec items)))
+               digit (fn [chunk power]
+                       (let [q (list 'quot chunk power)
+                             d (list '- q (list '* (list 'quot q 10) 10))]
+                         (list 'string-substring "0123456789" d (list '+ d 1))))
+               nine (fn [chunk] (concat-all (map #(digit chunk %) (rseq powers))))
+               ;; digits of 0 <= chunk < 10^9, 0 counting as 1: a binary
+               ;; search over the thresholds 10 .. 10^8.
+               width (fn width [chunk lo hi]
+                       (if (= lo hi)
+                         lo
+                         (let [mid (quot (+ lo hi) 2)]
+                           (list 'if (list '< chunk (nth powers mid))
+                                 (width chunk lo mid)
+                                 (width chunk (inc mid) hi)))))]
+           (list 'let ['hi (list 'quot 'n billion)
+                       'c0 (list '- 'n (list '* 'hi billion))
+                       'c2 (list 'quot 'hi billion)
+                       'c1 (list '- 'hi (list '* 'c2 billion))]
+                 (list 'string-substring
+                       (list 'string-concat (digit 'c2 1)
+                             (list 'string-concat (nine 'c1) (nine 'c0)))
+                       (list '- 19
+                             (list 'if (list '< 0 'c2) 19
+                                   (list 'if (list '< 0 'c1)
+                                         (list '+ 9 (width 'c1 1 9))
+                                         (width 'c0 1 9))))
+                       19)))})
 
 (def ^:private string-from-i64-helper
-  "Signed decimal printer for string-from-i64 surface (Product Value ABI v1)."
+  "Signed decimal printer for string-from-i64 surface (Product Value ABI v1).
+  A negative n is printed as the magnitude of (quot n 10) and of its last
+  digit, never of (- 0 n): the most negative i64 has no positive, and its
+  negation wrapped to itself and asked string-substring for index
+  -9223372036854775808 (measured by amu's str-formats-an-integer-test)."
   {:name string-from-i64-helper-name
    :params '[n]
    :param-types [:i64]
    :result :string
    :effects #{}
    :body '(if (< n 0)
-            (string-concat "-" (__kotoba_string_from_i64_nat (- 0 n)))
+            (if (< -10 n)
+              (string-concat "-" (__kotoba_string_from_i64_nat (- 0 n)))
+              (string-concat
+               "-"
+               (string-concat
+                (__kotoba_string_from_i64_nat (- 0 (quot n 10)))
+                (__kotoba_string_from_i64_nat (- (* (quot n 10) 10) n)))))
             (__kotoba_string_from_i64_nat n))})
 
 (defn- uses-string-from-i64? [form]
@@ -8260,21 +8311,17 @@
                   x3)))
         ;; Product Value ABI v1: surface aliases that lower to ops already
         ;; qualified on every product backend (wasm / KIR / native string slice).
-        ;; `str` surface alias: 2+ parts lower to the nested `string-concat`
-        ;; already qualified on wasm/KIR/js, so the runtime cost is exactly the
-        ;; cost of hand-writing `(string-concat a b ...)` — no new backend
-        ;; lowering, no new fuel shape. A single string argument is identity.
-        ;; Non-string parts fail closed at type check (`string-concat`
-        ;; requires two :string operands) rather than silently coercing.
+        ;; `str` survives desugar with its parts desugared, and
+        ;; `rewrite-record-projection` resolves it by the parts' types (ADR
+        ;; 0353 floor :integer-str): a :string part is itself, an :i64 part
+        ;; is `string-from-i64`'s decimal digits, and the parts are the nested
+        ;; `string-concat` already qualified on wasm/KIR/js -- no new backend
+        ;; lowering, no new fuel shape. Any other part is refused by name in
+        ;; `infer-call-type-impl` rather than printed.
         str
         (do (when-not (pos? (count args))
               (reject! "str requires at least one argument" form))
-            (if (= 1 (count args))
-              (desugar-expr (first args))
-              (reduce (fn [acc part]
-                        (list 'string-concat acc part))
-                      (desugar-result-expr :string (first args))
-                      (mapv #(desugar-result-expr :string %) (rest args)))))
+            (cons 'str (mapv #(desugar-result-expr :string %) args)))
         string-length
         (do (when-not (= 1 (count args))
               (reject! "string-length requires one string" form))
@@ -10740,6 +10787,40 @@
       (reduce (fn [else kind] (list 'if (kind-test kind) true else))
               false (reverse (sort kinds))))))
 
+(def ^:dynamic ^:private *provisional-parameters*
+  "The parameters `infer-absent-parameter-types` is still refining: unannotated,
+  and :i64 only because nothing has refused that yet."
+  #{})
+
+(defn- str-part-type!
+  "ADR 0353 floor :integer-str: a part `str` formats is a :string or an
+  :i64. Anything else is refused by what it is -- there is no implicit
+  printing of an aggregate, and no coercion of anything else.
+
+  An unannotated parameter that is :i64 only provisionally is required to be
+  a :string, as it was when `str` was `string-concat`: refinement reads that
+  refusal and types the parameter :string. A string-building function's
+  text parameter (browser.text-edit's insert-text) stays a string; an :i64
+  `str` formats is one its source types -- a field, a literal, arithmetic,
+  an annotated parameter."
+  [type part]
+  (when (and (= :i64 type) (contains? *provisional-parameters* part))
+    (require-expression-type! type :string part))
+  (when-not (contains? #{:string :i64} type)
+    (reject! (str "str of "
+                  (cond
+                    (and (vector? type) (= :record (first type))) "a record"
+                    (or (contains? #{:vector-i64 :vector-f64} type)
+                        (and (vector? type) (contains? #{:vector :list} (first type))))
+                    "a vector"
+                    (or (= :option-i64 type)
+                        (and (vector? type) (= :option (first type))))
+                    "an option"
+                    :else (pr-str type))
+                  " is refused: str formats a string or an i64, and an aggregate "
+                  "is not printed implicitly")
+             part :kotoba.error/str-part-type)))
+
 (defn- infer-call-type-impl [op args locals signatures]
   (let [types (mapv #(infer-expression-type % locals signatures) args)]
     (cond
@@ -11077,6 +11158,14 @@
 
       (= op 'string-from-i64)
       (do (require-expression-type! (first types) :i64 (first args)) :string)
+
+      ;; ADR 0353 floor :integer-str: `str` formats a :string or an :i64
+      ;; part; `rewrite-record-projection` writes it as `string-concat` and
+      ;; `string-from-i64`. An aggregate is not printed implicitly.
+      (= op 'str)
+      (do (doseq [[arg type] (map vector args types)]
+            (str-part-type! type arg))
+          :string)
 
       ;; T4.2: desugars away; defensive typing if seen pre-desugar.
       (= op 'string-join)
@@ -14084,6 +14173,22 @@
                           (map #(rewrite-record-projection % locals signatures schemas) args))
           {:kotoba.diag/source-head '=})
 
+        ;; ADR 0353 floor :integer-str: `str` is the nested `string-concat` of
+        ;; its parts, an :i64 part its decimal digits (`string-from-i64`'s
+        ;; printer, injected after this pass). A part of any other type was
+        ;; refused by name in `infer-call-type-impl`.
+        (= op 'str)
+        (let [parts (mapv (fn [arg]
+                            (let [part (rewrite-record-projection arg locals signatures schemas)
+                                  type (infer-expression-type part locals signatures)]
+                              (str-part-type! type part)
+                              (if (= :i64 type)
+                                (list string-from-i64-helper-name part)
+                                part)))
+                          args)]
+          (reduce (fn [acc part] (list 'string-concat acc part))
+                  (first parts) (rest parts)))
+
         ;; `true?` / `integer?` (adr-2609242330): see
         ;; `library-predicate-answer!`. A module's own
         ;; function of the same name wins, as it does in inference.
@@ -15233,7 +15338,12 @@
                               (:param-types-inferred function))]
                       (when (seq param-types-inferred)
                         (try
-                          (do (infer-expression-type body (zipmap params param-types) table)
+                          (do (binding [*provisional-parameters*
+                                        (set (keep (fn [index]
+                                                     (when (= :i64 (nth param-types index))
+                                                       (nth params index)))
+                                                   param-types-inferred))]
+                                (infer-expression-type body (zipmap params param-types) table))
                               nil)
                           (catch #?(:clj Exception :cljs :default) error
                             (let [{:keys [form span]
@@ -21118,6 +21228,12 @@
         parsed (thread-state-abilities parsed state-clones @*state-handlers*)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
+        ;; floor :integer-str: the rewrite above writes an :i64 `str` part
+        ;; as a `string-from-i64` printer call.
+        parsed (cond-> parsed
+                 (and (first-truthy #(uses-string-from-i64? (:body %)) parsed)
+                      (not (first-truthy #(= string-from-i64-helper-name (:name %)) parsed)))
+                 (into [string-from-i64-nat-helper string-from-i64-helper]))
         parsed (mapv #(update % :body retire-absence-markers) parsed)
         ;; `option-or` intentionally survives syntactic desugaring until the
         ;; rewrite above can infer its payload descriptor from locals and
