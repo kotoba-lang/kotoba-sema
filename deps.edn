@@ -66,7 +66,7 @@
          ;; (the suite could not load on the pinned interpreter).
          ;; Opaque :js-value leaf contract: JS preserves identity without
          ;; traversing the host value; canonical set items/map keys refuse it.
-         :git/sha "576cfb0995fca56e759947676ce751e2cf75da32"}}
+         :git/sha "a725f1c5fcbc890bfba9d9dfe4d6fa2d6e7a2a3f"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner

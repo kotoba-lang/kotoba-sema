@@ -53,3 +53,46 @@
     (is (some? (refusal (str "(ns host.predicates (:export [observe])) "
                             "(defn observe [v :" type "] :bool " body ")")))))
   (is (some? (refusal "(ns host.predicates (:export [observe])) (defn observe [v :js-value] :js-value (js-nullish? v))"))))
+
+(deftest branding-and-injection-retain-explicit-source-types
+  (doseq [[op input result] [["js-typeof" :js-value :string]
+                            ["js-array?" :js-value :bool]
+                            ["js-bool-value" :bool :js-value]]]
+    (let [hir (sema/analyze (str "(ns host.branding (:export [observe])) "
+                               "(defn observe [v " input "] " result " (" op " v))"))
+          function (first (:functions hir))]
+      (is (= :kotoba.hir/v3 (:format hir)))
+      (is (= result (:result function)))
+      (is (= [input] (:param-types function)))
+      (is (= (symbol op) (first (:body function)))))))
+
+(deftest branding-and-injection-refuse-incorrect-types-arities-and-results
+  (doseq [[op input result] [["js-typeof" :js-value :string]
+                            ["js-array?" :js-value :bool]
+                            ["js-bool-value" :bool :js-value]]]
+    (doseq [args ["" "v v"]]
+      (is (some? (refusal (str "(ns host.branding (:export [observe])) "
+                              "(defn observe [v " input "] " result " (" op " " args "))")))))
+    (doseq [wrong (remove #{input} [:i64 :bool :string :js-value])]
+      (is (some? (refusal (str "(ns host.branding (:export [observe])) "
+                              "(defn observe [v " wrong "] " result " (" op " v))")))))
+    (is (some? (refusal (str "(ns host.branding (:export [observe])) "
+                            "(defn observe [v " input "] :i64 (" op " v))"))))))
+
+(deftest branding-composes-with-opaque-conditional-results
+  (let [hir (sema/analyze "(ns host.branding (:export [plain]))
+                           (defn plain [v :js-value] :js-value
+                             (if (js-truthy? v)
+                               (js-bool-value (if (string=? (js-typeof v) \"object\")
+                                                (not (js-array? v)) false)) v))")
+        function (first (:functions hir))
+        heads (set (filter symbol? (tree-seq coll? seq (:body function))))]
+    (is (= :js-value (:result function)))
+    (is (= [:js-value] (:param-types function)))
+    (is (= 'if (first (:body function))))
+    (is (every? heads '[js-typeof js-array? js-bool-value]))))
+
+(deftest branding-heads-remain-reserved-source-operations
+  (doseq [op ["js-typeof" "js-array?" "js-bool-value"]]
+    (is (re-find #"reserved function name"
+                 (or (refusal (str "(defn " op " [v :i64] :i64 v) (defn main [] :i64 1)")) "")))))
