@@ -123,3 +123,33 @@ operation and normalized dynamic array observation. The maintained source
 checks remain 15 tests / 105 assertions; final compiler consumers qualify
 separately. Restricted JS instance fuel is not a public library lifetime
 compatibility guarantee.
+
+
+## Typed guest closures with opaque JS values
+
+A typed guest closure may accept and return `:js-value`, including bounded
+aggregate descriptors containing that leaf. The dispatcher keeps its existing
+internal i64 closure handle and typed argument/result ABI; opaque JS references
+are neither cast to i64 nor traversed. The unknown-dispatcher's unreachable
+result inhabitant uses the already admitted zero-argument `js-undefined`.
+
+Captures retain the existing i64 pair-chain ABI. This change does not admit an
+opaque host function as a guest closure, JS property access, or opaque captures.
+Wrong arguments/results and callable/linear-resource restrictions still refuse.
+JS target admission remains separate from frontend analysis; non-JS compilation
+must reject opaque JS signatures as before.
+
+Published Osaho main 9d033b3e07fe32195e2c3ec93aa6d4a0645a848e fixes a preceding
+interpreter bug: recognizing a trampoline must not read a Proxy result's CLJS
+protocol properties. The maintained bootstrap checks now include five independent
+closure tests / 28 assertions; the selected combined suite passes 20 / 133 with
+that exact runtime pin. Actual Script ESM independently passes 45 comparisons
+for 15 opaque values with zero property reads. These are typed guest closure
+checks, not a host callback bridge, browser-host/self-host result or full Harness
+migration. System One's public status remains 503; this is operator-authored.
+
+Additional Node closure controls were measured on exact baseline 88fb953 and
+candidate: the same two historical rendering-digest expectations and one stored
+record-closure refusal expectation fail on both. Their expected values were not
+changed to hide the failures. The maintained selected tests and repository CI
+are distinct qualification scopes.

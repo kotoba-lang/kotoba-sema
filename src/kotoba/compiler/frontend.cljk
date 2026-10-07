@@ -2925,7 +2925,7 @@
 (def ^:dynamic *required-closure-dispatchers* nil)
 
 (def ^:private closure-flat-result-types
-  #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document})
+  #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document :js-value})
 
 (defn- canonical-closure-result-type
   "Resolve a top-level schema reference before it becomes dispatcher identity.
@@ -2952,6 +2952,7 @@
     (= :vector-i64 type) '(vector-new)
     (= :vector-f64 type) '(vector-f64-new)
     (= :document type) '(document-null)
+    (= :js-value type) '(js-undefined)
     (= :option-i64 type) '(option-none)
     (= :result-i64 type) '(result-ok 0)
     (= :string-index type) '(string-index-new)
