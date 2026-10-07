@@ -153,3 +153,38 @@ candidate: the same two historical rendering-digest expectations and one stored
 record-closure refusal expectation fail on both. Their expected values were not
 changed to hide the failures. The maintained selected tests and repository CI
 are distinct qualification scopes.
+
+
+### Typed opaque guest captures (bootstrap qualification)
+
+A lifted guest function may capture an explicitly typed `:js-value` leaf.
+Sema carries that capture's type into the helper, stores it through
+`js-capture-new`, and projects it with `js-capture-value` in the matching
+closure dispatcher. Integer capture words, function IDs and chain tails keep
+the existing ABI. Capture refinement recognizes mixed chains, including a
+captured typed guest function. Five captures, helper arity limits and the
+existing constructor fuel/cells ledger remain enforced.
+
+On 2026-10-08 the maintained Node/nbb source suite passed 28 tests / 167
+assertions using published Osaho PR103 at
+`d1c27ed446745f9db7d4b20c6531e108e6949a9c`, with forbidden JVM launchers shadowed.
+Eight new tests / 34 assertions cover opaque identity, mixed slots, captured
+guest functions, typed arguments, nested captures, five-capture bounds,
+allocation budgets, bad results and refused raw host invocation. The former
+opaque-capture refusal control was deliberately replaced by the still-refused
+record-with-JS capture control; supporting opaque leaves is the new behavior.
+
+Three unchanged all-integer capture programs produce byte-identical complete
+HIR against published baseline621e89b. Actual source was also lowered and
+emitted through published Script PR111 (`ed36af5f71be11c2e688098653df516e684b1150`):
+six functions / 14 opaque values / 84 identity comparisons, zero property reads,
+three budget checks and 2000 calls passed in pinned offline Node v24.21.0.
+This was a direct candidate pipeline, not normal Amu dependency closure.
+
+Opaque-containing record captures, raw host callbacks, persistent escaping
+closure instances and host callable adaptation remain separate prerequisites.
+Restricted guest authority/default budgets are unchanged. These are bootstrap
+and offline Node results, not browser-host or native selfhost qualification.
+Operator-authored; public System One remained HTTP503. Earlier historical Node
+closure-control failures remain documented above and were not hidden by changing
+their assertions.

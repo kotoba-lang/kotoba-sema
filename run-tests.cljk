@@ -39,6 +39,7 @@
             [kotoba.compiler.empty-library-test]
             [kotoba.compiler.js-value-type-test]
             [kotoba.compiler.js-closure-test]
+            [kotoba.compiler.js-capture-test]
             ;; a defn / defn- / fn body of several forms is one `do`, as let's
             ;; is; the implicit and explicit spellings are one analysis; empty
             ;; bodies, loop, try and protocol methods keep their refusals
@@ -225,6 +226,7 @@
              'kotoba.compiler.empty-library-test
              'kotoba.compiler.js-value-type-test
              'kotoba.compiler.js-closure-test
+             'kotoba.compiler.js-capture-test
              'kotoba.compiler.defn-body-sequences-test
              'kotoba.compiler.some-name-collision-test
              'kotoba.compiler.case-uniqueness-test

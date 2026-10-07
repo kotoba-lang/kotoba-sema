@@ -1041,6 +1041,7 @@
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
   '{js-undefined 0 js-nullish? 1 js-truthy? 1 js-strict-equal? 2 js-typeof 1 js-array? 1 js-bool-value 1
+    js-capture-new 2 js-capture-value 1
     bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
     result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2})
 (def parametric-result-operations
@@ -3598,6 +3599,10 @@
                                         (map (fn [{:keys [params body]}]
                                                (form-free-symbols body (set params)))
                                              lowered))))
+          ;; Opaque leaves are stored in typed arena cells. Other captures
+          ;; retain the existing integer ABI and existing admission/refusals.
+          capture-types (mapv #(if (= :js-value (get *local-types* %)) :js-value :i64) captures)
+          opaque-captures? (some #{:js-value} capture-types)
           id (vswap! *lambda-counter* inc)]
       (doseq [{:keys [params]} lowered]
         (when (> (+ (count captures) (count params)) max-parameters)
@@ -3612,13 +3617,14 @@
                                            :result :i64 :result-inferred? true
                                            :effects #{} :body body
                                            :lazy-thunk? *lifting-lazy-thunk?*}
-                                    ;; captures stay the i64 pair-chain words
-                                    ;; they are read out of; only the clause's
-                                    ;; own parameters carry the contract's types
-                                    contract-params
+                                    ;; Integer captures keep their word ABI; opaque
+                                    ;; captures are projected from typed cells and
+                                    ;; arrive at the helper as raw JS values.
+                                    (or contract-params opaque-captures?)
                                     (assoc :param-types
-                                           (into (vec (repeat (count captures) :i64))
-                                                 contract-params)))}
+                                           (into capture-types
+                                                 (or contract-params (repeat (count params) :i64)))))}
+                           opaque-captures? (assoc :capture-types capture-types)
                            contract-result (assoc :contract-result contract-result)
                            contract-params (assoc :parameter-types contract-params)
                            ;; ADR 0353 floor :function-effect-rows: the row the
@@ -3628,11 +3634,15 @@
                            (callable-effect-row expected-contract)
                            (assoc :effect-row (callable-effect-row expected-contract)))))
                      lowered)))
-      ;; Closure captures are always the internal i64 pair-chain ABI, even
-      ;; when the lambda's result is a canonical `[:list T]` value.
+      ;; Closure IDs and chain tails retain the internal i64 pair-chain ABI.
+      ;; Only an explicitly typed opaque leaf changes its cell/projection.
       (list 'pair id
             (binding [*contextual-closure-result-type* nil]
-              (desugar-list captures form))))))
+              (if opaque-captures?
+                (reduce (fn [tail [capture type]]
+                          (list (if (= :js-value type) 'js-capture-new 'pair) capture tail))
+                        0 (reverse (map vector captures capture-types)))
+                (desugar-list captures form)))))))
 
 (defn- lambda-dispatchers [lambda-infos required-dispatchers]
   (let [requested (into #{}
@@ -3679,11 +3689,12 @@
                           (list 'if '(= (quot 1 0) 0) default default)
                           '(quot 1 0)))
              body (reduce
-                   (fn [fallback {:keys [id captures helper]}]
+                   (fn [fallback {:keys [id captures capture-types helper]}]
                      (let [capture-chain (list 'pair-second closure)
                            capture-values
                            (map-indexed (fn [index _]
-                                          (list 'pair-first
+                                          (list (if (= :js-value (nth capture-types index nil))
+                                                  'js-capture-value 'pair-first)
                                                 (nth-pair-second capture-chain index)))
                                         captures)]
                        (list 'if (list '= (list 'pair-first closure) id)
@@ -10903,6 +10914,13 @@
 
       (= op 'js-undefined) :js-value
 
+      (= op 'js-capture-new)
+      (do (require-expression-type! (first types) :js-value (first args))
+          (require-expression-type! (second types) :i64 (second args)) :i64)
+
+      (= op 'js-capture-value)
+      (do (require-expression-type! (first types) :i64 (first args)) :js-value)
+
       (= op 'bool-not)
       (do (require-expression-type! (first types) :bool (first args)) :bool)
 
@@ -17083,7 +17101,7 @@
               (loop [chain form values []]
                 (cond
                   (and (kotoba-integer? chain) (zero? chain)) values
-                  (and (seq? chain) (= 'pair (first chain)) (= 3 (count chain)))
+                  (and (seq? chain) (contains? '#{pair js-capture-new} (first chain)) (= 3 (count chain)))
                   (recur (nth chain 2) (conj values (second chain)))
                   :else nil)))
             (closure-literal? [form]

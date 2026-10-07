@@ -67,7 +67,9 @@
          ;; Opaque :js-value leaf contract: JS preserves identity without
          ;; traversing the host value; canonical set items/map keys refuse it.
          ;; Weak identity separation of JS values from trampoline controls.
-         :git/sha "9d033b3e07fe32195e2c3ec93aa6d4a0645a848e"}}
+         ;; Published PR103 typed opaque capture cells, allocation ledger and
+         ;; integer projection refusal; closure word/tail ABI remains unchanged.
+         :git/sha "d1c27ed446745f9db7d4b20c6531e108e6949a9c"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner
