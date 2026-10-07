@@ -109,3 +109,10 @@ labels are inert names, so a field named `:js-value` with type `:string` is
 ordinary ordered data. JS identity preservation is an emitter/runtime property,
 not evidence supplied by semantic analysis alone; retained host graphs have
 embedder-owned resource and lifetime costs.
+
+`(js-undefined)` is a reserved zero-arity source operation returning
+`:js-value`. The retained HIR head has no operands. Extra arguments, scalar
+result mismatches and declared function-name capture are refused. Arbitrary
+opaque JS literals remain unavailable. Runtime/emitter pins and Mithril
+module source admission qualify separately; this operator-authored extension
+is not a new System One model evaluation.
