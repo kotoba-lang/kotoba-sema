@@ -5674,6 +5674,11 @@
 ;;   :conflicts  key -> [T U], the keys whose items spell two types
 ;;   :open       the keys written `[]` whose items spell no type but `:i64`:
 ;;               floor :list-item-from-expression types them by inference
+;;   :record-lists  the keys a vector literal of keyword-keyed map literals is
+;;               written at: floor :record-list-field-literal, the [:list R]
+;;               that literal types, which a parameter conj'd there joins
+;;   :record-conflicts  key -> [R U]: a record-lists key whose list is
+;;               [:list R] where the module conj's an inferred U /= R
 (def ^:dynamic ^:private *module-list-fields* {})
 
 ;; ADR 0353 floor :list-item-from-expression. What the module's source does not
@@ -5701,6 +5706,7 @@
   (let [empties (volatile! #{})
         items (volatile! [])
         literal-i64 (volatile! #{})
+        record-lists (volatile! #{})
         note-item! (fn [k x]
                      (vswap! items conj [k x])
                      (when (integer? x) (vswap! literal-i64 conj k)))
@@ -5709,7 +5715,9 @@
                   (when (vector? v)
                     (if (empty? v)
                       (vswap! empties conj k)
-                      (doseq [x v] (note-item! k x))))))
+                      (do (when (some #(and (map? %) (seq %) (every? keyword? (keys %))) v)
+                            (vswap! record-lists conj k))
+                          (doseq [x v] (note-item! k x)))))))
         walk (fn walk [form]
                (cond
                  (map? form)
@@ -5752,7 +5760,19 @@
                          (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
                          (= :i64 (first ts)) acc
                          :else (assoc-in acc [:fields k] [:list (first ts)])))))
-                 (assoc spelled :open open)
+                 (assoc spelled
+                        :open open
+                        :record-lists @record-lists
+                        ;; floor :record-list-field-literal: a record-lists key
+                        ;; holds the R its literal types, noted beside every
+                        ;; type the module conj's there; a second type is the
+                        ;; conflict.
+                        :record-conflicts
+                        (into {}
+                              (keep (fn [k]
+                                      (let [ts (distinct (get *module-list-inferred* k))]
+                                        (when (< 1 (count ts)) [k (vec (take 2 ts))]))))
+                              @record-lists))
                  *module-list-inferred*))))
 
 (defn- list-field-read-key
@@ -5769,13 +5789,22 @@
 (defn- note-list-item-type!
   "floor :list-item-from-expression: an item of type T is conj'd onto the field
   RECEIVER reads. Noted when that is an open `[]` key and T is known and not
-  `:i64`."
-  [receiver t]
-  (when-let [notes *list-item-notes*]
-    (when-let [k (list-field-read-key receiver)]
-      (when (and (some? t) (not= :i64 t)
-                 (contains? (:open *module-list-fields*) k))
-        (vswap! notes conj [k t])))))
+  `:i64`. Floor :record-list-field-literal: onto a record-lists key T is
+  noted, and where its list is known to be LIST-TYPE `[:list R]`, R before
+  it, so a T /= R is a second type at the key (`:record-conflicts`)."
+  ([receiver t] (note-list-item-type! receiver t nil))
+  ([receiver t list-type]
+   (when-let [notes *list-item-notes*]
+     (when-let [k (list-field-read-key receiver)]
+       (when (and (some? t) (not= :i64 t))
+         (cond
+           (contains? (:open *module-list-fields*) k)
+           (vswap! notes conj [k t])
+
+           (contains? (:record-lists *module-list-fields*) k)
+           (if (canonical-list-type? list-type)
+             (vswap! notes conj [k (second list-type)] [k t])
+             (vswap! notes conj [k t]))))))))
 
 (defn- reject-list-field-conflict!
   "A key the module writes `[]` at and conj's items of two types at: which one
@@ -5788,6 +5817,13 @@
                   (map-literal-type-description t) " and "
                   (map-literal-type-description u)
                   "; a list holds one type")
+             form :kotoba.error/map-literal-value))
+  (when-let [[t u] (get-in *module-list-fields* [:record-conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " holds a vector of " (map-literal-type-description t)
+                  " in this module, which makes it a list of that record, and this module conj's "
+                  (map-literal-type-description u)
+                  " at it; a list holds one type")
              form :kotoba.error/map-literal-value)))
 
 (defn- list-field-type
@@ -13852,7 +13888,8 @@
             (and conj? (canonical-list-type? value-type))
             (do (doseq [item items]
                   (note-list-item-type! (first args) (try (infer-expression-type item locals signatures)
-                                                          (catch #?(:clj Exception :cljs :default) _ nil))))
+                                                          (catch #?(:clj Exception :cljs :default) _ nil))
+                                        value-type))
                 (reduce (fn [accumulated item] (list 'typed-list-conj value-type accumulated item))
                         receiver items))
 
@@ -14793,13 +14830,19 @@
 
 (defn- row-list-item?
   "Is PARAM an item `(conj (record-get m k) .. PARAM ..)` conj's onto an open
-  `[]` key k of the module (floor :list-item-from-expression)?"
+  `[]` key k of the module (floor :list-item-from-expression), or onto a key a
+  vector literal of records is written at (floor :record-list-field-literal:
+  browser.surface's {.. :surface/windows [{:window/id \"w1\" ..}]} beside
+  open-window's conj of its window)? The item is then checked against the
+  list's R by `typed-list-conj`."
   [param form]
   (boolean
    (first-truthy
     (fn [x]
       (and (seq? x) (= 'conj (first x))
-           (contains? (:open *module-list-fields*) (list-field-read-key (second x)))
+           (let [k (list-field-read-key (second x))]
+             (or (contains? (:open *module-list-fields*) k)
+                 (contains? (:record-lists *module-list-fields*) k)))
            (first-truthy #{param} (drop 2 x))))
     (tree-seq coll? seq form))))
 
