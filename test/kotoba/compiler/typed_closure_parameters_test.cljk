@@ -11,9 +11,9 @@
   exactly that sentence). That was IMPLEMENTATION STATE, not a property: a
   dispatcher is an ordinary KIR function with a typed signature and the
   helper a `fn` lowers to is another, so an argument crosses a closure call
-  exactly as it crosses a direct call. What the rule keeps out is what the
-  result side keeps out -- a callable and a linear resource -- and nothing
-  else; the two sides share one predicate, so they cannot drift.
+  exactly as it crosses a direct call. This first-order widening kept callables and linear resources out.
+  Higher-order contracts now retain nested callable refinements on i64
+  words; linear resources remain refused.
 
   Selfhost measurements 16-19 (2026-09-12): `clojure.walk`'s twin could not
   offer `walk` / `prewalk` / `postwalk` because `(defn apply-doc [f [:fn
@@ -29,8 +29,8 @@
     - the all-`:i64` contract program (amu callable_values_test's
       `public-callable-contracts-select-arity-and-result-family`) has the
       same HIR and KIR digests it had at 820e85d1 -- the control;
-    - a callable-typed parameter and a linear parameter are refused by the
-      sentence that names the rule; a type outside the result profile is
+    - a nested callable-typed parameter runs without erasing its contract;
+      a linear parameter stays refused; a type outside the result profile is
       refused by the sentence that names the predicate; a wrong argument at
       the call site is refused by the ordinary type-mismatch sentence."
   (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
@@ -215,16 +215,16 @@
 
 ;; --- negatives: refused by the sentence that names the rule ----------------
 
-(deftest a-callable-typed-parameter-stays-refused
-  (let [{:keys [message code]} (refusal "(defn bad [f [:fn [[[:fn [[:i64] :i64]]] :i64]]] :i64 0)
-                                         (defn main [] :i64 0)")]
-    (is (= "callable parameter types cannot be callable or linear resources" message))
-    (is (= :kotoba.error/callable-parameter-type code))))
+(deftest a-callable-typed-parameter-retains-its-contract-on-a-word-slot
+  (is (= 42 (w (answer "(defn apply-higher [f [:fn [[[:fn [[:i64] :i64]]] :i64]] g [:fn [[:i64] :i64]]] :i64 (f g))
+                         (defn main [] :i64 (apply-higher (fn [g] (g 41)) (fn [x] (+ x 1))))"))))
+  (is (nil? (refusal "(defn ok [f [:fn [[[:fn [[:i64] :i64]]] :i64]]] :i64 0)
+                      (defn main [] :i64 0)"))))
 
 (deftest a-linear-parameter-stays-refused
   (let [{:keys [message code]} (refusal "(defn bad [f [:fn [[[:stream :bytes]] :i64]]] :i64 0)
                                          (defn main [] :i64 0)")]
-    (is (= "callable parameter types cannot be callable or linear resources" message))
+    (is (= "callable parameter types cannot be linear resources" message))
     (is (= :kotoba.error/callable-parameter-type code))))
 
 (deftest a-parameter-type-outside-the-result-profile-is-refused-by-the-predicate
