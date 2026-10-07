@@ -76,3 +76,8 @@ kbb -M:test
 - Owns source/schema diagnostics and source-to-HIR elaboration.
 - Produces `kotoba-hir`; does not lower HIR to KIR.
 - Does not orchestrate compilation or emit machine code.
+
+Explicit `(:export [])` namespace libraries may have no functions or only
+private/internal functions. They have no synthesized entry or export.
+Unmarked empty source and invalid public export/entry declarations remain
+refused. This source/HIR stage does not qualify backend compilation.

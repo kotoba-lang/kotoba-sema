@@ -36,6 +36,7 @@
             ;; callable and linear parameters refused by name; the all-i64
             ;; contract program keeps its digests
             [kotoba.compiler.typed-closure-parameters-test]
+            [kotoba.compiler.empty-library-test]
             ;; a defn / defn- / fn body of several forms is one `do`, as let's
             ;; is; the implicit and explicit spellings are one analysis; empty
             ;; bodies, loop, try and protocol methods keep their refusals
@@ -219,6 +220,7 @@
              'kotoba.compiler.expression-absence-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
+             'kotoba.compiler.empty-library-test
              'kotoba.compiler.defn-body-sequences-test
              'kotoba.compiler.some-name-collision-test
              'kotoba.compiler.case-uniqueness-test
