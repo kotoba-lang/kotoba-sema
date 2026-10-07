@@ -1534,33 +1534,24 @@
                (reject! (str "a [:fn ...] effect row names an unregistered capability: " kw)
                         type :kotoba.error/callable-effect-row)))))
        (doseq [[parameter-types result-type] clauses]
-         ;; A parameter type is admitted exactly when it is admitted as a
-         ;; closure RESULT type -- one predicate, `closure-result-type?`, so
-         ;; the two sides cannot drift (2026-09-12, adr-2609111900;
-         ;; `lang/guest-grammar.edn` `:callable-type` `:parameter-types`).
-         ;; Until then the sentence here was `callable parameter types
-         ;; currently require the i64 closure ABI`, and that was
-         ;; IMPLEMENTATION STATE: a dispatcher is an ordinary KIR function
-         ;; with a typed signature, and the helper a lambda lowers to is
-         ;; another, so an argument of any admitted value type crosses a
-         ;; closure call exactly as it crosses a direct call. What the rule
-         ;; keeps out is what the result side keeps out: a callable (no
-         ;; closure-typed word exists) and a linear resource (no dispatcher
-         ;; may duplicate or drop it), by the same sentence shape.
+         ;; Logical callable contracts travel as refined i64 closure words.
+         ;; Parameters and results admit the same dispatcher profile; nested
+         ;; contracts retain their type/effect rows separately from this ABI.
+         ;; Linear resources stay refused: a dispatcher may duplicate/drop
+         ;; ordinary values, but cannot do that to a linear resource.
          (doseq [parameter-type parameter-types]
-           (when (or (callable-type? parameter-type)
-                     (linear-resource-type? parameter-type))
-             (reject! "callable parameter types cannot be callable or linear resources"
+           (when (linear-resource-type? parameter-type)
+             (reject! "callable parameter types cannot be linear resources"
                       type :kotoba.error/callable-parameter-type))
            (validate-value-type! parameter-type (inc depth) nodes)
-           (when-not (closure-result-type? parameter-type {})
+           (when-not (or (callable-type? parameter-type) (closure-result-type? parameter-type {}))
              (reject! "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
                       type :kotoba.error/callable-parameter-type)))
-         (when (or (callable-type? result-type) (linear-resource-type? result-type))
-           (reject! "callable results cannot be callable or linear resources"
+         (when (linear-resource-type? result-type)
+           (reject! "callable results cannot be linear resources"
                     type :kotoba.error/callable-result-type))
          (validate-value-type! result-type (inc depth) nodes)
-         (when-not (closure-result-type? result-type {})
+         (when-not (or (callable-type? result-type) (closure-result-type? result-type {}))
            (reject! "callable result type is outside the admitted dispatcher profile"
                     type :kotoba.error/callable-result-type)))
        type)
@@ -2929,6 +2920,9 @@
 (def ^:private closure-flat-result-types
   #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document :js-value})
 
+(defn- closure-word-type [type]
+  (if (callable-type? type) :i64 type))
+
 (defn- canonical-closure-result-type
   "Resolve a top-level schema reference before it becomes dispatcher identity.
   Nested references remain closed schema edges and are not recursively expanded."
@@ -3061,7 +3055,7 @@
   ([result-type arity parameter-types]
    (invoke-dispatcher-name result-type arity parameter-types nil))
   ([result-type arity parameter-types row]
-   (when-not (closure-result-type? result-type {})
+   (when-not (or (callable-type? result-type) (closure-result-type? result-type {}))
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
    (if row
@@ -3146,11 +3140,22 @@
 (defn- expression-callable-contract [form]
   (cond
     (symbol? form) (get *lexical-callable-contracts* form)
-    (seq? form) (or (get *function-callable-result-contracts*
-                         [(first form) (dec (count form))])
-                    (get *function-callable-result-contracts* (first form))
-                    (rowed-field-contract form))
+    (seq? form)
+    (let [[op & args] form]
+      (or (get *function-callable-result-contracts* [op (count args)])
+          (get *function-callable-result-contracts* op)
+          (when-let [contract (get *lexical-callable-contracts* op)]
+            (let [result (second (callable-clause-for-arity contract (count args) form))]
+              (when (callable-type? result) result)))
+          (rowed-field-contract form)))
     :else nil))
+
+(defn- require-matching-callable-contract! [expected form]
+  (when-let [actual (expression-callable-contract form)]
+    (when (not= expected actual)
+      (reject! "callable contract does not match the expected contract"
+               {:expected expected :actual actual :expression form}
+               :kotoba.error/callable-contract))))
 
 (defn- opaque-expression? [form]
   ;; Capture storage must be chosen before lifting, ahead of full type checking.
@@ -3215,11 +3220,17 @@
   operands are desugared without inheriting it."
   [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
-    (when-not (closure-result-type? result-type {})
+    (when-not (or (callable-type? result-type) (closure-result-type? result-type {}))
       (reject! "closure result type is outside the admitted dispatcher profile"
                result-type))
-    (binding [*contextual-closure-result-type* result-type]
-      (desugar-expr form))))
+    (if (callable-type? result-type)
+      (do
+        (require-matching-callable-contract! result-type form)
+        (binding [*expected-callable-contract* result-type
+                  *contextual-closure-result-type* nil]
+          (desugar-expr form)))
+      (binding [*contextual-closure-result-type* result-type]
+        (desugar-expr form)))))
 
 (defn- desugar-vector-i64-source
   "Desugar a T4.5 map/filter/reduce collection in the vector-i64 profile.
@@ -3262,6 +3273,11 @@
 (defn- desugar-expected-value [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
     (cond
+      (callable-type? result-type)
+      (do
+        (require-matching-callable-contract! result-type form)
+        (binding [*expected-callable-contract* result-type]
+          (desugar-expr form)))
       ;; ADR 0353 floor :empty-vector-field: a vector literal where a
       ;; `[:list T]` is expected -- `[]` at a list field -- is that list, each
       ;; item typed against T (a map literal against a record T, as an absent
@@ -3273,14 +3289,6 @@
                      form)))
       (closure-result-type? result-type {})
       (desugar-result-expr result-type form)
-      ;; ADR 0353 floor :function-values: a `fn` written where a `[:fn ...]`
-      ;; record field is declared is lifted under that contract -- its
-      ;; parameters take the clause's types and it joins that dispatcher
-      ;; family, exactly as a `fn` argument in a contract-typed parameter
-      ;; position does (`desugar-ordinary-call`).
-      (and (callable-type? result-type) (seq? form) (= 'fn (first form)))
-      (binding [*expected-callable-contract* result-type]
-        (desugar-expr form))
       :else (desugar-expr form))))
 
 (defn- desugar-tail-expressions [result-type forms]
@@ -3599,6 +3607,11 @@
                            :body (binding [*lexical-bindings*
                                            (into *lexical-bindings* params)
                                            *abort-lexical-context* :fn
+                                           *lexical-callable-contracts*
+                                           (merge (apply dissoc *lexical-callable-contracts* params)
+                                                  (into {} (keep (fn [[p t]]
+                                                                   (when (callable-type? t) [p t])))
+                                                        (map vector params clause-params)))
                                            ;; typed parameters are locals of
                                            ;; their type inside the body (a
                                            ;; record-field projection reads
@@ -3653,7 +3666,15 @@
                                     (or contract-params opaque-captures?)
                                     (assoc :param-types
                                            (into capture-types
-                                                 (or contract-params (repeat (count params) :i64)))))}
+                                                 (map closure-word-type (or contract-params (repeat (count params) :i64)))))
+                                    (some callable-type? contract-params)
+                                    (assoc :callable-param-contracts
+                                           (into {} (keep-indexed (fn [index type]
+                                                                  (when (callable-type? type)
+                                                                    [(+ (count captures) index) type])))
+                                                 contract-params))
+                                    (callable-type? contract-result)
+                                    (assoc :callable-result-contract contract-result))}
                            opaque-captures? (assoc :capture-types capture-types)
                            contract-result (assoc :contract-result contract-result)
                            contract-params (assoc :parameter-types contract-params)
@@ -3676,7 +3697,7 @@
 
 (defn- lambda-dispatchers [lambda-infos required-dispatchers]
   (let [requested (into #{}
-                        (mapcat (fn [{:keys [arity helper parameter-types effect-row]}]
+                        (mapcat (fn [{:keys [arity helper parameter-types effect-row contract-result]}]
                                   ;; A lambda with contract-typed parameters
                                   ;; belongs to the family of exactly its
                                   ;; clause signature and to no i64 family:
@@ -3684,12 +3705,13 @@
                                   ;; an i64 word to a typed parameter. A
                                   ;; lambda lifted under a declared effect
                                   ;; row belongs to that row's family as well.
-                                  (cond-> (if parameter-types
-                                            [[(:result helper) arity parameter-types]]
-                                            [[:i64 arity] [(:result helper) arity]])
-                                    effect-row
-                                    (conj (dispatcher-key (:result helper) arity
-                                                          parameter-types effect-row)))))
+                                  (let [result (if (callable-type? contract-result) contract-result (:result helper))]
+                                    (cond-> (cond
+                                              parameter-types [[result arity parameter-types]]
+                                              (callable-type? result) [[result arity]]
+                                              :else [[:i64 arity] [result arity]])
+                                      effect-row
+                                      (conj (dispatcher-key result arity parameter-types effect-row))))))
                         lambda-infos)
         requested (into requested required-dispatchers)]
     (mapv
@@ -3701,21 +3723,22 @@
              ;; that row, each checked against it: a caller through the
              ;; row is bounded by the row, not by every lifted closure
              candidates (filter #(and (= arity (:arity %))
-                                      (= result-type (get-in % [:helper :result]))
+                                      (= result-type (if (callable-type? (:contract-result %))
+                                                       (:contract-result %) (get-in % [:helper :result])))
                                       (= parameter-types (:parameter-types %))
                                       (or (nil? row) (= row (:effect-row %))))
                                 lambda-infos)
              ;; A closure id belonging to a different result family is a
              ;; type error at the dynamic boundary.  Produce a result-typed
              ;; trap instead of silently coercing it to false/zero.
-             fallback (case result-type
+             fallback (case (closure-word-type result-type)
                         :bool '(= (quot 1 0) 0)
                         :string '(if (= (quot 1 0) 0) "" "")
                         :vector-i64 '(vector-drop (vector-new) 1)
                         :document '(if (= (quot 1 0) 0)
                                      (document-null)
                                      (document-null))
-                        (if-let [default (closure-default-value-expr result-type)]
+                        (if-let [default (closure-default-value-expr (closure-word-type result-type))]
                           (list 'if '(= (quot 1 0) 0) default default)
                           '(quot 1 0)))
              body (reduce
@@ -3733,10 +3756,15 @@
                    fallback (reverse candidates))]
          (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types row)
                   :params (into [closure] args)
-                  :result result-type :effects #{} :body body}
+                  :result (closure-word-type result-type) :effects #{} :body body}
            ;; the typed family says its argument types; the i64 family is
            ;; defaulted to all-i64 downstream exactly as before
-           parameter-types (assoc :param-types (into [:i64] parameter-types)))))
+           parameter-types (assoc :param-types (into [:i64] (map closure-word-type parameter-types)))
+           (some callable-type? parameter-types)
+           (assoc :callable-param-contracts
+                  (into {} (keep-indexed (fn [index type]
+                                         (when (callable-type? type) [(inc index) type]))) parameter-types))
+           (callable-type? result-type) (assoc :callable-result-contract result-type))))
      (sort-by (juxt (comp dispatcher-result-label first) second
                     #(or (dispatcher-parameter-label (nth % 2 nil)) "")
                     #(pr-str (nth % 3 nil)))
@@ -7458,7 +7486,8 @@
         (if (contains? *function-arities* 'invoke)
           (apply list 'invoke (map desugar-expr args))
           (let [declared-result (first args)
-                typed? (closure-result-type? declared-result)
+                typed? (or (callable-type? declared-result)
+                           (closure-result-type? declared-result))
                 _ (when (and (or (keyword? declared-result)
                                  (structured-type? declared-result))
                              (not typed?))
@@ -7481,7 +7510,9 @@
                        form))
             (let [[closure & invoke-args] call-args]
               (apply list (request-invoke-dispatcher result-type (count invoke-args))
-                     (desugar-result-expr result-type closure)
+                     (if (callable-type? result-type)
+                       (desugar-expr closure)
+                       (desugar-result-expr result-type closure))
                      (map desugar-expr invoke-args)))))
         apply
         (if (contains? *function-arities* 'apply)
@@ -9054,8 +9085,9 @@
         contracts (into {}
                         (filter (fn [[_ contract]]
                                   (or (callable-effect-row contract)
-                                      (first-truthy (fn [[parameter-types _]]
-                                                      (not (i64-parameter-types? parameter-types)))
+                                      (first-truthy (fn [[parameter-types result-type]]
+                                                      (or (callable-type? result-type)
+                                                          (not (i64-parameter-types? parameter-types))))
                                                     (callable-clauses contract)))))
                         contracts)]
     (apply list op
@@ -21288,7 +21320,7 @@
                         result (canonical-closure-result-type
                                 (:result typed) (:schemas namespace-info))
                         _ (when (and contract-result
-                                     (not (same-expression-type? result contract-result)))
+                                     (not (same-expression-type? result (closure-word-type contract-result))))
                             (reject! "fn result does not match the declared callable contract"
                                      {:function (:name helper)
                                       :expected contract-result :actual result}

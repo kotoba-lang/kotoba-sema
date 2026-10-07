@@ -19,11 +19,11 @@ try {
   writeFileSync(config, `{:paths [${[...new Set(paths)].map(path => JSON.stringify(path)).join(' ')}]}\n`);
   const expression = `(require '[cljs.test :as t] '[kotoba.compiler.js-value-type-test]
     '[kotoba.compiler.empty-library-test] '[kotoba.compiler.js-closure-test]
-    '[kotoba.compiler.js-capture-test])
+    '[kotoba.compiler.js-capture-test] '[kotoba.compiler.higher-order-closure-test])
     (defmethod t/report [::t/default :end-run-tests] [m]
-      (when (or (not= 32 (:test m)) (not= 180 (:pass m))
+      (when (or (not= 37 (:test m)) (not= 207 (:pass m))
                 (pos? (+ (:fail m) (:error m)))) (js/process.exit 1)))
-    (t/run-tests 'kotoba.compiler.js-value-type-test 'kotoba.compiler.empty-library-test 'kotoba.compiler.js-closure-test 'kotoba.compiler.js-capture-test)`;
+    (t/run-tests 'kotoba.compiler.js-value-type-test 'kotoba.compiler.empty-library-test 'kotoba.compiler.js-closure-test 'kotoba.compiler.js-capture-test 'kotoba.compiler.higher-order-closure-test)`;
   const result = spawnSync(process.execPath, [engine, '--config', config, '-e', expression],
     { cwd: root, stdio: 'inherit', timeout: 120000 });
   if (result.error) throw result.error;
