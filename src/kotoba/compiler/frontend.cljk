@@ -14652,6 +14652,31 @@
            (= '__kotoba_destructure_get (first x)))
        (contains? aliases (second x))))
 
+(defn- row-updates
+  "binder -> the keys written since PARAM, for each name a `let` in FORM binds
+  to an assoc of PARAM -- or of a name already here -- with keyword keys:
+  `(let [s (update s :n inc)] (update s :m inc))`, its rebinding renamed out
+  of the way by `row-scope`, binds the shadowed name to `(map-assoc PARAM :n
+  ..)`. That name is PARAM's row with :n written, so a field read off it that
+  it did not write is a field read off PARAM (ADR 0353 floor
+  :native-rebound-row-update). A name bound more than once is left out: which
+  binding a read sees is a question of scope this walk does not answer."
+  [param form]
+  (let [lets (filter (fn [x] (and (seq? x) (= 'let (first x)) (vector? (second x))
+                                  (even? (count (second x)))))
+                     (tree-seq coll? seq form))
+        pairs (mapcat #(partition 2 (second %)) lets)
+        once (into #{} (keep (fn [[b n]] (when (= 1 n) b)))
+                   (frequencies (map first pairs)))]
+    (reduce (fn [known [b v]]
+              (if (and (simple-symbol? b) (contains? once b) (not= param b)
+                       (seq? v) (= 'map-assoc (first v)) (<= 4 (count v)) (even? (count v))
+                       (or (= param (second v)) (contains? known (second v)))
+                       (every? keyword? (take-nth 2 (drop 2 v))))
+                (assoc known b (into (get known (second v) #{}) (take-nth 2 (drop 2 v))))
+                known))
+            {} pairs)))
+
 (defn- row-field-reads
   "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`
   or `(get PARAM :k)`, and the fields `(dissoc PARAM :k ..)` /
@@ -14659,21 +14684,31 @@
   by fields it has). `(get PARAM :k d)` does not require :k -- a record
   without it answers d -- and neither does a match pattern's projection: an
   arm naming a key the record lacks does not match (floor
-  :row-get-and-match)."
+  :row-get-and-match). A field read off a name bound to an update of PARAM
+  that the update did not write is read off PARAM (`row-updates`)."
   [param form]
-  (let [aliases (row-aliases param form)]
+  (let [aliases (row-aliases param form)
+        updates (row-updates param form)
+        updated (fn [receiver k]
+                  (when-let [written (get updates receiver)]
+                    (not (contains? written k))))]
     (into (sorted-set)
           (mapcat (fn [x]
                     (cond
                       (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
                            (keyword? (nth x 2))
                            (or (contains? aliases (second x))
+                               (updated (second x) (nth x 2))
                                ;; `(:k (if c m n))` reads :k off both branches
                                ;; (floor :row-unification).
                                (contains? (row-if-branches (second x)) param)))
                       [(nth x 2)]
                       (and (row-get-receiver? aliases x) (= 'get (first x)) (= 3 (count x))
                            (keyword? (nth x 2)) (not (::match-projection (meta x))))
+                      [(nth x 2)]
+                      (and (seq? x) (= 'get (first x)) (= 3 (count x)) (keyword? (nth x 2))
+                           (not (::match-projection (meta x)))
+                           (updated (second x) (nth x 2)))
                       [(nth x 2)]
                       (and (seq? x) (contains? '#{dissoc select-keys} (first x))
                            (= param (second x)))
