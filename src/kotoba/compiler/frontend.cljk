@@ -11189,7 +11189,13 @@
       (= op 'string-length)
       (do (require-expression-type! (first types) :string (first args)) :i64)
 
-      (= op 'string-from-i64)
+      ;; The helper `str` of an :i64 part is rewritten to (floor
+      ;; :integer-str) is injected after `rewrite-record-projection`, so a
+      ;; specialization's result inferred from its rewritten body -- a row
+      ;; function returning [(str "w" n) s] (floor
+      ;; :row-tuple-element-argument) -- meets it before it is a function of
+      ;; this module. It is string-from-i64's printer.
+      (or (= op 'string-from-i64) (= op string-from-i64-helper-name))
       (do (require-expression-type! (first types) :i64 (first args)) :string)
 
       ;; ADR 0353 floor :integer-str: `str` formats a :string or an :i64
