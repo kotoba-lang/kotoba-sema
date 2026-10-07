@@ -89,3 +89,41 @@
        (is (= :budget/fuel (trap {:fuel 5})))
        (is (= :budget/cells (trap {:cells 1})))
        (is (js/Object.is js/undefined (kir/execute k 'keep [js/undefined] {}))))))
+
+#?(:cljs
+   (deftest lexical-initializers-retain-opaque-capture-types
+     (doseq [initial ["(js-undefined)" "(js-bool-value true)" "(identity-js (js-undefined))"
+                      "(if true (js-undefined) (js-bool-value false))"
+                      "(do 7 (js-undefined))" "(let [inner (js-undefined)] inner)"]]
+       (let [s (str "(defn identity-js [x :js-value] :js-value x) "
+                    "(defn create [] [:fn [[] :bool]] (let [v " initial
+                    " alias v] (fn [] (js-nullish? alias)))) "
+                    "(defn main [] :bool (let [f (create)] (f)))")
+             k (kir/lower (sema/analyze s))]
+         (is (= (not= initial "(js-bool-value true)") (kir/execute k 'main [] {})) initial)))))
+
+#?(:cljs
+   (deftest lexical-shadowing-does-not-reuse-an-opaque-type
+     (doseq [s ["(defn create [v :js-value] [:fn [[] :i64]] (let [v 7] (fn [] v))) (defn main [] :i64 (let [f (create (js-undefined))] (f)))"
+                "(defn create [] [:fn [[] :i64]] (let [v (js-undefined) v 7] (fn [] v))) (defn main [] :i64 (let [f (create)] (f)))"
+                "(defn create [v :js-value] [:fn [[:i64] :i64]] (fn [v] (let [f (fn [x] (+ v x))] (f 0)))) (defn main [] :i64 (let [f (create (js-undefined))] (f 7)))"]]
+       (is (= (js/BigInt 7) (kir/execute (kir/lower (sema/analyze s)) 'main [] {}))))))
+
+(deftest wrong-lexical-opaque-operands-remain-refused
+  (is (some? (refusal "(defn create [] [:fn [[] :js-value]] (let [v (js-bool-value 7)] (fn [] v)))"))))
+
+#?(:cljs
+   (deftest callable-initializer-and-overloads-select-their-own-result-type
+     (let [s "(defn undef [] :js-value (js-undefined))
+              (defn create [g [:fn [[] :js-value]]] [:fn [[] :bool]]
+                (let [v (g)] (fn [] (js-nullish? v))))
+              (defn main [] :bool (let [f (create (fn-ref undef))] (f)))"]
+       (is (true? (kir/execute (kir/lower (sema/analyze s)) 'main [] {}))))
+     (let [s "(defn choice ([] :js-value (js-undefined)) ([x :i64] :i64 x))
+              (defn create [] [:fn [[] :i64]] (let [v (choice 7)] (fn [] v)))
+              (defn main [] :i64 (let [f (create)] (f)))"]
+       (is (= (js/BigInt 7) (kir/execute (kir/lower (sema/analyze s)) 'main [] {}))))
+     (let [s "(defn js-undefined [] :i64 7)
+              (defn create [] [:fn [[] :i64]] (let [v (js-undefined)] (fn [] v)))
+              (defn main [] :i64 (let [f (create)] (f)))"]
+       (is (some? (refusal s))))))
