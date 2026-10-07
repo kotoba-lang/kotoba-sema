@@ -1384,7 +1384,25 @@
 (def max-namespace-capabilities 256)
 (def value-types #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes
                    :option-i64 :result-i64
-                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document})
+                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :js-value})
+
+(defn- opaque-js-type? [type]
+  ;; Source descriptors are bounded before this walk; labels are inert.
+  (loop [pending [type]]
+    (if (empty? pending)
+      false
+      (let [current (peek pending) rest-types (pop pending)]
+        (cond
+          (= :js-value current) true
+          (not (vector? current)) (recur rest-types)
+          :else (recur
+                 (into rest-types
+                       (case (first current)
+                         (:option :list :set :stream :task) [(second current)]
+                         (:result :map) [(second current) (nth current 2)]
+                         :vector (second current)
+                         (:record :variant) (map second (nth current 2))
+                         []))))))))
 
 (declare reject! closure-result-type?)
 
@@ -1611,6 +1629,8 @@
      (do (when (contains? #{:f32 :f64} (second type))
            (reject! "direct floating set items are outside the structured scalar ABI" type :kotoba.error/floating-set-item))
          (validate-value-type! (second type) (inc depth) nodes)
+         (when (opaque-js-type? (second type))
+           (reject! "opaque JS values cannot be ordered set items" type :kotoba.error/js-value-unordered))
          type)
      (canonical-typed-map-type? type)
      ;; Said as two refusals because they are two different facts. A floating
@@ -1632,6 +1652,8 @@
                     type :kotoba.error/floating-map-kv))
          (validate-value-type! (second type) (inc depth) nodes)
          (validate-value-type! (nth type 2) (inc depth) nodes)
+         (when (opaque-js-type? (second type))
+           (reject! "opaque JS values cannot be ordered map keys" type :kotoba.error/js-value-unordered))
          type)
      (record-type? type)
      (let [[_ type-id fields] type]
@@ -21363,9 +21385,9 @@
                                         (:closure-result? %))
                                parsed)
                          (first-truthy (fn [{:keys [param-types result body]}]
-                                 (or (first-truthy #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} %)
+                                 (or (first-truthy #(or (contains? #{:bool :f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :js-value} %)
                                                 (structured-type? %)) param-types)
-                                     (or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document} result)
+                                     (or (contains? #{:f32 :f64 :string :keyword :map :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :js-value} result)
                                          (structured-type? result))
                                      ;; `:bool` literals are plain 0/1 words, not typed values.
                                      ;; A `:bool` PARAMETER is different: it is a real host
