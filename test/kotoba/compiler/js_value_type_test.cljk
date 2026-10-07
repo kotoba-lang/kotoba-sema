@@ -30,3 +30,26 @@
 (deftest ordinary-js-value-field-label-and-opaque-map-values-remain-valid
   (doseq [type ["[:set [:record :app/key [[:js-value :string]]]]" "[:map :string :js-value]"]]
     (is (nil? (refusal (str "(ns host.values (:export [keep])) (defn keep [v " type "] " type " v)"))))))
+
+(deftest opaque-js-predicates-retain-explicit-operand-and-result-types
+  (doseq [[op params body expected] [["js-nullish?" "v :js-value" "v" [:js-value]]
+                            ["js-truthy?" "v :js-value" "v" [:js-value]]
+                            ["js-strict-equal?" "a :js-value b :js-value" "a b" [:js-value :js-value]]]]
+    (let [hir (sema/analyze (str "(ns host.predicates (:export [observe])) "
+                               "(defn observe [" params "] :bool (" op " " body "))"))
+          function (first (:functions hir))]
+      (is (= :kotoba.hir/v3 (:format hir)))
+      (is (= :bool (:result function)))
+      (is (= expected (:param-types function)))
+      (is (= (symbol op) (first (:body function)))))))
+
+(deftest opaque-js-predicates-refuse-scalar-types-and-malformed-arities
+  (doseq [body ["(js-nullish?)" "(js-nullish? v v)" "(js-truthy?)"
+               "(js-strict-equal? v)" "(js-strict-equal? v v v)"]]
+    (is (some? (refusal (str "(ns host.predicates (:export [observe])) "
+                            "(defn observe [v :js-value] :bool " body ")")))))
+  (doseq [type ["i64" "bool" "string"]
+          body ["(js-nullish? v)" "(js-truthy? v)" "(js-strict-equal? v v)"]]
+    (is (some? (refusal (str "(ns host.predicates (:export [observe])) "
+                            "(defn observe [v :" type "] :bool " body ")")))))
+  (is (some? (refusal "(ns host.predicates (:export [observe])) (defn observe [v :js-value] :js-value (js-nullish? v))"))))
