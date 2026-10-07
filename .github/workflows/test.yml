@@ -16,3 +16,27 @@ jobs:
         with:
           cli: latest
       - run: clojure -M:test
+
+  opaque-js-bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          cli: latest
+      - name: Author dependency classpath separately from test execution
+        run: clojure -Spath > "$RUNNER_TEMP/sema-classpath.txt"
+      - uses: actions/checkout@v4
+        with:
+          repository: kotoba-lang/org-babashka-nbb
+          ref: 829f0ba11016e925001d80e51f12848c4ad58112
+          path: .bootstrap-engine
+          persist-credentials: false
+      - name: Install the engine's pinned module resolver
+        working-directory: .bootstrap-engine
+        run: npm install --ignore-scripts --no-save --package-lock=false --omit=dev import-meta-resolve@4.2.0
+      - name: Execute seven source tests with fixed assertion counts
+        run: node scripts/test-js-value.mjs .bootstrap-engine/cli.js "$RUNNER_TEMP/sema-classpath.txt"

@@ -64,7 +64,9 @@
          ;; only because this pin predated the rename. The frontend already
          ;; required osaho's kir/host-stack-exhausted?, which this pin lacked
          ;; (the suite could not load on the pinned interpreter).
-         :git/sha "353dd5f30bf803528f355f3b8090413a71e51bc8"}}
+         ;; Opaque :js-value leaf contract: JS preserves identity without
+         ;; traversing the host value; canonical set items/map keys refuse it.
+         :git/sha "574015a2e258994fd5aed244f663d9de6345a6e5"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner

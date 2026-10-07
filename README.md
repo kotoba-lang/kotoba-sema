@@ -81,3 +81,17 @@ Explicit `(:export [])` namespace libraries may have no functions or only
 private/internal functions. They have no synthesized entry or export.
 Unmarked empty source and invalid public export/entry declarations remain
 refused. This source/HIR stage does not qualify backend compilation.
+
+Source signatures may name `:js-value`, an opaque host value for the restricted
+JS emitter. Parameters, results and private calls retain this type in HIR v3;
+it cannot silently become an integer or participate in numeric operations.
+The semantic analyzer has no target parameter: compiler orchestration must
+refuse this type on targets without its host ABI before lowering or execution.
+This admission does not grant property access, callbacks or host capabilities.
+
+Canonical set items and map keys containing `:js-value` are refused, including
+nested descriptors. Map values may contain it. Record/variant IDs and field
+labels are inert names, so a field named `:js-value` with type `:string` is
+ordinary ordered data. JS identity preservation is an emitter/runtime property,
+not evidence supplied by semantic analysis alone; retained host graphs have
+embedder-owned resource and lifetime costs.
