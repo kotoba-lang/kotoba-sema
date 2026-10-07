@@ -7,12 +7,12 @@ and retain closure refinements. This does not make raw JavaScript values callabl
 Linear resources, existing type/arity/capture limits and allocation ledgers remain
 checked. Ordinary integer closure controls retain their exact HIR bytes.
 
-This is a candidate, not a published language/runtime qualification. The prepared vendored copy matches the higher-order authority candidate at
-2eb28eabdcf9648069a60976afc300219320cf10a42ee71f55e8df925e7e5212. Publication
-requires the authority main resync before this candidate merges and the consumer
-pin advances. The normal Amu
-pipeline still uses published Sema 60a1b0e and refuses this source with exit 65.
-The direct pipeline result below cannot replace that normal qualification.
+This remains a Sema candidate. Its vendored grammar matches published language
+authority main 955d723d0947476bc32d4eccf9f724d6088d1575 at SHA-256
+2eb28eabdcf9648069a60976afc300219320cf10a42ee71f55e8df925e7e5212.
+Normal Amu consumer qualification remains pending; the earlier published-pin
+attempt refused this source with exit 65. The direct pipeline result below
+cannot replace normal qualification.
 
 `source-qualification.json` records the unchanged maintained tests plus new cases,
 a fresh b379f35 source baseline, identical integer HIR, and direct checked
@@ -41,3 +41,11 @@ is not source coverage or Q9 qualification. The opaque-js-bootstrap job actually
 ran 37/207 before this resync; this change puts the grammar contract in that real
 fixed-count Node gate. The historical JVM-only vendor check shares its digest
 with the portable test rather than maintaining another literal.
+
+The lexical shadow regression now passes for undefined and object results. The
+same six-test fixture on pre-fix 33d005a has one error (6 tests / 28 assertions);
+the fixed fixture passes 6/29. The maintained Node suite passes 41/221. Three
+integer HIR controls retain their exact bytes, and the freshly emitted direct
+Script module is byte-identical to the preceding qualified candidate. Its
+existing frozen-runtime evidence therefore describes the same emitted bytes.
+The initial 37/207 and grammar-resync 40/219 records remain historical stages.

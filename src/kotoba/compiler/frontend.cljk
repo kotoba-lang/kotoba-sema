@@ -3142,12 +3142,14 @@
     (symbol? form) (get *lexical-callable-contracts* form)
     (seq? form)
     (let [[op & args] form]
-      (or (get *function-callable-result-contracts* [op (count args)])
-          (get *function-callable-result-contracts* op)
-          (when-let [contract (get *lexical-callable-contracts* op)]
-            (let [result (second (callable-clause-for-arity contract (count args) form))]
-              (when (callable-type? result) result)))
-          (rowed-field-contract form)))
+      (if (or (contains? *lexical-bindings* op)
+              (contains? *lexical-callable-contracts* op))
+        (when-let [contract (get *lexical-callable-contracts* op)]
+          (let [result (second (callable-clause-for-arity contract (count args) form))]
+            (when (callable-type? result) result)))
+        (or (get *function-callable-result-contracts* [op (count args)])
+            (get *function-callable-result-contracts* op)
+            (rowed-field-contract form))))
     :else nil))
 
 (defn- require-matching-callable-contract! [expected form]
@@ -21211,7 +21213,8 @@
                                  ;; (closes option-string-in-record gap).
                                  local-types (zipmap params param-types)
                                  source-callable-contract
-                                 (binding [*lexical-callable-contracts*
+                                 (binding [*lexical-bindings* (set params)
+                                           *lexical-callable-contracts*
                                            (into {} (map (fn [[index contract]]
                                                            [(nth params index) contract]))
                                                  callable-param-contracts)]

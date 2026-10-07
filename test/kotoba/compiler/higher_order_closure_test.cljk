@@ -60,3 +60,14 @@
                   "(defn bad [h [:fn [[[:fn [[] :js-value]]] :js-value]] g [:fn [[] :i64]]] :js-value (h g))"]]
     (is (= :kotoba.error/callable-contract
            (refusal-code (str "(ns host.refused (:export [bad])) " source))))))
+
+#?(:cljs
+   (deftest a-lexical-callable-result-shadows-a-top-level-result-contract
+     (let [source "(ns host.shadow (:export [keep]))
+                   (defn f [] [:fn [[] :i64]] (fn [] 7))
+                   (defn factory [v :js-value] [:fn [[] [:fn [[] :js-value]]]] (fn [] (fn [] v)))
+                   (defn choose [f [:fn [[] [:fn [[] :js-value]]]]] [:fn [[] :js-value]] (f))
+                   (defn keep [v :js-value] :js-value (let [leaf (choose (factory v))] (leaf)))"
+           k (kir/lower (sema/analyze source))]
+       (doseq [v [js/undefined #js {}]]
+         (is (js/Object.is v (kir/execute k 'keep [v] {})))))))
