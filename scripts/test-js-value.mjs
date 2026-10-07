@@ -20,7 +20,7 @@ try {
   const expression = `(require '[cljs.test :as t] '[kotoba.compiler.js-value-type-test]
     '[kotoba.compiler.empty-library-test])
     (defmethod t/report [::t/default :end-run-tests] [m]
-      (when (or (not= 7 (:test m)) (not= 31 (:pass m))
+      (when (or (not= 9 (:test m)) (not= 58 (:pass m))
                 (pos? (+ (:fail m) (:error m)))) (js/process.exit 1)))
     (t/run-tests 'kotoba.compiler.js-value-type-test 'kotoba.compiler.empty-library-test)`;
   const result = spawnSync(process.execPath, [engine, '--config', config, '-e', expression],

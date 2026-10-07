@@ -88,6 +88,11 @@ it cannot silently become an integer or participate in numeric operations.
 The semantic analyzer has no target parameter: compiler orchestration must
 refuse this type on targets without its host ABI before lowering or execution.
 This admission does not grant property access, callbacks or host capabilities.
+The source operations `js-nullish?`, `js-truthy?`, and `js-strict-equal?`
+accept only explicit `:js-value` operands, check fixed arities, and return
+`:bool`. They retain typed HIR and delegate native JS observations to the
+qualified reference/runtime contracts; generic equality still refuses opaque
+values. They do not introduce coercion or host authority.
 
 Canonical set items and map keys containing `:js-value` are refused, including
 nested descriptors. Map values may contain it. Record/variant IDs and field

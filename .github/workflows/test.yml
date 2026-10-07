@@ -38,5 +38,5 @@ jobs:
       - name: Install the engine's pinned module resolver
         working-directory: .bootstrap-engine
         run: npm install --ignore-scripts --no-save --package-lock=false --omit=dev import-meta-resolve@4.2.0
-      - name: Execute seven source tests with fixed assertion counts
+      - name: Execute nine source tests with fixed assertion counts
         run: node scripts/test-js-value.mjs .bootstrap-engine/cli.js "$RUNNER_TEMP/sema-classpath.txt"
