@@ -21275,7 +21275,11 @@
       (reject! "constant and function names must be disjoint" forms))
     (when (seq other) (reject! "only ns, def, defn, and defn- are allowed at top level"
                                  (first other) :kotoba.error/top-level-form))
-    (when (empty? parsed) (reject! "at least one defn is required" forms))
+    ;; An explicit empty export vector describes a library with no public
+    ;; functions, including a namespace-only module. It needs no synthetic
+    ;; entry/function; an unmarked empty program still fails closed.
+    (when (and (empty? parsed) (not= [] (:exports namespace-info)))
+      (reject! "at least one defn is required" forms))
     (when-not (= (count parsed) (count signatures)) (reject! "duplicate function name" defs))
     (when (and (some? (:exports namespace-info))
                (not-every? (set source-public) (:exports namespace-info)))
@@ -21286,9 +21290,7 @@
                                           (into {}))
                                      raw-constants))
     (when (and (nil? entry) (nil? (:exports namespace-info)))
-      (reject! "entryless library requires an explicit non-empty namespace export list" defs))
-    (when (and (nil? entry) (empty? exports))
-      (reject! "entryless library requires at least one exported function" exports))
+      (reject! "entryless library requires an explicit namespace export list" defs))
     (when (and entry (not (empty? (get signatures entry))))
       (reject! "main must take zero arguments" 'main))
     (when (and entry (not (first-truthy #{entry} exports)))

@@ -39,7 +39,8 @@
          ;; the state ability (kotoba-lang lang/state-ability.edn) puts on a
          ;; handler specialization. Carries hir's clojure.set -> kotoba.lang.coll
          ;; move, which the coll floor above (0ffd5f6) already satisfies.
-         :git/sha "95af641005b3b88717a62f871bc8773b00012d26"}
+         ;; Empty-library envelope admission; the existing cross-field/effect checks remain.
+         :git/sha "6f58c1aa9925d8b4b9221837dba776a99758fdcd"}
         io.github.kotoba-lang/osaho
         {:git/url "https://github.com/kotoba-lang/osaho.git"
          ;; b021a0d1: the five collection primitives the friendly heads in
