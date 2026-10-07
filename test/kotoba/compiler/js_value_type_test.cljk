@@ -96,3 +96,19 @@
   (doseq [op ["js-typeof" "js-array?" "js-bool-value"]]
     (is (re-find #"reserved function name"
                  (or (refusal (str "(defn " op " [v :i64] :i64 v) (defn main [] :i64 1)")) "")))))
+
+(deftest zero-arity-js-undefined-retains-an-opaque-result
+  (let [hir (sema/analyze "(ns host.undefined (:export [noop])) (defn noop [] :js-value (js-undefined))")
+        function (first (:functions hir))]
+    (is (= :kotoba.hir/v3 (:format hir)))
+    (is (= :js-value (:result function)))
+    (is (= [] (:param-types function)))
+    (is (= '(js-undefined) (:body function)))))
+
+(deftest js-undefined-refuses-arguments-result-mismatch-and-name-capture
+  (doseq [body ["(js-undefined 0)" "(js-undefined 0 1)"]]
+    (is (some? (refusal (str "(ns host.undefined (:export [noop])) (defn noop [] :js-value " body ")")))))
+  (doseq [type [":i64" ":bool" ":string"]]
+    (is (some? (refusal (str "(ns host.undefined (:export [noop])) (defn noop [] " type " (js-undefined))")))))
+  (is (re-find #"reserved function name"
+               (or (refusal "(defn js-undefined [] :i64 0) (defn main [] :i64 1)") ""))))
