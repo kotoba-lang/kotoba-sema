@@ -83,9 +83,46 @@
   "source_sha256": {
     "src/kotoba/compiler/frontend.cljk": "0251d2d42b3a8d6f1e1e1b029e493b304c7844b2fbadda947ef2cb87cc1ba132",
     "test/kotoba/compiler/higher_order_closure_test.cljk": "73daf36043ecef28b2fc0886cb8f1d64fdd9e02e5785fbeff150dc2e6bfb752a",
-    "scripts/test-js-value.mjs": "3e90b744fc545d213084c9c716eb6a3a99d12f9735d6c3593f516a27edff7fd5"
+    "scripts/test-js-value.mjs": "c5ec44a0bf55f709664ab27f44746fdfb38e093b0dfb7883fc924d6222bd6b88",
+    "resources/kotoba/lang/guest-grammar.edn": "2eb28eabdcf9648069a60976afc300219320cf10a42ee71f55e8df925e7e5212",
+    "test/kotoba/compiler/guest_grammar_contract_test.cljk": "084f1d986a54a9de45d8356dae6572fbd9c2aeb561ffe7ced2e4acf9c3c55798"
   },
-  "ci": "not yet requested",
   "main_publication": false,
-  "native_or_browser_host_qualification": false
+  "native_or_browser_host_qualification": false,
+  "grammar_resync": {
+    "sha256": "2eb28eabdcf9648069a60976afc300219320cf10a42ee71f55e8df925e7e5212",
+    "maintained": {
+      "tests": 40,
+      "assertions": 219,
+      "failures": 0,
+      "errors": 0
+    },
+    "byte_and_contract_gate": {
+      "tests": 3,
+      "assertions": 12,
+      "failures": 0,
+      "errors": 0,
+      "stale_basis_copy": {
+        "tests": 3,
+        "assertions": 12,
+        "failures": 9,
+        "errors": 0
+      }
+    },
+    "existing_definition_admission": {
+      "tests": 2,
+      "assertions": 4,
+      "failures": 0,
+      "errors": 0
+    },
+    "authority_main": "pending",
+    "normal_amu": "pending"
+  },
+  "ci_at_initial_qualification": "not yet requested",
+  "ci_semantics_audit": {
+    "prior_head": "e0d9d62ec7a792406569178e2aac1f1bf4032de5",
+    "jvm_job": "0 tests / 0 assertions; not source coverage or Q9 qualification",
+    "opaque_js_job": "37 tests / 207 assertions; actual source coverage",
+    "new_node_gate": "40 tests / 219 assertions; now includes vendored grammar bytes and source bounds"
+  }
 }

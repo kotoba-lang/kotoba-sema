@@ -54,7 +54,8 @@
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.frontend :as frontend]
-            [kotoba.sema :as sema]))
+            [kotoba.sema :as sema]
+            [kotoba.compiler.guest-grammar-contract-test :as contract]))
 
 (def authority-grammar-sha256
   "sha256 of kotoba-lang `lang/guest-grammar.edn`.
@@ -258,7 +259,7 @@
   Advanced 2026-09-26 to `b70bb39e` (kotoba-gmir ADR 0031, aiueos ADR-0222):
   the admitted kernel head `kernel-dequant-dot-ptq1-0`, with this frontend's
   arity and base-position rows in the same commit."
-  "b70bb39ee06aa4bf7e7124c58978b5387af729aa4c1b3d407411ae10936e23e0")
+  contract/authority-grammar-sha256)
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
 
