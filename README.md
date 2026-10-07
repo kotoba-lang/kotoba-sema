@@ -94,6 +94,15 @@ accept only explicit `:js-value` operands, check fixed arities, and return
 qualified reference/runtime contracts; generic equality still refuses opaque
 values. They do not introduce coercion or host authority.
 
+The unary source heads `js-typeof` (`:js-value` to `:string`), `js-array?`
+(`:js-value` to `:bool`) and `js-bool-value` (`:bool` to `:js-value`) check
+exact arities and operand/result types and remain reserved operations in HIR.
+Boolean injection is explicit; it does not admit arbitrary scalar coercion.
+These operations compose with a matching-type conditional to preserve raw
+falsy input and inject a boolean result for truthy input. Qualification of the
+runtime and emitter remains separate from this source admission; all opaque
+results still require a target supporting the JS host ABI.
+
 Canonical set items and map keys containing `:js-value` are refused, including
 nested descriptors. Map values may contain it. Record/variant IDs and field
 labels are inert names, so a field named `:js-value` with type `:string` is

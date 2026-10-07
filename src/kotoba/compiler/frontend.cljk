@@ -1040,7 +1040,7 @@
 (def map-projection-operations '#{keys vals})
 (def typed-map-operations '#{map-new map-get map-assoc})
 (def typed-safe-value-operations
-  '{js-nullish? 1 js-truthy? 1 js-strict-equal? 2
+  '{js-nullish? 1 js-truthy? 1 js-strict-equal? 2 js-typeof 1 js-array? 1 js-bool-value 1
     bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
     result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2})
 (def parametric-result-operations
@@ -10892,10 +10892,13 @@
                        args))
             :bool))
 
-      (contains? '#{js-nullish? js-truthy? js-strict-equal?} op)
+      (contains? '#{js-nullish? js-truthy? js-strict-equal? js-typeof js-array?} op)
       (do (doseq [[arg type] (map vector args types)]
             (require-expression-type! type :js-value arg))
-          :bool)
+          (if (= op 'js-typeof) :string :bool))
+
+      (= op 'js-bool-value)
+      (do (require-expression-type! (first types) :bool (first args)) :js-value)
 
       (= op 'bool-not)
       (do (require-expression-type! (first types) :bool (first args)) :bool)
