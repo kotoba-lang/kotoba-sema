@@ -18,11 +18,12 @@ try {
   // No :deps: tests cannot invoke nbb's JVM dependency resolver.
   writeFileSync(config, `{:paths [${[...new Set(paths)].map(path => JSON.stringify(path)).join(' ')}]}\n`);
   const expression = `(require '[cljs.test :as t] '[kotoba.compiler.js-value-type-test]
-    '[kotoba.compiler.empty-library-test] '[kotoba.compiler.js-closure-test])
+    '[kotoba.compiler.empty-library-test] '[kotoba.compiler.js-closure-test]
+    '[kotoba.compiler.js-capture-test])
     (defmethod t/report [::t/default :end-run-tests] [m]
-      (when (or (not= 20 (:test m)) (not= 133 (:pass m))
+      (when (or (not= 28 (:test m)) (not= 167 (:pass m))
                 (pos? (+ (:fail m) (:error m)))) (js/process.exit 1)))
-    (t/run-tests 'kotoba.compiler.js-value-type-test 'kotoba.compiler.empty-library-test 'kotoba.compiler.js-closure-test)`;
+    (t/run-tests 'kotoba.compiler.js-value-type-test 'kotoba.compiler.empty-library-test 'kotoba.compiler.js-closure-test 'kotoba.compiler.js-capture-test)`;
   const result = spawnSync(process.execPath, [engine, '--config', config, '-e', expression],
     { cwd: root, stdio: 'inherit', timeout: 120000 });
   if (result.error) throw result.error;

@@ -49,7 +49,7 @@
           ["(defn consume [f [:fn [[:js-value] :js-value]]] :i64 0) (defn main [] :i64 (consume (fn [x] 1)))"
            "(defn applyOpaque [f [:fn [[:js-value] :js-value]] v :js-value] :js-value (f 1))"
            "(defn applyOpaque [f [:fn [[:js-value] :js-value]] v :js-value] :i64 (f v))"
-           "(ns host.closures (:export [capture])) (defn capture [v :js-value] [:fn [[:i64] :js-value]] (fn [n] v))"
+           "(ns host.closures (:export [capture])) (defn capture [e [:record :host/event [[:payload :js-value]]]] [:fn [[] :js-value]] (fn [] (record-get [:record :host/event [[:payload :js-value]]] e :payload)))"
            "(ns host.closures (:export [invokeHost])) (defn invokeHost [f :js-value v :js-value] :js-value (f v))"]]
     (is (some? (refusal source)) source)))
 
