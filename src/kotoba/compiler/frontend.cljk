@@ -2913,6 +2913,7 @@
 (declare ^:dynamic *local-types* ^:dynamic *local-option-types*)
 (def ^:dynamic *lexical-callable-contracts* {})
 (def ^:dynamic *function-callable-result-contracts* {})
+(def ^:private ^:dynamic *opaque-result-functions* #{})
 ;; `[source-name arity]` -> `{parameter-index callable-contract}` for every
 ;; defn clause whose parameter vector names a `[:fn ...]` type. Read at an
 ;; ordinary call so a `fn` written in that argument position is lifted under
@@ -3150,6 +3151,36 @@
                     (get *function-callable-result-contracts* (first form))
                     (rowed-field-contract form))
     :else nil))
+
+(defn- opaque-expression? [form]
+  ;; Capture storage must be chosen before lifting, ahead of full type checking.
+  ;; Carry only proven opaque leaves; the ordinary checker validates operands
+  ;; and signatures later. Unknown values retain the existing word ABI.
+  (cond
+    (symbol? form) (= :js-value (get *local-types* form))
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (contains? *lexical-bindings* op)
+        (when-let [contract (get *lexical-callable-contracts* op)]
+          (= :js-value (second (callable-clause-for-arity contract (count args) form))))
+        (contains? *opaque-result-functions* [op (count args)]) true
+        (contains? *function-arities* op) false
+        (contains? '#{js-undefined js-bool-value js-capture-value} op) true
+        (= 'do op) (opaque-expression? (last args))
+        (= 'if op) (and (opaque-expression? (second args))
+                       (opaque-expression? (nth args 2 nil)))
+        (= 'let op)
+        (let [[bindings body] args]
+          (when (and (vector? bindings) (even? (count bindings)))
+            (loop [remaining (partition 2 bindings) types *local-types*]
+              (if-let [[name value] (first remaining)]
+                (let [opaque? (binding [*local-types* types] (opaque-expression? value))]
+                  (recur (rest remaining)
+                         (cond-> (dissoc types name) opaque? (assoc name :js-value))))
+                (binding [*local-types* types] (opaque-expression? body))))))
+        :else false))
+    :else false))
 
 (defn- desugar-lexical-call [result-type form]
   (let [[closure & args] form]
@@ -3571,13 +3602,12 @@
                                            ;; typed parameters are locals of
                                            ;; their type inside the body (a
                                            ;; record-field projection reads
-                                           ;; them); the i64 clause binds
-                                           ;; nothing new
+                                           ;; them). Untyped parameters shadow any
+                                           ;; outer opaque local with an i64 slot
                                            *local-types*
-                                           (if clause-params
-                                             (merge *local-types*
-                                                    (zipmap params clause-params))
-                                             *local-types*)
+                                           (merge *local-types*
+                                                  (zipmap params (or clause-params
+                                                                     (repeat (count params) :i64))))
                                            *local-option-types*
                                            (if clause-params
                                              (into (or *local-option-types* {})
@@ -7547,13 +7577,18 @@
                 ;; Lower bindings sequentially.  A value may call a closure
                 ;; introduced by an earlier binding, while its own pattern is
                 ;; deliberately not visible until that value has finished.
-                (letfn [(lower-bindings [remaining env contracts lowered]
+                (letfn [(lower-bindings [remaining env contracts types lowered]
                           (if-let [[pattern value] (first remaining)]
                             (let [value-contract
                                   (binding [*lexical-callable-contracts* contracts]
                                     (expression-callable-contract value))
+                                  opaque? (binding [*local-types* types
+                                                    *lexical-bindings* env
+                                                    *lexical-callable-contracts* contracts]
+                                            (opaque-expression? value))
                                   expanded
                                   (binding [*lexical-bindings* env
+                                            *local-types* types
                                             *lexical-callable-contracts* contracts]
                                     (destructure-binding pattern
                                                          (desugar-expr value)))
@@ -7563,16 +7598,20 @@
                                     (assoc contracts pattern value-contract)
                                     contracts)]
                               (lower-bindings (rest remaining) next-env next-contracts
+                                              (cond-> (apply dissoc types (map first expanded))
+                                                (and (symbol? pattern) opaque?)
+                                                (assoc pattern :js-value))
                                               (into lowered expanded)))
-                            [(vec (mapcat identity lowered)) env contracts]))]
-                  (let [[lowered-bindings body-env body-contracts]
+                            [(vec (mapcat identity lowered)) env contracts types]))]
+                  (let [[lowered-bindings body-env body-contracts body-types]
                         (lower-bindings (partition 2 bindings)
                                         *lexical-bindings*
-                                        *lexical-callable-contracts* [])
+                                        *lexical-callable-contracts* *local-types* [])
                         ;; `mapv`, not bare `map`: forcing must remain in
                         ;; the dynamic extent of the compiler counters.
                         lowered-body
                         (binding [*lexical-bindings* body-env
+                                  *local-types* body-types
                                   *lexical-callable-contracts* body-contracts]
                           (desugar-tail-expressions contextual-result-type body))]
                     ;; A `let` body is an implicit `do`, exactly like `when`,
@@ -20939,6 +20978,12 @@
                         def-parts)
         _ (when (contains? overloaded-sources 'main)
             (reject! "main must have exactly one zero-arity clause" 'main))
+        opaque-result-functions
+        (into #{} (keep (fn [{:keys [source-name logical-arity raw-params result result-inferred?]}]
+                         (when (and (= :js-value result) (not result-inferred?))
+                           (when-let [parts (try (typed-param-parts raw-params constants)
+                                               (catch #?(:clj Exception :cljs :default) _ nil))]
+                             [source-name (or logical-arity (count parts))])))) def-parts)
         function-callable-result-contracts
         (into {}
               (keep (fn [{:keys [source-name logical-arity raw-params
@@ -21011,6 +21056,7 @@
                           *uses-lazy?* uses-lazy?
                           *required-closure-dispatchers* required-dispatchers
                           *function-arities* function-arities
+                          *opaque-result-functions* opaque-result-functions
                           *function-callable-result-contracts*
                           function-callable-result-contracts
                           *function-callable-param-contracts*
