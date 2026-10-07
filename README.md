@@ -116,3 +116,10 @@ result mismatches and declared function-name capture are refused. Arbitrary
 opaque JS literals remain unavailable. Runtime/emitter pins and Mithril
 module source admission qualify separately; this operator-authored extension
 is not a new System One model evaluation.
+
+The undefined source qualification now consumes merged Osaho
+`3fc6cdb8cc1ae3991cbf555c45af545997bacaa2`, including the zero-arity runtime
+operation and normalized dynamic array observation. The maintained source
+checks remain 15 tests / 105 assertions; final compiler consumers qualify
+separately. Restricted JS instance fuel is not a public library lifetime
+compatibility guarantee.
