@@ -454,8 +454,18 @@
   "Given the parsed clauses vector `[:kotoba a :clj b :default c ...]`,
   selects the first clause whose feature is `:kotoba` or `:default` --
   mirrors `clojure.tools.reader`'s `:features #{:kotoba}` selection this
-  compiler's frontend already requests. Returns `[form matched?]`."
+  compiler's frontend already requests. Returns `[form matched?]`.
+
+  An odd number of forms is refused, as `clojure.tools.reader` refuses it:
+  until 2026-10-09 `partition 2` dropped the unpaired last form, so
+  `#?(:kotoba (defn main [] 1) :clj)` was read as if it had no `:clj` clause
+  and ADMITTED (kotoba-lang lang/conformance/negative/
+  malformed_reader_conditional.cljk). Checked before a branch is chosen,
+  so a malformed clause after a matching one is refused too."
   [clauses]
+  (when (odd? (count clauses))
+    (reject! "reader conditional requires feature/expression pairs"
+             {:forms (count clauses)}))
   (loop [pairs (partition 2 clauses)]
     (if-let [[feature form] (first pairs)]
       (if (or (= feature :kotoba) (= feature :default))
