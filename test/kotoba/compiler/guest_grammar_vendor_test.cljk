@@ -205,7 +205,7 @@
   callable or linear parameter and a type outside the result profile are
   refused by name; an all-i64 contract program keeps its HIR / KIR digests
   (typed_closure_parameters_test). No head admitted or withdrawn; the
-  previous digest was `e16c74e5`."
+  previous digest was `e16c74e5`.
 
   Advanced 2026-09-16 to `9ecd9dbc` (kotoba-lang #693): `:predicates` gains
   `arena-scope` (root ADR-2609160044, context ABI v6) and the four ABI v7
@@ -258,7 +258,12 @@
   by this frontend's absence markers in the same commit.
   Advanced 2026-09-26 to `b70bb39e` (kotoba-gmir ADR 0031, aiueos ADR-0222):
   the admitted kernel head `kernel-dequant-dot-ptq1-0`, with this frontend's
-  arity and base-position rows in the same commit."
+  arity and base-position rows in the same commit.
+  Advanced 2026-10-09 to `4f7f138f` (root ADR-2610092330 / ADR-2610092310
+  S2): `:operations-registry` points at kotoba-lang's lang/operations.edn,
+  and the `:bytes-value` note records the :bytes / :link document kinds this
+  frontend now types (document-fixed-operations, same commit). No head
+  admitted or withdrawn."
   contract/authority-grammar-sha256)
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
