@@ -263,7 +263,12 @@
   S2): `:operations-registry` points at kotoba-lang's lang/operations.edn,
   and the `:bytes-value` note records the :bytes / :link document kinds this
   frontend now types (document-fixed-operations, same commit). No head
-  admitted or withdrawn."
+  admitted or withdrawn.
+  Advanced 2026-10-09 to `da68c3fa`: the `:portable-string-symbol-values`
+  note, the `:data-host-arg` note and the string-index comment say the
+  portable string bound is 65536 UTF-8 bytes, not 127 (amu
+  kotoba.compiler.limits, unified 2026-09-24). Notes only; no head admitted
+  or withdrawn."
   contract/authority-grammar-sha256)
 
 (def ^:private resource-path "kotoba/lang/guest-grammar.edn")
