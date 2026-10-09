@@ -5,7 +5,7 @@
             [kotoba.compiler.frontend :as frontend]))
 
 ;; The authority resync updates this literal and the byte copy together.
-(def authority-grammar-sha256 "2eb28eabdcf9648069a60976afc300219320cf10a42ee71f55e8df925e7e5212")
+(def authority-grammar-sha256 "4f7f138f9df447ddf106aa8c1a93f0a2b7fc7500cce782de9b5716a2f6d5a44e")
 (def resource-path "resources/kotoba/lang/guest-grammar.edn")
 
 (defn- grammar-source []
