@@ -4943,26 +4943,29 @@
                      (reverse modifiers))
                     values (synthetic "doseq-values")
                     length (synthetic "doseq-length")
-                    block-signal
-                    (fn [indices]
-                      (reduce
-                       (fn [continuation index]
-                         (list 'if (list '< index length)
-                               (list 'if
-                                     (list 'let
-                                           [item (list 'vector-at values index)]
-                                           iteration-signal)
-                                     continuation
-                                     false)
-                               true))
-                       true
-                       (reverse indices)))
-                    blocks (map block-signal (partition-all 16 (range limit)))
+                    ;; The vector walk is a `loop` too, over at most LIMIT
+                    ;; items -- the items it was unrolled over until
+                    ;; 2026-10-10, one copy of the body per index (16 x 16 for
+                    ;; two bindings). kotoba-lang control/doseq.kotoba
+                    ;; compiled to a 103 KB Wasm module that way, against
+                    ;; 3 KB for a fixture of its size, and the module overflowed
+                    ;; the stack of the child node that decodes it from a data
+                    ;; URL (amu test --manifest on Node 24, Linux). Same bound,
+                    ;; same trap below for a vector longer than LIMIT, same
+                    ;; order of evaluation; the body is written once.
+                    index (synthetic "doseq-index")
                     unrolled
-                    (reduce (fn [continuation block]
-                              (list 'if block continuation 0))
-                            0
-                            (reverse blocks))
+                    (list 'loop [index 0]
+                          (list 'if (list '< index length)
+                                (list 'if (list '< index limit)
+                                      (list 'if
+                                            (list 'let
+                                                  [item (list 'vector-at values index)]
+                                                  iteration-signal)
+                                            (list 'recur (list '+ index 1))
+                                            0)
+                                      0)
+                                0))
                     ;; The pair walk is a `loop` -- `dotimes`'s lowering --
                     ;; that counts its steps: past LIMIT items a chain that
                     ;; still goes on traps, as it always did. Until 2026-10-09
