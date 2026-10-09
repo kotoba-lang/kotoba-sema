@@ -1205,7 +1205,9 @@
     document-vector-drop 2 document-vector-remove 2 document-vector-sort 1
     document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2
     document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1
-    document-i64-value 1 document-f64-value 1})
+    document-i64-value 1 document-f64-value 1
+    ;; root ADR-2610092310 S2: the IPLD :bytes and :link document kinds
+    document-bytes 1 document-bytes-value 1 document-link 1 document-link-value 1})
 (def document-variadic-operations '#{document-vector document-list document-set document-map})
 (def sequencing-operations '#{do})
 ;; `(arena-scope body)` -- superproject ADR-2609160044, context ABI v6. On
@@ -11277,6 +11279,16 @@
       (do (require-expression-type! (first types) :document (first args)) [:option :i64])
       (= op 'document-f64-value)
       (do (require-expression-type! (first types) :document (first args)) [:option :f64])
+      ;; root ADR-2610092310 S2. document-link answers an option: bytes that
+      ;; are not one binary CIDv1 make no link (osaho kotoba.kir).
+      (= op 'document-bytes)
+      (do (require-expression-type! (first types) :bytes (first args)) :document)
+      (= op 'document-bytes-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :bytes])
+      (= op 'document-link)
+      (do (require-expression-type! (first types) :bytes (first args)) [:option :document])
+      (= op 'document-link-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :bytes])
 
       (contains? (disj comparisons '=) op)
       (do (numeric-operand-type! op args types) :bool)
