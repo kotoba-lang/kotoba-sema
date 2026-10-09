@@ -201,7 +201,11 @@
             [kotoba.compiler.export-names-constant-test]
             ;; `sema/lint`: (* 0 <call>) sequencing reported, not refused;
             ;; the zero is a BigInt here and `zero?` does not see it
-            [kotoba.compiler.zero-multiply-lint-test]))
+            [kotoba.compiler.zero-multiply-lint-test]
+            ;; the four gaps amu test --manifest found in kotoba-lang's
+            ;; conformance manifest on 2026-10-09: doseq, count / nth on a
+            ;; pair chain, an unpaired reader conditional
+            [kotoba.compiler.conformance-manifest-gaps-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -283,4 +287,5 @@
              'kotoba.compiler.eager-recursive-let-binding-test
              'kotoba.compiler.stored-closure-lowering-test
              'kotoba.compiler.export-names-constant-test
-             'kotoba.compiler.zero-multiply-lint-test)
+             'kotoba.compiler.zero-multiply-lint-test
+             'kotoba.compiler.conformance-manifest-gaps-test)

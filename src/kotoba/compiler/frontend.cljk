@@ -1797,8 +1797,16 @@
   ;; already bounds how large that one pass can be.
   (let [out (try
               (kr/read-forms source)
+              ;; The reader's own reason is IN the message, not only in the
+              ;; cause: callers that report `ex-message` -- amu's
+              ;; `test --manifest` :compiler-admit row among them -- printed
+              ;; "source reader rejected input" and nothing else, so a
+              ;; negative case could not name the refusal it exists for
+              ;; (kotoba-lang negative/malformed_reader_conditional.cljk).
               (catch #?(:clj Exception :cljs :default) error
-                (throw (ex-info "source reader rejected input"
+                (throw (ex-info (if-let [reason (ex-message error)]
+                                  (str "source reader rejected input: " reason)
+                                  "source reader rejected input")
                                 {:phase :read} error))))]
     (when (> (count out) 10000)
       (throw (ex-info "too many top-level forms" {:phase :read})))
@@ -4929,9 +4937,9 @@
                      (fn [inner [modifier modifier-value]]
                        (case modifier
                          :let (list 'let modifier-value inner)
-                         :when (list 'if modifier-value inner 1)
-                         :while (list 'if modifier-value inner 0)))
-                     (list* 'do (concat group-body [1]))
+                         :when (list 'if modifier-value inner true)
+                         :while (list 'if modifier-value inner false)))
+                     (list* 'do (concat group-body [true]))
                      (reverse modifiers))
                     values (synthetic "doseq-values")
                     length (synthetic "doseq-length")
@@ -4945,9 +4953,9 @@
                                            [item (list 'vector-at values index)]
                                            iteration-signal)
                                      continuation
-                                     0)
-                               1))
-                       1
+                                     false)
+                               true))
+                       true
                        (reverse indices)))
                     blocks (map block-signal (partition-all 16 (range limit)))
                     unrolled
@@ -4955,27 +4963,35 @@
                               (list 'if block continuation 0))
                             0
                             (reverse blocks))
+                    ;; The pair walk is a `loop` -- `dotimes`'s lowering --
+                    ;; that counts its steps: past LIMIT items a chain that
+                    ;; still goes on traps, as it always did. Until 2026-10-09
+                    ;; it was unrolled into a nest five forms deep per step,
+                    ;; 160 levels at the limit of 32, which the nbb hosts amu
+                    ;; and this suite run on refused as `desugared nesting
+                    ;; exhausted the host stack` for EVERY pair-sequence
+                    ;; doseq, a three-item list included (kotoba-lang
+                    ;; lang/conformance/control/doseq.kotoba). A flat `let`
+                    ;; of the same steps is no better: each `if` in a binding
+                    ;; duplicates the rest, and 32 of them exhaust the
+                    ;; lowered-program budget. Same bound, same trap, same
+                    ;; order of evaluation.
                     pair-unrolled
-                    ((fn step [index cursor-expr]
-                       (let [cursor (synthetic "doseq-cursor")]
-                         (list 'let [cursor cursor-expr]
-                               (if (= index limit)
-                                 (list 'if (list '= cursor 0)
-                                       0
-                                       (list 'quot 1 0))
-                                 (let [next-cursor (synthetic "doseq-next")]
-                                   (list 'if (list '= cursor 0)
-                                         0
-                                         (list 'let
-                                               [next-cursor
-                                                (list 'pair-second cursor)]
-                                               (list 'if
-                                                     (list 'let
-                                                           [item (list 'pair-first cursor)]
-                                                           iteration-signal)
-                                                     (step (inc index) next-cursor)
-                                                     0))))))))
-                     0 values)
+                    (let [cursor (synthetic "doseq-cursor")
+                          index (synthetic "doseq-index")]
+                      (list 'loop [cursor values index 0]
+                            (list 'if (list '= cursor 0)
+                                  0
+                                  (list 'if (list '< index limit)
+                                        (list 'if
+                                              (list 'let
+                                                    [item (list 'pair-first cursor)]
+                                                    iteration-signal)
+                                              (list 'recur
+                                                    (list 'pair-second cursor)
+                                                    (list '+ index 1))
+                                              0)
+                                        (list 'quot 1 0)))))
                     bounded
                     (if pair-sequence?
                       pair-unrolled
@@ -6347,6 +6363,75 @@
     (seq? form) (or (= map-get-helper-name (first form))
                     (first-truthy uses-map-get? (rest form)))
     (coll? form) (first-truthy uses-map-get? form)
+    :else false))
+
+(defn- nonzero-integer-literal?
+  "An integer literal other than 0: a value `count` / `nth` refuse as no pair
+  chain at all. 0 IS one -- the empty chain `(list)` desugars to. Compared by
+  digits, because a ClojureScript BigInt is not `zero?`."
+  [form]
+  (and (kotoba-integer? form) (not= "0" (str form))))
+
+(def ^:private list-count-helper-name '__kotoba_list_count)
+
+(def ^:private list-count-helper
+  "`count` on the legacy i64 pair chain: the \"bounded pair-chain walk\"
+  `lang/guest-grammar.edn` names for `count`, and the receiver `list`, `cons`
+  and a variadic rest parameter build. `first` / `rest` / `empty?` already
+  read an `:i64` as that chain; `count` refused it until 2026-10-09, so
+  `(defn f ([x & more] (count more)))` -- kotoba-lang
+  lang/conformance/functions/multi_arity.kotoba -- could take its rest apart
+  and could not say how long it was. Injected by the `count` arm's rewrite
+  only when it writes a call, so a module that never counts a chain is
+  byte-identical. Each step costs one call of the run's fuel, as
+  `__kotoba_map_get`'s does; an integer that is not a chain traps in
+  `pair-second` as `(rest 5)` does, and 0 -- the empty chain -- answers 0."
+  {:name list-count-helper-name
+   :params '[xs]
+   :param-types [:i64]
+   :result :i64
+   :effects #{}
+   :body '(if (= xs 0)
+            0
+            (+ 1 (__kotoba_list_count (pair-second xs))))})
+
+(defn- uses-list-count? [form]
+  (cond
+    (seq? form) (or (= list-count-helper-name (first form))
+                    (first-truthy uses-list-count? (rest form)))
+    (coll? form) (first-truthy uses-list-count? form)
+    :else false))
+
+(def ^:private list-drop-helper-name '__kotoba_list_drop)
+
+(def ^:private list-drop-helper
+  "`nth` on the legacy i64 pair chain: the \"bounded indexed pair-chain
+  walk, supports optional default\" `lang/guest-grammar.edn` names for
+  `nth`. The chain from index N on -- 0, the empty chain, when N is negative
+  or past the end -- so the `nth` arm reads the item with `pair-first` and a
+  default can be chosen without walking twice. `take` answers this chain
+  (\"fuel-bounded lazy forcing into eager pair-chain\"), so until 2026-10-09
+  `(nth (take 3 s) 2 0)` -- kotoba-lang
+  lang/conformance/functions/lazy_sequences.kotoba -- could build its
+  sequence and not index it. Fuel-bounded as `__kotoba_list_count` is."
+  {:name list-drop-helper-name
+   :params '[xs n]
+   :param-types [:i64 :i64]
+   :result :i64
+   :effects #{}
+   :body '(if (< n 0)
+            0
+            (if (= xs 0)
+              0
+              (if (= n 0)
+                xs
+                (__kotoba_list_drop (pair-second xs) (- n 1)))))})
+
+(defn- uses-list-drop? [form]
+  (cond
+    (seq? form) (or (= list-drop-helper-name (first form))
+                    (first-truthy uses-list-drop? (rest form)))
+    (coll? form) (first-truthy uses-list-drop? form)
     :else false))
 
 (def ^:private map-without-helper-name '__kotoba_map_without)
@@ -14030,6 +14115,30 @@
               (cons (if (= 3 (count rewritten-args)) 'vector-f64-get 'vector-f64-at)
                     rewritten-args))
 
+            ;; The legacy pair chain -- `list`, `cons`, `take`, a variadic
+            ;; rest. Without a default an index outside the chain traps in
+            ;; `pair-first` of the empty chain, as vector nth without a
+            ;; default traps; with one it answers the default. See
+            ;; `list-drop-helper`.
+            (and (= :i64 value-type)
+                 (not (nonzero-integer-literal? (first rewritten-args))))
+            (do
+              (when-not (<= 2 (count rewritten-args) 3)
+                (reject! "list nth requires value, index, and optional default" form))
+              (let [[items index default] rewritten-args
+                    walked (list list-drop-helper-name items index)]
+                (when (= 3 (count rewritten-args))
+                  (require-expression-type!
+                   (infer-expression-type default locals signatures)
+                   :i64 default))
+                (if (= 3 (count rewritten-args))
+                  (let [rest-name (synthetic "nth_rest")]
+                    (list 'let [rest-name walked]
+                          (list 'if (list '= rest-name 0)
+                                default
+                                (list 'pair-first rest-name))))
+                  (list 'pair-first walked))))
+
             ;; A receiver `nth` does not index. Before this the arm fell
             ;; through to `(cons op ...)` and validation reported `operation
             ;; has no admitted lowering` -- true of `nth` on nothing, since
@@ -14102,6 +14211,14 @@
             ;; the count was reachable by hand and only the friendly head was
             ;; missing. That is why no `typed-list-count` was added for it.
             (canonical-list-type? value-type) (list 'vector-count receiver)
+            ;; The legacy pair chain: `(list ...)`, `cons`, a variadic rest
+            ;; parameter. See `list-count-helper`. A chain is typed `:i64`,
+            ;; so the type cannot tell `(count rest)` from `(count n)`. A
+            ;; nonzero integer LITERAL can never be a chain and keeps the
+            ;; refusal below (0 is the empty chain `(list)` desugars to); any
+            ;; other `:i64` that is not one traps in the walk.
+            (and (= :i64 value-type) (not (nonzero-integer-literal? receiver)))
+            (list list-count-helper-name receiver)
             :else
             (reject! (str "count requires a bounded vector, a typed set or a "
                           "canonical typed map; got " (pr-str value-type) "."
@@ -20888,10 +21005,17 @@
   (let [language-profile (when (map? opts) (:language-profile opts))
         admit-linked-synthetics? (when (map? opts) (:admit-linked-synthetics? opts))
         lambda-id-base (or (when (map? opts) (:lambda-id-base opts)) 0)
+        ;; The reserved-prefix check reads `source-forms`, what the program
+        ;; WROTE, and runs before anything below writes into it.
+        ;; `annotate-doseq-collection-kinds` wraps a pair-sequence alias used
+        ;; as a doseq collection in `(__kotoba_pair_sequence alias)`; checked
+        ;; after it (as it was until 2026-10-09), `(doseq [x alias] ...)`
+        ;; with `alias` bound to a list was refused for a name the program
+        ;; never wrote (kotoba-lang lang/conformance/control/doseq.kotoba).
+        _ (when-not admit-linked-synthetics?
+            (reject-reserved-source-symbols! source-forms))
         forms (rewrite-pure-application-forms
                (mapv annotate-doseq-collection-kinds source-forms))
-        _ (when-not admit-linked-synthetics?
-            (reject-reserved-source-symbols! forms))
         _ (when (= :pure-product language-profile)
             (check-pure-product-source-forms! forms))
         ;; Library heads (adr-2609242330): after the reserved-prefix check,
@@ -21463,6 +21587,15 @@
                  (and (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                       (not (first-truthy #(= string-from-i64-helper-name (:name %)) parsed)))
                  (into [string-from-i64-nat-helper string-from-i64-helper]))
+        ;; ... and a pair-chain `count` / `nth` as a `__kotoba_list_count` /
+        ;; `__kotoba_list_drop` call.
+        parsed (cond-> parsed
+                 (and (first-truthy #(uses-list-count? (:body %)) parsed)
+                      (not (first-truthy #(= list-count-helper-name (:name %)) parsed)))
+                 (conj list-count-helper)
+                 (and (first-truthy #(uses-list-drop? (:body %)) parsed)
+                      (not (first-truthy #(= list-drop-helper-name (:name %)) parsed)))
+                 (conj list-drop-helper))
         parsed (mapv #(update % :body retire-absence-markers) parsed)
         ;; `option-or` intentionally survives syntactic desugaring until the
         ;; rewrite above can infer its payload descriptor from locals and
