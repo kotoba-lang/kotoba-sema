@@ -16,11 +16,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: DeLaGuardo/setup-clojure@13.2
-        with:
-          cli: latest
+      # kbb resolves deps.edn without the JVM (root ADR-2610100200). Its
+      # classpath could not be used here while artifact pinned an osaho whose
+      # kir.cljc shadowed kir.cljk (artifact#59 moved the pin).
+      - uses: kotoba-lang/setup-kbb@a4586e48c72c69229ff1237a1246de63583b607d
       - name: Author dependency classpath separately from test execution
-        run: clojure -Spath > "$RUNNER_TEMP/sema-classpath.txt"
+        run: kbb -Spath > "$RUNNER_TEMP/sema-classpath.txt"
       - uses: actions/checkout@v4
         with:
           repository: kotoba-lang/org-babashka-nbb

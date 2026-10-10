@@ -31,7 +31,7 @@
        org.clojure/clojure {:mvn/version "1.12.0"}
         io.github.kotoba-lang/artifact
         {:git/url "https://github.com/kotoba-lang/artifact.git"
-         :git/sha "86d88bd58299cf575e9dfa2ab4789a0baa166614"}
+         :git/sha "96df8619e9f6d56a11da42bce7000f8ab2926052"}
         io.github.kotoba-lang/kotoba-hir
         {:git/url "https://github.com/kotoba-lang/kotoba-hir.git"
          ;; Advanced 2026-09-25 ac8e7051 -> 95af6410 (main tip, forward only): the
