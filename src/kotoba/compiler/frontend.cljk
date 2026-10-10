@@ -4953,18 +4953,23 @@
                     ;; URL (amu test --manifest on Node 24, Linux). Same bound,
                     ;; same trap below for a vector longer than LIMIT, same
                     ;; order of evaluation; the body is written once.
+                    ;; Under the trap LENGTH <= LIMIT, so only the untrapped
+                    ;; one-binding walk also counts against LIMIT: a vector
+                    ;; built longer at run time still stops after LIMIT items.
                     index (synthetic "doseq-index")
-                    unrolled
+                    trapped? (< limit value/vector-literal-item-limit)
+                    step (list 'if
+                               (list 'let
+                                     [item (list 'vector-at values index)]
+                                     iteration-signal)
+                               (list 'recur (list '+ index 1))
+                               0)
+                    vector-walk
                     (list 'loop [index 0]
                           (list 'if (list '< index length)
-                                (list 'if (list '< index limit)
-                                      (list 'if
-                                            (list 'let
-                                                  [item (list 'vector-at values index)]
-                                                  iteration-signal)
-                                            (list 'recur (list '+ index 1))
-                                            0)
-                                      0)
+                                (if trapped?
+                                  step
+                                  (list 'if (list '< index limit) step 0))
                                 0))
                     ;; The pair walk is a `loop` -- `dotimes`'s lowering --
                     ;; that counts its steps: past LIMIT items a chain that
@@ -4998,11 +5003,11 @@
                     bounded
                     (if pair-sequence?
                       pair-unrolled
-                      (if (< limit value/vector-literal-item-limit)
+                      (if trapped?
                         (list 'if (list '< limit length)
                               (list 'quot 1 0)
-                              unrolled)
-                        unrolled))]
+                              vector-walk)
+                        vector-walk))]
                 (list 'let [values (if (and pair-sequence?
                                             (seq? collection)
                                             (= '__kotoba_pair_sequence
