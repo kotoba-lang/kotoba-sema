@@ -8686,6 +8686,19 @@
              (with-meta
               (list* 'reduce (list 'fn '[acc x] (list 'vector-conj 'acc 'x)) args)
               (meta form)))))
+        ;; `seq` (1-arity) is the IDENTITY alias: a vector-i64 collection is
+        ;; already sequential, so `(seq v)` desugars to `v` and reduces/count
+        ;; lower through the existing admitted paths (same KIR CIDs as the
+        ;; hand twin `(reduce + 0 v)`, measured 2026-10-11, t
+        ;; bafyreifjpju3gqmsjtmswu2c2mkv3fu7tiucfgpqfqrgflskwj7vmyngq4).
+        ;; One arg only; a module that defines `seq` itself keeps its own
+        ;; (the mapv lesson). Other arities fail closed with seq's own name.
+        seq
+        (if (contains? *function-arities* 'seq)
+          (apply list 'seq (map desugar-expr args))
+          (do (when-not (= 1 (count args))
+                (reject! "seq requires exactly one collection" form))
+              (desugar-expr (with-meta (first args) (meta form)))))
         map
         (do
           (when-not (<= 2 (count args) 6)
