@@ -237,6 +237,21 @@
     (is (nil? (rejection source)))
     (is (= :i64 (loop-result source)))))
 
+(deftest later-loops-capture-earlier-vector-loop-results
+  (let [source (str "(ns g.capture)(defn main [] :i64"
+                    " (let [first (loop [i 0 v [1 2]]"
+                    "               (if (= i 1) v (recur (+ i 1) v)))"
+                    "       second (loop [i 0 v first]"
+                    "                (if (= i 1) v (recur (+ i 1) (vector-conj v 3))))]"
+                    "   (loop [i 0 total 0]"
+                    "     (if (= i 3) total"
+                    "       (recur (+ i 1) (+ total (vector-at second i)))))))")
+        helpers (loop-helpers source)]
+    (is (= [:vector-i64 :vector-i64 :i64] (mapv :result helpers)))
+    (is (= :vector-i64 (last (:param-types (nth helpers 1)))))
+    (is (= :vector-i64 (last (:param-types (nth helpers 2)))))
+    (is (= 6 (run source)))))
+
 (deftest an-unchanged-integer-program-is-unchanged
   ;; The byte-identity control. Full HIR/KIR text cannot be pinned portably --
   ;; `pr-str` writes a Kotoba integer as `0` on the JVM and `#object[BigInt 0]`

@@ -22,17 +22,27 @@
             [kotoba.compiler.line-slots-test]
             [kotoba.compiler.range-slots-test]
             [kotoba.compiler.bytes-value-test]
+            [kotoba.compiler.document-bytes-link-test]
             ;; the selfhost builtin gaps: library heads, type-decided
             ;; predicates, string =, conj at a loop exit, throw in a loop
             [kotoba.compiler.library-heads-test]
+            ;; gap 1 of the selfhost foundation: a missing else and a literal
+            ;; nil are absence, typed by the present branch
+            [kotoba.compiler.expression-absence-test]
             ;; `[fixed ... & rest]` defn: specialized per used arity by the
             ;; fn profile's lowering; the exported / value / bound shapes refused
             [kotoba.compiler.variadic-defn-test]
             ;; a closure PARAMETER carries any closure RESULT type: document /
             ;; set / record / string through a `[:fn ...]` parameter RUN;
-            ;; callable and linear parameters refused by name; the all-i64
+            ;; nested callable contracts retained; linear parameters refused by name; the all-i64
             ;; contract program keeps its digests
             [kotoba.compiler.typed-closure-parameters-test]
+            [kotoba.compiler.empty-library-test]
+            [kotoba.compiler.js-value-type-test]
+            [kotoba.compiler.js-closure-test]
+            [kotoba.compiler.js-capture-test]
+            [kotoba.compiler.higher-order-closure-test]
+            [kotoba.compiler.guest-grammar-contract-test]
             ;; a defn / defn- / fn body of several forms is one `do`, as let's
             ;; is; the implicit and explicit spellings are one analysis; empty
             ;; bodies, loop, try and protocol methods keep their refusals
@@ -66,6 +76,9 @@
             ;; fwstore: writing to pages the firmware allocated
             [kotoba.compiler.firmware-store-test]
             [kotoba.compiler.host-nesting-test]
+            ;; Source admission is bounded per definition so a compiler module
+            ;; may exceed 1 MiB without making any one definition unbounded.
+            [kotoba.compiler.definition-admission-test]
             ;; a `let` body is an implicit `do`; the value is the last form
             [kotoba.compiler.let-body-test]
             [kotoba.compiler.kernel-xgetbv-test]
@@ -180,12 +193,19 @@
             [kotoba.compiler.uefi-boundary-test]
             [kotoba.compiler.f32-literal-test]
             [kotoba.compiler.eager-recursive-let-binding-test]
+            ;; a fn literal stored as a map-literal value or record-new field
+            ;; is lowered inside its binding, not as a lazy seq after it
+            [kotoba.compiler.stored-closure-lowering-test]
             ;; an export that is a def / a defn- / undefined names which; the
             ;; rewrite prints the literal, which is a BigInt here
             [kotoba.compiler.export-names-constant-test]
             ;; `sema/lint`: (* 0 <call>) sequencing reported, not refused;
             ;; the zero is a BigInt here and `zero?` does not see it
-            [kotoba.compiler.zero-multiply-lint-test]))
+            [kotoba.compiler.zero-multiply-lint-test]
+            ;; the four gaps amu test --manifest found in kotoba-lang's
+            ;; conformance manifest on 2026-10-09: doseq, count / nth on a
+            ;; pair chain, an unpaired reader conditional
+            [kotoba.compiler.conformance-manifest-gaps-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -206,9 +226,17 @@
              'kotoba.compiler.line-slots-test
              'kotoba.compiler.range-slots-test
              'kotoba.compiler.bytes-value-test
+             'kotoba.compiler.document-bytes-link-test
              'kotoba.compiler.library-heads-test
+             'kotoba.compiler.expression-absence-test
              'kotoba.compiler.variadic-defn-test
              'kotoba.compiler.typed-closure-parameters-test
+             'kotoba.compiler.empty-library-test
+             'kotoba.compiler.js-value-type-test
+             'kotoba.compiler.js-closure-test
+             'kotoba.compiler.js-capture-test
+             'kotoba.compiler.higher-order-closure-test
+             'kotoba.compiler.guest-grammar-contract-test
              'kotoba.compiler.defn-body-sequences-test
              'kotoba.compiler.some-name-collision-test
              'kotoba.compiler.case-uniqueness-test
@@ -257,5 +285,7 @@
              'kotoba.compiler.uefi-boundary-test
              'kotoba.compiler.f32-literal-test
              'kotoba.compiler.eager-recursive-let-binding-test
+             'kotoba.compiler.stored-closure-lowering-test
              'kotoba.compiler.export-names-constant-test
-             'kotoba.compiler.zero-multiply-lint-test)
+             'kotoba.compiler.zero-multiply-lint-test
+             'kotoba.compiler.conformance-manifest-gaps-test)

@@ -68,7 +68,7 @@
   ;; passing the result side had used since typed results landed.
   :parameter-types :closure-result-types
   :parameter-types-rule
-  "every admitted non-callable, non-linear closure dispatcher result type: the flat set (:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document) and any record / [:option T] / [:result T E] / variant / [:list T] / [:vector [...]] / [:set T] / [:map K V] descriptor that has a closed default inhabitant; refused by name -- a callable or a linear resource (`callable parameter types cannot be callable or linear resources`), anything else outside that profile (`callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)`); :keyword / :symbol / :map / :option-i64 / :result-i64 / :string-index / :disjoint-set-i64 are outside on BOTH sides today"
+  "every admitted non-linear closure dispatcher result type, including recursively checked guest [:fn ...] contracts: ordinary closed values use their value ABI; guest callables retain their logical contract on an i64 closure word. A parameter type is admitted exactly when it is admitted as a closure result type. Linear resources remain refused (`callable parameter types cannot be linear resources`); raw :js-value values are opaque data, never authority to invoke a host function. Other types outside the closed result profile retain the existing refusal."
   :parameter-types-lowering
   "the dispatcher family is one function per distinct clause signature: an all-i64 clause keeps `__kotoba_invoke[_RESULT]$arityN` (same HIR, same KIR, same CIDs as before -- pinned in kotoba-sema typed_closure_parameters_test and the closure golden of call_arity_test), a clause naming a non-i64 parameter type is `__kotoba_invoke_p_<sha256 of the parameter-type vector>[_RESULT]$arityN` with `:param-types [:i64 T...]`; the lambda's helper carries the clause's types on its own parameters (captures stay i64 pair-chain words); at `(f x)` the argument is checked against the dispatcher's signature by the ordinary checker (`expression type mismatch: expected document, got i64`)"
   :parameter-types-typing-positions
@@ -78,7 +78,19 @@
    :kir-interpreter "kotoba-sema typed_closure_parameters_test: :document, [:set :keyword], two :documents, a record and a :string pass THROUGH a closure parameter and RUN (document-merge through the closure prints the merged document; typed-set-count through the closure answers 2); fn-ref in a typed slot; a typed result contract called with a typed argument; the all-i64 contract program's HIR and KIR digests equal before/after"
    :wasm32-browser "amu's nbb route, `compile --target wasm32-browser --jvm-free`, the kotoba-sema worktree carrying the widening placed before the locked kotoba-sema 820e85d1 on the classpath (amu dea953f2 unchanged), artifacts run under runtime/browser-host.mjs instantiateKotoba: a [:set :keyword] passed through a closure parameter answers 2; a document passed through a closure that document-merges {:b 40} and read back at :b answers 40; control at the locked kotoba-sema: the old refusal `callable parameter types currently require the i64 closure ABI`"
    :wall "lang/selfhost-distance.edn measurements 16-19 (amu cdebca89, 225 compiler sources): the clojure.walk twin could not provide walk / prewalk / postwalk (21 of 25 call sites in 19 modules refused at the old sentence); the kotoba.lang.coll / clojure.set twins could not be passed as VALUES to reduce / merge-with (18 modules)"}
-  :result "one admitted non-callable, non-linear closure dispatcher result type"
+  :result "one admitted non-linear closure dispatcher result type, including a recursively checked guest callable contract"
+  :higher-order
+  {:status :source-candidate
+   :decision "docs/adr/ADR-higher-order-guest-callable-contracts.md"
+   :physical-abi :i64
+   :logical-identity :callable-contract
+   :positions #{:parameter :result}
+   :limits {:type-depth 12 :type-nodes 64 :clauses 5 :arity 4}
+   :metadata #{:callable-param-contracts :callable-result-contract}
+   :host-invocation :refused
+   :linear-resources :refused
+   :normal-consumer-qualification :pending
+   :qualification "kotoba-sema PR100 candidate source and direct checked KIR/restricted ESM; this status does not qualify Wasm/native targets, escaping host callbacks, async callbacks or the normal locked Amu consumer"}
   :physical-abi :i64
   :level "L3"
   :backends #{:compiler :kotoba-kir :restricted-esm :wasm32}
@@ -144,7 +156,7 @@
   ;; expression over constants -- (set [...]), (into #{} ...), (str ...),
   ;; (merge a b), (* 4 1024).
   ;;
-  ;; CLASSIFICATION (CLAUDE.md, "is it a property or implementation state"),
+  ;; CLASSIFICATION (AGENTS.md, "is it a property or implementation state"),
   ;; written before the change: the literal-only rule was IMPLEMENTATION
   ;; STATE. Nothing in this file, surface-status or safety-claims says a
   ;; module constant must be spelled as a literal; what they forbid at module
@@ -446,7 +458,21 @@
   :and {:desugars-to "nested let/if" :level "L2" :backends #{:kotoba-wasm :compiler}}
   :or {:desugars-to "nested let/if" :level "L2" :backends #{:kotoba-wasm :compiler}}
   :when {:desugars-to "if + optional do" :level "L2" :backends #{:kotoba-wasm :compiler}
-         :note "multi-body when becomes (if test (do …) 0)"}
+         :note "multi-body when becomes (if test (do …) <absent>); what <absent> is follows :expression-absence (the i64 0 until 2026-09-26, and still where the author declared the result)"}
+  ;; Gap 1 of the selfhost foundation (2026-09-26, superproject
+  ;; adr-2609242330; amu ladder floor :expression-absence). A missing else
+  ;; and a literal nil branch answer nothing; until 2026-09-26 the desugar
+  ;; wrote the i64 0 there, so any other present type was refused (the
+  ;; selfhost wall "loop exits with two different value types: bool ... and
+  ;; i64 from 0"). ADR 0353's :absence floor made nil a map-literal value;
+  ;; this is nil at expression level. Classified an IMPLEMENTATION STATE.
+  :expression-absence {:desugars-to "an absence marker the present branch's type resolves: :bool -> false; [:option T] -> its none; any other T -> [:option T] (the present value wrapped); :i64 -> [:option :i64] in an inferred result or beside a literal nil, and the legacy 0 where the result is declared or the value is a statement"
+                       :forms [when when-not if-not when-let if-let when-some if-some cond]
+                       :level "L2" :backends #{:compiler}
+                       :refuses ["an absent i64 used as the number it would hold: expression type mismatch: expected i64, got [:option :i64]"
+                                 "two present types: if branches must have the same value type"
+                                 "if without an else: if requires test, then, else; got 2 arguments (when is that form)"]
+                       :note "a loop's exits join the same way (find-first answers [:option T]); a marker nothing can type is what the desugar wrote before, so no program that compiled before changes"}
   :if-not {:desugars-to "if + not" :level "L2"
            :backends #{:compiler :kotoba-wasm :kotoba-cljs}}
   :when-not {:desugars-to "if + not + optional do" :level "L2"
@@ -578,10 +604,31 @@
                     :note "byte equality; a :symbol pair is still refused (see :quoted-not-widened)"}
   :true? {:desugars-to "the operand when it is :bool; (do operand false) for any other static type"
           :forms [true?] :level "L2" :backends #{:compiler}
-          :note "a :document operand is refused :kotoba.error/library-head-document naming (document-kind d)"}
+          :note "on a :document, (option-value-of [:option :bool] (document-bool-value d) false) -- see :type-predicates"}
   :integer? {:desugars-to "(do operand true) when it is :i64; (do operand false) for any other static type"
              :forms [integer?] :level "L2" :backends #{:compiler}
-             :note "a :document operand is refused :kotoba.error/library-head-document naming (document-kind d)"}
+             :note "on a :document, (= (document-kind d) :i64) -- see :type-predicates"}
+  ;; Gap 3 of the selfhost foundation (2026-09-26, superproject
+  ;; adr-2609242330): a :document is the one value whose shape is decided at
+  ;; run time, and the compiler's walkers (cbor encode-into's open-shape
+  ;; callers, affine, the HIR/KIR walks) ask these of document nodes. Until
+  ;; 2026-09-26 true? / integer? refused a :document by name
+  ;; (:kotoba.error/library-head-document) and the other heads were unknown
+  ;; operations. Classified an IMPLEMENTATION STATE: `document-kind` already
+  ;; answered the question on every backend that has documents; nothing new
+  ;; reaches KIR. Not widened: nil? / some? on a non-option, non-document type
+  ;; (they ask absence, and an i64 or a string has none), and a predicate on an
+  ;; [:option T] whose T answers by value (:bool, :document).
+  :type-predicates {:desugars-to "static type: the type's answer ((do operand true|false), or the :bool operand / its negation for true? / false?); [:option T]: presence when T answers true, (do operand false) when it answers false; :document: (let [d operand] <document-kind test>)"
+                    :forms [true? false? integer? boolean? string? keyword? symbol? map? vector? set? list? seq? coll? nil? some?]
+                    :level "L2" :backends #{:compiler}
+                    :document-kinds {map? #{:map} vector? #{:vector} set? #{:set} list? #{:list} seq? #{:list}
+                                     coll? #{:vector :list :set :map} string? #{:string} keyword? #{:keyword}
+                                     symbol? #{:symbol} integer? #{:i64} boolean? #{:bool} nil? #{:null}}
+                    :refuses ["an [:option T] whose T answers by value (true? on [:option :bool], map? on [:option :document]): bind the payload first"
+                              "nil? / some? on a type that has no absence (expression type mismatch: expected option-i64, got <type>)"
+                              "map? / coll? on a schema reference [:ref q] (a record or a variant; not decided here)"]
+                    :note "a module's own function of the same name wins. Native has no :document yet, so a document predicate reaches native only where documents do"}
   ;; NOT "nested let". That reading was in this file until 2026-09-02 and it is
   ;; the encoding the frontend deliberately refuses to use: a non-final
   ;; subexpression bound by a `let` is an unused binding, and dropping unused
@@ -962,13 +1009,13 @@
   :portable-string-symbol-values
   {:desugars-to "deterministic tagged integer identity with module collision rejection"
    :level "L2" :backends #{:compiler :kotoba-wasm :kotoba-cljs}
-   :note "strings are immutable and limited to 127 UTF-8 bytes; literal IDs remain deterministic; primary Wasm dynamic results use bounded heap descriptors; substring indexes are checked UTF-8 byte boundaries"}
+   :note "strings are immutable and limited to 65536 UTF-8 bytes (a literal and a value alike; amu kotoba.compiler.limits :string-literal-bytes / :string-value-bytes, unified 2026-09-24); literal IDs remain deterministic; primary Wasm dynamic results use bounded heap descriptors; substring indexes are checked UTF-8 byte boundaries"}
   :string-host-arg {:desugars-to "(str-ptr s) (str-len s)" :level "L2" :backends #{:kotoba-wasm}
                     :note "bare string literal in first position of string-head host ops"}
   :data-host-arg {:desugars-to "(bytes-ptr V) (bytes-len V) over canonical kotoba.value.v1 bytes"
                   :level "L2" :backends #{:kotoba-wasm}
                   :adr "ADR-kotoba-canonical-value-codec (VC5)"
-                  :note "constant collection literal in first position of data-head host ops; constants only, no runtime construction; leaves the 127-UTF-8-byte portable-string bound and survives into typed KIR as structured data"}}
+                  :note "constant collection literal in first position of data-head host ops; constants only, no runtime construction; leaves the 65536-UTF-8-byte portable-string bound and survives into typed KIR as structured data"}}
 
  ;; Never admit in guest source (subset gate).
  ;; `reset!` and `swap!` joined this set on 2026-08-12. They were already named
@@ -1039,7 +1086,7 @@
                ;; that needed a substring search hand-rolled a char-at
                ;; recursion (src/edn_validate.kotoba skip-string). All three
                ;; take UTF-8 byte semantics like string-substring; both string
-               ;; arguments obey the 127-byte literal bound.
+               ;; arguments obey the 65536-byte string bound.
                ;;   (string-index-of haystack needle) -> i64, first UTF-8 byte
                ;;     offset of needle in haystack, -1 when absent (Clojure's
                ;;     .indexOf contract, byte-unit). Empty needle is refused.
@@ -1203,7 +1250,20 @@
   :backends {:reference :implemented :esm :implemented :native-x86_64 :implemented
              :native-aarch64 :implemented :wasm32-browser :implemented
              :cljs :refused-by-the-cljs-gate}
-  :not-yet "A `:document` has no bytes node, so a DYNAMIC value cannot be asked whether it is bytes (cbor's encode dispatch)."}
+  :not-yet "Until 2026-10-09 a `:document` had no bytes node, so a DYNAMIC value could not be asked whether it is bytes (cbor's encode dispatch). root ADR-2610092310 adds the :bytes and :link document kinds (document-bytes, document-bytes-value, document-link, document-link-value); their state per layer is lang/operations.edn and lang/surface-status.edn :contextual-document-literal :ipld-kinds."}
+
+ ;; Where the OPERATIONS are listed (root ADR-2610092330, 2026-10-09). This file
+ ;; is the grammar -- forms, sugar, limits -- and never listed the document
+ ;; operations; on 2026-10-09 that absence was read as "a guest cannot walk a
+ ;; document" (root ADR-2610092310), which was wrong. The operations, with
+ ;; arity, types and per-layer status, are in lang/operations.edn, checked
+ ;; against kotoba-sema's and osaho's tables and kotoba-sema's types by
+ ;; kotoba.lang.operation-registry-test and operation-registry-types-test. This
+ ;; key points there rather than copying the list.
+ :operations-registry
+ {:file "lang/operations.edn"
+  :adr "adr-2610092330-kotoba-operation-registry-and-one-conformance-runner"
+  :families #{:document}}
 
  ;; Host-import families that take UTF-8 (ptr,len) as first two wasm params.
  ;; Host-import families whose first argument is STRUCTURED data rather than
@@ -1261,7 +1321,9 @@
   ;; max-typed-set-items, osaho typed-set-item-limit, ESM) enforced 32; the
   ;; value is lang/limits.edn :language/static :typed-set-items (adr-2609242100 P1).
   :max-set-items 32
-  :max-source-bytes 1048576
+  ;; The bounded input may contain many independently admitted definitions.
+  :max-source-bytes 8388608
+  :max-definition-source-bytes 1048576
   :max-reader-depth 512
   ;; 2026-09-11: the bound on `(:params [...])` in a template module. Eight is
   ;; a bound, not a measurement -- kotoba.set's twelve templates each need one.
@@ -1418,6 +1480,8 @@
    ;; "argument 0". The f32 dot product and the fused dequantize-and-dot.
    "kernel-dot-f32"
    "kernel-dequant-dot-q8-0" "kernel-dequant-dot-q4-k" "kernel-dequant-dot-q6-k"
+   ;; PTQ1_0, Prism's group-128 ternary (kotoba-gmir ADR 0031).
+   "kernel-dequant-dot-ptq1-0"
 
    ;; The CARRIED slice family: a `[:slice T]` value rather than three words.
    ;; A type of the source syntax and of nothing else -- kotoba-sema erases

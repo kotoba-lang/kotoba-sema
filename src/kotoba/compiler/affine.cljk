@@ -185,13 +185,19 @@
   "True when `form` calls a proved linear-returning function with `target` in
   the parameter position that was proved."
   [form target]
+  ;; Every fn VALUE in this module binds its destructuring inside the body,
+  ;; not in the parameter vector: a fn value takes plain-symbol parameters
+  ;; only (frontend `lift-lambda`; a defn's parameters may destructure), and
+  ;; this module is on the compiler's own selfhost path (superproject
+  ;; adr-2609242330). Same pairs, same order, same answers.
   (and (seq? form)
        (symbol? (first form))
        (boolean
-        (first-truthy (fn [[name index]]
-                (and (= name (first form))
-                     (= target (nth form (inc index) ::none))))
-              *linear-returning*))))
+        (first-truthy (fn [pair]
+                        (let [[name index] pair]
+                          (and (= name (first form))
+                               (= target (nth form (inc index) ::none)))))
+                      *linear-returning*))))
 
 (defn- consuming-call?
   [form target]
@@ -274,7 +280,10 @@
 
     (seq? form) (apply list (map expand-threads form))
     (vector? form) (mapv expand-threads form)
-    (map? form) (into {} (map (fn [[k v]] [(expand-threads k) (expand-threads v)])) form)
+    (map? form) (into {} (map (fn [entry]
+                                       (let [[k v] entry]
+                                         [(expand-threads k) (expand-threads v)])))
+                          form)
     (set? form) (into #{} (map expand-threads) form)
     :else form))
 
@@ -365,11 +374,12 @@
   [form target]
   (if (and (contains? consuming (first form)) (= target (second form)))
     1
-    (first-truthy (fn [[name index]]
-            (when (and (= name (first form))
-                       (= target (nth form (inc index) ::none)))
-              (inc index)))
-          *linear-returning*)))
+    (first-truthy (fn [pair]
+                    (let [[name index] pair]
+                      (when (and (= name (first form))
+                                 (= target (nth form (inc index) ::none)))
+                        (inc index))))
+                  *linear-returning*)))
 
 (defn- without-index [xs i]
   (concat (take i xs) (drop (inc i) xs)))
@@ -507,6 +517,37 @@
   [form target tail?]
   (not= ::refused (walk form target tail? :live)))
 
+;; The two walks below were a named `(fn walk ...)` closing over an atom. They
+;; are plain recursive defns now: a fn value cannot be named or `swap!` an atom
+;; (kotoba-sema frontend), and this module is on the compiler's own selfhost
+;; path (superproject adr-2609242330). Same visit order (a let's own pairs, then
+;; its children, maps as their flattened entries), same collected values.
+
+(defn- let-children [form]
+  (if (map? form) (apply concat form) form))
+
+(defn- let-initialisers
+  "The initialiser of every `let` binding of `target` anywhere in `form`."
+  [form target]
+  (let [here (if (let-form? form)
+               (mapv second (filter #(= target (first %)) (partition 2 (second form))))
+               [])]
+    (if (coll? form)
+      (into here (mapcat #(let-initialisers % target) (let-children form)))
+      here)))
+
+(defn- producing-let-names
+  "Every name a `let` anywhere in `form` binds from a `producing` head."
+  [form]
+  (let [here (if (let-form? form)
+               (mapv first (filter #(and (seq? (second %))
+                                         (contains? producing (first (second %))))
+                                   (partition 2 (second form))))
+               [])]
+    (if (coll? form)
+      (into here (mapcat producing-let-names (let-children form)))
+      here)))
+
 (defn- owned-binding?
   "True unless `target` is bound from something that may still hold it.
 
@@ -519,14 +560,8 @@
   head added to the language later is unsafe by default rather than silently
   admitted."
   [form target]
-  (let [initialisers (atom [])]
-    ((fn walk [f]
-       (when (let-form? f)
-         (doseq [[n init] (partition 2 (second f))]
-           (when (= n target) (swap! initialisers conj init))))
-       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
-     form)
-    (every? #(and (seq? %) (contains? producing (first %))) @initialisers)))
+  (every? #(and (seq? %) (contains? producing (first %)))
+          (let-initialisers form target)))
 
 (defn linear-returning?
   "True when `target` is linear in `form` EXCEPT that `form` hands it back.
@@ -595,10 +630,10 @@
 
   This was `linear-let-chain?` and looked for one name rebound over and over
   -- `v`, then `v`, then `v` -- which is how the same idea is written in
-  Clojure. **Kotoba refuses it**: `amu check` answers `duplicate let binding`
-  (measured 2026-09-01, amu e96dd8c6). So the first version described a
-  program that cannot be written, and would have been a gate nothing could
-  ever pass. Found by compiling one."
+  Clojure. Kotoba reads that shape as nested lets, each shadowing the one
+  before (ADR 0353 floor :let-rebinding; until then it was refused as
+  `duplicate let binding`), so a rebound name is never one `let`'s thread and
+  this looks for distinct names."
   [form names]
   (and (seq? form) (= 'let (first form)) (vector? (second form))
        (<= 2 (count names))
@@ -643,15 +678,7 @@
   body owns or a name from somewhere it cannot see. A parameter is the other
   legitimate source and is checked beside this."
   [form]
-  (let [found (atom #{})]
-    ((fn walk [f]
-       (when (let-form? f)
-         (doseq [[n init] (partition 2 (second f))]
-           (when (and (seq? init) (contains? producing (first init)))
-             (swap! found conj n))))
-       (when (coll? f) (doseq [x (if (map? f) (apply concat f) f)] (walk x))))
-     form)
-    @found))
+  (set (producing-let-names form)))
 
 (defn- caller-gives-it-up?
   "True when every call to `[name index]` hands over an argument the caller
@@ -672,7 +699,8 @@
   catch that -- the caller wrote no bang."
   [functions name index assumed]
   (every?
-   (fn [{caller :name :keys [params body]}]
+   (fn [function]
+     (let [{caller :name :keys [params body]} function]
      (every?
       (fn [call]
         (let [argument (nth call (inc index) ::none)
@@ -698,7 +726,7 @@
                      (first-truthy (fn [index]
                              (contains? assumed [caller index]))
                            (keep-indexed #(when (= %2 argument) %1) params)))))))
-      (calls-to (cons 'do body) name)))
+      (calls-to (cons 'do body) name))))
    functions))
 
 (defn module-linear-returning
@@ -726,8 +754,9 @@
       (let [surviving
             (binding [*linear-returning* assumed]
               (set (filter
-                    (fn [[name index]]
-                      (let [{:keys [params body]}
+                    (fn [pair]
+                      (let [[name index] pair
+                            {:keys [params body]}
                             (first (filter #(= name (:name %)) functions))
                             target (nth params index ::none)]
                         (and (not= target ::none)

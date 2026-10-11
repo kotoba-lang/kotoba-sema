@@ -8,11 +8,28 @@ permissions:
   contents: read
 
 jobs:
-  test:
+
+  opaque-js-bootstrap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DeLaGuardo/setup-clojure@13.2
+      - uses: actions/setup-node@v4
         with:
-          cli: latest
-      - run: clojure -M:test
+          node-version: '22'
+      # kbb resolves deps.edn without the JVM (root ADR-2610100200). Its
+      # classpath could not be used here while artifact pinned an osaho whose
+      # kir.cljc shadowed kir.cljk (artifact#59 moved the pin).
+      - uses: kotoba-lang/setup-kbb@a4586e48c72c69229ff1237a1246de63583b607d
+      - name: Author dependency classpath separately from test execution
+        run: kbb -Spath > "$RUNNER_TEMP/sema-classpath.txt"
+      - uses: actions/checkout@v4
+        with:
+          repository: kotoba-lang/org-babashka-nbb
+          ref: 829f0ba11016e925001d80e51f12848c4ad58112
+          path: .bootstrap-engine
+          persist-credentials: false
+      - name: Install the engine's pinned module resolver
+        working-directory: .bootstrap-engine
+        run: npm install --ignore-scripts --no-save --package-lock=false --omit=dev import-meta-resolve@4.2.0
+      - name: Execute nine source tests with fixed assertion counts
+        run: node scripts/test-js-value.mjs .bootstrap-engine/cli.js "$RUNNER_TEMP/sema-classpath.txt"

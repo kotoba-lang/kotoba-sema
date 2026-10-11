@@ -14,10 +14,8 @@
 ;; ── the shape a struct of arrays writes ─────────────────────────────────────
 
 (deftest a-threaded-let-is-linear
-  ;; Distinct names, because Kotoba refuses a rebound one: `amu check` on a
-  ;; `let` that binds `v` twice answers `duplicate let binding` (measured
-  ;; 2026-09-01, amu e96dd8c6). The first version of this analysis looked for
-  ;; exactly that shape and would have been a gate nothing could pass.
+  ;; Distinct names: a `let` that binds `v` twice is nested lets, each
+  ;; shadowing the last (ADR 0353 floor :let-rebinding), not one thread.
   (is (aff/linear-let-thread?
        '(let [a (vector-new 1 2 3)
               b (vector-assoc a 0 9)]

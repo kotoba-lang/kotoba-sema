@@ -31,7 +31,7 @@
        org.clojure/clojure {:mvn/version "1.12.0"}
         io.github.kotoba-lang/artifact
         {:git/url "https://github.com/kotoba-lang/artifact.git"
-         :git/sha "86d88bd58299cf575e9dfa2ab4789a0baa166614"}
+         :git/sha "96df8619e9f6d56a11da42bce7000f8ab2926052"}
         io.github.kotoba-lang/kotoba-hir
         {:git/url "https://github.com/kotoba-lang/kotoba-hir.git"
          ;; Advanced 2026-09-25 ac8e7051 -> 95af6410 (main tip, forward only): the
@@ -39,7 +39,8 @@
          ;; the state ability (kotoba-lang lang/state-ability.edn) puts on a
          ;; handler specialization. Carries hir's clojure.set -> kotoba.lang.coll
          ;; move, which the coll floor above (0ffd5f6) already satisfies.
-         :git/sha "95af641005b3b88717a62f871bc8773b00012d26"}
+         ;; Empty-library envelope admission; the existing cross-field/effect checks remain.
+         :git/sha "6f58c1aa9925d8b4b9221837dba776a99758fdcd"}
         io.github.kotoba-lang/osaho
         {:git/url "https://github.com/kotoba-lang/osaho.git"
          ;; b021a0d1: the five collection primitives the friendly heads in
@@ -63,7 +64,16 @@
          ;; only because this pin predated the rename. The frontend already
          ;; required osaho's kir/host-stack-exhausted?, which this pin lacked
          ;; (the suite could not load on the pinned interpreter).
-         :git/sha "353dd5f30bf803528f355f3b8090413a71e51bc8"}}
+         ;; Opaque :js-value leaf contract: JS preserves identity without
+         ;; traversing the host value; canonical set items/map keys refuse it.
+         ;; Weak identity separation of JS values from trampoline controls.
+         ;; Published PR103 typed opaque capture cells, allocation ledger and
+         ;; integer projection refusal; closure word/tail ABI remains unchanged.
+         ;; Advanced 2026-10-09, d1c27ed4 -> 502b5bac (osaho main, ahead 5,
+         ;; forward only): the :bytes and :link document kinds and their four
+         ;; KIR operations (osaho#105, root ADR-2610092310 S1), which this
+         ;; frontend now types; and host capability exception identity (#104).
+         :git/sha "502b5bac814ee4b9aec003d2520d23e0347680b8"}}
  :aliases {:test
            {:extra-paths ["test"]
             :extra-deps {io.github.cognitect-labs/test-runner
