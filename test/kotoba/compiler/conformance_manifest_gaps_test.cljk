@@ -95,6 +95,30 @@
       (is (= :division-by-zero
              (trap (str "(defn main [] (let [s (list " (items 33) ")] (+ 7 (doseq [x s] 0))))")))))))
 
+;; The vector walk was unrolled, one copy of the body per index, until
+;; 2026-10-10: the fixture's HIR printed 202,009 characters and its Wasm module
+;; was 103 KB, which overflowed the child node amu test --manifest decodes it
+;; in (Node 24, Linux). Written once in a loop it prints 12,697.
+(deftest a-vector-doseq-writes-its-body-once
+  (is (< (count (pr-str (sema/analyze doseq-fixture))) 32000))
+  (testing "a second binding does not multiply the body"
+    (is (< (count (pr-str (sema/analyze "(defn main [] (+ 7 (doseq [x [1 2] y [3 4]] 0)))")))
+           4000))))
+
+(deftest a-vector-doseq-keeps-its-bound
+  (let [items (fn [n] (str "[" (str/join " " (range 1 (inc n))) "]"))]
+    (testing "two bindings walk at most 16 items of each; 16 are walked"
+      (is (= 7 (w (answer (str "(defn main [] (let [v (if true " (items 16) " [])]"
+                               " (+ 7 (doseq [x v y [1]] 0))))"))))))
+    (testing "a 17th traps, as the unrolled walk did"
+      (is (= :division-by-zero
+             (trap (str "(defn main [] (let [v (if true " (items 17) " [])]"
+                        " (+ 7 (doseq [x v y [1]] 0))))")))))
+    (testing "every item is visited, in order"
+      (is (= :division-by-zero
+             (trap "(defn main [] (let [v (if true [1 2 3] [])] (+ 7 (doseq [x v :when (= x 3)] (quot 1 0)))))")))
+      (is (= 7 (w (answer "(defn main [] (let [v (if true [1 2 3] [])] (+ 7 (doseq [x v :while (< x 3)] (if (= x 3) (quot 1 0) 0)))))")))))))
+
 ;; --- count / nth on the pair chain -------------------------------------------
 
 (deftest the-multi-arity-fixture-runs
