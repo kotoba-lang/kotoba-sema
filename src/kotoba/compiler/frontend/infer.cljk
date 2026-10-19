@@ -3481,6 +3481,20 @@
             (require-expression-type! type :f32 arg))
           :bool)
 
+      ;; ADR 0353 floor :empty-map-literal (monolith a7ef280 11731-11743).
+      ;; A literal with keyword keys is a record, and `{}` has none: no field
+      ;; set, no row to extend. What gives it one -- a record or typed map its
+      ;; context declares, or the first key an `assoc` puts in it -- has
+      ;; already rewritten it by now, so an empty literal reaching here is
+      ;; refused rather than becoming the retired keyword->i64 map.
+      (and (= op 'map-new) (empty? args))
+      (reject! (str "an empty map literal {} has no row to extend: it is not a "
+                    "keyword->i64 map any more, and nothing here says its type. "
+                    "assoc keys into it ((assoc {} :a 1) is the record {:a 1}), "
+                    "write the literal with its fields, or give it a record or "
+                    "[:map K V] type from context")
+               (list 'map-new) :kotoba.error/empty-map-literal)
+
       (= op 'map-new)
       (do (doseq [[key-form value-form key-type value-type]
                   (map (fn [[key-form value-form] [key-type value-type]]
