@@ -9,7 +9,7 @@
             [kotoba.compiler.frontend.closure-types :refer [canonical-closure-result-type]]
             [kotoba.compiler.frontend.expand :refer [max-parameters state-rebuild-seq]]
             [kotoba.compiler.frontend.namespace-defs :refer [#?@(:kotoba [heads-kids])]]
-            [kotoba.compiler.frontend.infer :refer [#?@(:kotoba [zip-locals] :default [abort-signatures abort-type-text zip-locals]) infer-expression-type same-expression-type?]]
+            [kotoba.compiler.frontend.infer :refer [#?@(:kotoba [zip-locals] :default [abort-signatures abort-type-text]) infer-expression-type same-expression-type?]]
              #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures abort-type-text]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]

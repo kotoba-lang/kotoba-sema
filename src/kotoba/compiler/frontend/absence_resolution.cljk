@@ -3,7 +3,7 @@
   (:require #?@(:kotoba [[kotoba.form :as form]
                          [kotoba.compiler.frontend.base :refer [fget fmeta-from fput]]
                          [kotoba.compiler.frontend.kernel-region :refer [absence-marker?]]
-                         [kotoba.compiler.frontend.infer :refer [absence-in-tail? legacy-absence zip-locals]]
+                         [kotoba.compiler.frontend.infer :refer [absence-in-tail? legacy-absence #?@(:kotoba [zip-locals] :default [])]]
                          [kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil resolve-absence-if]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                                   [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
