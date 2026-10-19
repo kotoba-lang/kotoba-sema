@@ -11949,6 +11949,7 @@
                (= then-type else-type) then-type
                (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
                (lenient-branch-join then-type else-type)
+               (same-expression-type? then-type else-type) then-type
                *lenient-branch-joins?* then-type
                :else (reject! "if branches must have the same value type" form)))
         do (let [tail? *absence-tail*]
@@ -13039,7 +13040,8 @@
   consequence of typing its exits."
   [helper declared-result signatures]
   (let [own-codes #{:kotoba.error/loop-exit-type :kotoba.error/loop-result-type}
-        inferred (try (loop-helper-exit-type helper signatures)
+        inferred (try (binding [*lenient-branch-joins?* true]
+                        (loop-helper-exit-type helper signatures))
                       (catch #?(:clj Exception :cljs :default) e
                         (if (contains? own-codes (:kotoba.error/code (ex-data e)))
                           (throw e)
@@ -13084,6 +13086,7 @@
   permissive -- an intermediate disagreement is usually a placeholder that has
   not settled yet -- and the last one refuses."
   [functions shapes]
+
   (if-not (first-truthy :loop-helper? functions)
     functions
     (letfn [(result-of [f fs]
