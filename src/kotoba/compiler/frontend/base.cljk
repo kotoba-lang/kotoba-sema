@@ -951,33 +951,22 @@
   is otherwise a constant document, and a local inside one does not compile
   (lang/conformance/abort/ex_info_round_trip.kotoba). Keys must be keywords;
   each value is typed later by `__kotoba_document_of`. Any other `data` is
-  passed through and must already be a `:document`. The one-argument arity is
-  refused. The three-argument arity `(ex-info msg data cause)` keeps the cause
-  as the data's `:cause`: there is no Throwable here, but another error is a
-  `:document` (what an abort carries), so the chain is not lost."
+  passed through and must already be a `:document`. The one- and
+  three-argument arities are refused: a cause is another Throwable, and there
+  is none here to be one (monolith a7ef280 4229-4253)."
   [args form]
-  (when-not (<= 2 (count args) 3)
-    (reject! "ex-info takes a message, a data document and an optional cause"
+  (when-not (= 2 (count args))
+    (reject! "ex-info takes a message and a data document; the cause arity has no Throwable to name"
              form :kotoba.error/library-head-shape))
-  (let [[msg data cause] args
+  (let [[msg data] args
         entries (fn [m]
                   (when-not (every? keyword? (keys m))
                     (reject! "ex-info data map keys must be keywords" form :kotoba.error/library-head-shape))
                   (mapcat (fn [[k v]] [(list 'document-keyword k) (list '__kotoba_document_of v)])
-                          (sort-by (comp str key) m)))
-        cause-entry [(list 'document-keyword :cause) (list '__kotoba_document_of cause)]
-        data* (cond
-                (and (map? data) (= 3 (count args)))
-                (apply list 'document-map (concat (entries (dissoc data :cause)) cause-entry))
-
-                (map? data)
-                (apply list 'document-map (entries data))
-
-                (= 3 (count args))
-                (list 'document-assoc data (first cause-entry) (second cause-entry))
-
-                :else data)]
-    [msg data*])))
+                          (sort-by (comp str key) m)))]
+    [msg (if (map? data)
+           (apply list 'document-map (entries data))
+           data)])))
 
 ;; expand-intrinsic-helper-forms on the Kotoba route: the same renaming over
 ;; Form records. The host's `volatile!` of used heads is a second pure pass

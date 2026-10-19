@@ -1396,9 +1396,9 @@
     (canonical-typed-map-type? value-type) (rp-seq3 "typed-map-contains" value-type receiver key)
     :else
     (throw (rp-error (str "contains? requires a canonical typed map "
-                          "[:map key-type value-type] or a typed set [:set item-type]; got "
-                          (pr-form value-type)
-                          ". The bounded keyword map has no presence primitive at all")
+                          "[:map key-type value-type]; got " (pr-form value-type)
+                          ". A typed set answers to typed-set-contains, and the "
+                          "bounded keyword map has no presence primitive at all")
                      "kotoba.error/map-presence-receiver" form))))
    :default nil)
 
@@ -2456,9 +2456,9 @@
 
             :else
             (reject! (str "contains? requires a canonical typed map "
-                          "[:map key-type value-type] or a typed set [:set item-type]; got "
-                          (pr-str value-type)
-                          ". The bounded keyword map has no presence primitive at all")
+                          "[:map key-type value-type]; got " (pr-str value-type)
+                          ". A typed set answers to typed-set-contains, and the "
+                          "bounded keyword map has no presence primitive at all")
                      form :kotoba.error/map-presence-receiver)))
 
         (= op 'dissoc)
