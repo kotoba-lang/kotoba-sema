@@ -11,7 +11,7 @@
             #?@(:kotoba [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? head-is? map-literal-record-type sym-is?]]] :default [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [head-is? sym-is?])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? kw-text parametric-result-type? record-type? schema-ref-type? structured-type? typed-set-type? variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-effect-row callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? closure-word-type dispatcher-key generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
-            #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
+            #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [compiler-rejection? internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol? max-typed-set-items]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
             #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [kw-head? record-field-type]]] :default [[kotoba.compiler.frontend.infer :refer [record-field-type #?@(:kotoba [kw-head?])]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.record-projection :refer [doc-nth-helper-name f32-literal-bits! match-has-marker]]]))
@@ -10765,3 +10765,354 @@
     (if (and (seq location) (or (coll? result) (symbol? result)))
       (with-meta result (merge (meta result) location))
       result))))
+
+
+;; --- main-only preservation forms (a7ef280 monolith), host twins only ---
+;; These 18 forms are preserved from the monolith verbatim (feature wiring is
+;; absent in the split -- see PR notes: typed twins and wiring are follow-ups).
+
+#?(:kotoba nil :default (def ^:dynamic ^:private *list-item-notes* nil))
+
+#?(:kotoba nil :default (def ^:dynamic ^:private *module-absent-fields* {}))
+
+#?(:kotoba nil :default (def ^:dynamic *module-list-fields* {}))
+
+#?(:kotoba nil :default (def ^:dynamic ^:private *module-list-inferred* {}))
+
+#?(:kotoba nil :default (defn- absent-field-spelled-type
+  "The type ONE value written at a key spells on its own, for
+  `module-absent-fields`, or `nil` when it spells none: `nil` itself, an
+  expression only inference can type, and a keyword literal whose values
+  spell nothing (it lowers to the legacy pair map, `:map`, and is typed
+  against T where it is written instead). A literal that refuses on its own
+  contributes nothing here; it refuses where it is desugared."
+  [form]
+  (when (some? form)
+    (let [t (try (binding [*module-absent-fields* {}]
+                   (map-literal-record-field-type form))
+                 (catch #?(:clj Throwable :cljs :default) error
+                   (if (compiler-rejection? error) nil (throw error))))]
+      (when (and (some? t) (not= :map t)) t)))))
+
+#?(:kotoba nil :default (defn- module-absent-fields
+  "`*module-absent-fields*` for one module's source forms: every keyword key
+  written with a `nil` value -- a keyword-keyed map literal entry or an
+  `assoc` pair -- with the types every non-nil value written at that key
+  spells (`absent-field-spelled-type`), compared with `=`, never hashed."
+  [forms]
+  (let [writes (volatile! [])
+        note! (fn [k v] (when (keyword? k) (vswap! writes conj [k v])))
+        walk (fn walk [form]
+               (cond
+                 (map? form)
+                 (do (when (every? keyword? (keys form))
+                       (doseq [[k v] form] (note! k v)))
+                     (doseq [[k v] form] (walk k) (walk v)))
+                 (seq? form)
+                 (do (when (and (= 'assoc (first form))
+                                (>= (count form) 4) (even? (count form)))
+                       (doseq [[k v] (partition 2 (drop 2 form))] (note! k v)))
+                     (doseq [x form] (walk x)))
+                 (coll? form) (doseq [x form] (walk x))
+                 :else nil))]
+    (doseq [form forms] (walk form))
+    (let [absent (reduce (fn [acc [k v]] (if (nil? v) (conj acc k) acc)) #{} @writes)]
+      (reduce (fn [acc [k v]]
+                (if-let [t (when (contains? absent k) (absent-field-spelled-type v))]
+                  (let [[known] (get-in acc [:conflicts k])
+                        known (or known (second (get-in acc [:fields k])))]
+                    (cond
+                      (nil? known) (assoc-in acc [:fields k] [:option t])
+                      (= known t) acc
+                      (contains? (:conflicts acc) k) acc
+                      :else (-> acc
+                                (update :fields dissoc k)
+                                (assoc-in [:conflicts k] [known t]))))
+                  acc))
+              {:fields {} :conflicts {}}
+              @writes)))))
+
+#?(:kotoba nil :default (defn- reject-absent-field-conflict!
+  "A key the module writes `nil` at and two values of two types: which one is
+  the absent field's T is not this compiler's guess to make."
+  [k form]
+  (when-let [[t u] (get-in *module-absent-fields* [:conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " is nil in this module, which makes it an absent [:option T], "
+                  "and this module writes two types at it: "
+                  (map-literal-type-description t) " and "
+                  (map-literal-type-description u)
+                  "; an absent field holds one type when it is present")
+             form :kotoba.error/map-literal-value))))
+
+#?(:kotoba nil :default (defn- absent-field-type
+  "The `[:option T]` the module's source says key `k` is, or `nil`."
+  [k]
+  (get-in *module-absent-fields* [:fields k])))
+
+#?(:kotoba nil :default (defn- module-list-fields
+  "`*module-list-fields*` for one module's source forms (floor
+  :empty-vector-field): every keyword key written `[]`, with the item types
+  the module's `conj`s and vector literals at that key spell
+  (`absent-field-spelled-type`), compared with `=`, never hashed."
+  [forms]
+  (let [empties (volatile! #{})
+        items (volatile! [])
+        literal-i64 (volatile! #{})
+        record-lists (volatile! #{})
+        note-item! (fn [k x]
+                     (vswap! items conj [k x])
+                     (when (integer? x) (vswap! literal-i64 conj k)))
+        note! (fn [k v]
+                (when (keyword? k)
+                  (when (vector? v)
+                    (if (empty? v)
+                      (vswap! empties conj k)
+                      (do (when (some #(and (map? %) (seq %) (every? keyword? (keys %))) v)
+                            (vswap! record-lists conj k))
+                          (doseq [x v] (note-item! k x)))))))
+        walk (fn walk [form]
+               (cond
+                 (map? form)
+                 (do (when (every? keyword? (keys form))
+                       (doseq [[k v] form] (note! k v)))
+                     (doseq [[k v] form] (walk k) (walk v)))
+                 (seq? form)
+                 (do (when (and (= 'assoc (first form))
+                                (>= (count form) 4) (even? (count form)))
+                       (doseq [[k v] (partition 2 (drop 2 form))] (note! k v)))
+                     (when (and (= 'update (first form)) (>= (count form) 5)
+                                (keyword? (nth form 2)) (= 'conj (nth form 3)))
+                       (doseq [x (drop 4 form)] (note-item! (nth form 2) x)))
+                     (doseq [x form] (walk x)))
+                 (coll? form) (doseq [x form] (walk x))
+                 :else nil))]
+    (doseq [form forms] (walk form))
+    (let [types (reduce (fn [acc [k x]]
+                          (if-let [t (when (contains? @empties k) (absent-field-spelled-type x))]
+                            (update acc k (fn [ts] (if (some #(= t %) ts) ts (conj (or ts []) t))))
+                            acc))
+                        {} @items)
+          spelled (reduce-kv (fn [acc k ts]
+                               (cond
+                                 (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
+                                 (= :i64 (first ts)) acc
+                                 :else (assoc-in acc [:fields k] [:list (first ts)])))
+                             {:fields {} :conflicts {}}
+                             types)
+          open (into #{} (remove #(or (contains? (:fields spelled) %)
+                                      (contains? (:conflicts spelled) %)))
+                     @empties)]
+      ;; floor :list-item-from-expression: an open key's inferred types.
+      (reduce-kv (fn [acc k ts]
+                   (if-not (contains? open k)
+                     acc
+                     (let [ts (cond->> (vec (distinct ts))
+                                (contains? @literal-i64 k) (into [:i64]))]
+                       (cond
+                         (< 1 (count ts)) (assoc-in acc [:conflicts k] (vec (take 2 ts)))
+                         (= :i64 (first ts)) acc
+                         :else (assoc-in acc [:fields k] [:list (first ts)])))))
+                 (assoc spelled
+                        :open open
+                        :record-lists @record-lists
+                        ;; floor :record-list-field-literal: a record-lists key
+                        ;; holds the R its literal types, noted beside every
+                        ;; type the module conj's there; a second type is the
+                        ;; conflict.
+                        :record-conflicts
+                        (into {}
+                              (keep (fn [k]
+                                      (let [ts (distinct (get *module-list-inferred* k))]
+                                        (when (< 1 (count ts)) [k (vec (take 2 ts))]))))
+                              @record-lists))
+                 *module-list-inferred*)))))
+
+#?(:kotoba nil :default (defn list-field-read-key
+  "The keyword key RECEIVER reads, `(record-get m k)` / `(get m k)` / `(k m)`,
+  or nil."
+  [receiver]
+  (when (seq? receiver)
+    (let [[op & args] receiver]
+      (cond
+        (and (contains? '#{record-get get} op) (keyword? (last args))) (last args)
+        (and (keyword? op) (= 1 (count args))) op
+        :else nil)))))
+
+#?(:kotoba nil :default (defn- note-list-item-type!
+  "floor :list-item-from-expression: an item of type T is conj'd onto the field
+  RECEIVER reads. Noted when that is an open `[]` key and T is known and not
+  `:i64`. Floor :record-list-field-literal: onto a record-lists key T is
+  noted, and where its list is known to be LIST-TYPE `[:list R]`, R before
+  it, so a T /= R is a second type at the key (`:record-conflicts`)."
+  ([receiver t] (note-list-item-type! receiver t nil))
+  ([receiver t list-type]
+   (when-let [notes *list-item-notes*]
+     (when-let [k (list-field-read-key receiver)]
+       (when (and (some? t) (not= :i64 t))
+         (cond
+           (contains? (:open *module-list-fields*) k)
+           (vswap! notes conj [k t])
+
+           (contains? (:record-lists *module-list-fields*) k)
+           (if (canonical-list-type? list-type)
+             (vswap! notes conj [k (second list-type)] [k t])
+             (vswap! notes conj [k t])))))))))
+
+#?(:kotoba nil :default (defn- reject-list-field-conflict!
+  "A key the module writes `[]` at and conj's items of two types at: which one
+  the list holds is not this compiler's guess to make."
+  [k form]
+  (when-let [[t u] (get-in *module-list-fields* [:conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " is [] in this module, which makes it a list of what the module "
+                  "conj's at it, and this module conj's two types at it: "
+                  (map-literal-type-description t) " and "
+                  (map-literal-type-description u)
+                  "; a list holds one type")
+             form :kotoba.error/map-literal-value))
+  (when-let [[t u] (get-in *module-list-fields* [:record-conflicts k])]
+    (reject! (str "field " (map-literal-key-description-for-message k)
+                  " holds a vector of " (map-literal-type-description t)
+                  " in this module, which makes it a list of that record, and this module conj's "
+                  (map-literal-type-description u)
+                  " at it; a list holds one type")
+             form :kotoba.error/map-literal-value))))
+
+#?(:kotoba nil :default (defn- list-field-type
+  "The `[:list R]` the module's source says key `k` is, or `nil`."
+  [k]
+  (get-in *module-list-fields* [:fields k])))
+
+#?(:kotoba nil :default (defn- desugar-absent-field-value
+  "A value written at an absent field of type `option-type`: `nil` is its
+  none; a value whose type the source spells, and a map or vector literal
+  (typed against T, as a record field's literal is), is its some. Anything
+  else is an expression already of some type, checked against the option as
+  written -- a present T from a call is not wrapped (no coercion)."
+  [option-type form]
+  (let [t (second option-type)]
+    (cond
+      (nil? form) (list 'option-none-of option-type)
+      (and (map? form) (record-type? t))
+      (list 'option-some-of option-type (desugar-map form t))
+      (or (map? form) (vector? form) (some? (map-literal-value-type form)))
+      (list 'option-some-of option-type (desugar-expected-value t form))
+      :else (desugar-expected-value option-type form)))))
+
+#?(:kotoba nil :default (defn- desugar-update
+  "`(update m k f x ..)` as `(assoc m k (f (k m) x ..))`, the map named once.
+  A keyword key reads with `(k m)`, any other with `(get m k)`. A `fn` literal
+  with one parameter vector of the call's arity is applied as a `let` -- its
+  parameters bound to the read value and the extra arguments in order -- so a
+  destructuring parameter means what it means in `let`; any other function is
+  called as it would be written."
+  [args form]
+  (when (< (count args) 3)
+    (reject! "update requires a map, a key and a function: (update m k f x ..)"
+             form :kotoba.error/update-arity))
+  (let [[target k f & extra] args
+        bound (if (simple-symbol? target) target (synthetic "update_target"))
+        read (if (keyword? k) (list k bound) (list 'get bound k))
+        fn-parts (when (and (seq? f) (= 'fn (first f)))
+                   (let [parts (rest f)
+                         parts (if (simple-symbol? (first parts)) (rest parts) parts)]
+                     (when (vector? (first parts)) parts)))
+        params (first fn-parts)
+        applied (if (and params
+                         (= (count params) (inc (count extra)))
+                         (not-any? #{'&} params)
+                         (seq (rest fn-parts)))
+                  (list* 'let (vec (interleave params (cons read extra)))
+                         (rest fn-parts))
+                  (list* f read extra))
+        written (list 'assoc bound k applied)]
+    (desugar-expr (if (= bound target)
+                    written
+                    (list 'let [bound target] written))))))
+
+#?(:kotoba nil :default (defn- sequence-first-chain
+  "The filter / remove / reverse chain `first` is asked of, outermost step
+  first, or nil when the operand is not one (or a step is a module's own
+  function, or has another arity)."
+  [form]
+  (loop [form form steps []]
+    (let [head (when (seq? form) (first form))]
+      (cond
+        (and (= 'reverse head) (= 2 (count form))
+             (not (contains? *function-arities* 'reverse)))
+        (recur (second form) (conj steps [:reverse]))
+
+        (and (contains? '#{filter remove} head) (= 3 (count form))
+             (not (contains? *function-arities* head)))
+        (recur (nth form 2) (conj steps [head (second form)]))
+
+        (seq steps) {:source form :steps steps}
+        :else nil)))))
+
+#?(:kotoba nil :default (defn- desugar-sequence-first
+  [{:keys [source steps]}]
+  (let [items (synthetic "seq_v")
+        i (synthetic "seq_i")
+        x (synthetic "seq_x")
+        backward? (odd? (count (filter #(= :reverse (first %)) steps)))
+        tests (for [[op p-form] (reverse steps)
+                    :when (not= :reverse op)]
+                (let [named? (top-level-function-symbol? p-form)
+                      inline? (and (seq? p-form) (= 'fn (first p-form)))
+                      callback (when-not (or named? inline?) (synthetic "seq_callback"))
+                      test (cond
+                             inline?
+                             (let [[_ params & body] p-form]
+                               (when-not (and (vector? params) (= 1 (count params))
+                                              (every? symbol? params)
+                                              (seq body))
+                                 (reject! (str op " pred must be (fn [x] single-expr)") p-form))
+                               (list 'let [(first params) x]
+                                     (binding [*lexical-bindings* (into *lexical-bindings* params)
+                                               *abort-lexical-context* :fn]
+                                       (desugar-expr (implicit-do-body body)))))
+                             named? (list p-form x)
+                             :else (list (invoke-dispatcher-name :bool 1) callback x))]
+                  {:callback callback :p-form p-form
+                   :test (if (= 'remove op) (list 'not test) test)}))
+        callbacks (filter :callback tests)
+        index (if backward? (list '- (list '- (list 'count items) 1) i) i)
+        found (list '__kotoba_seq_found items x)
+        absent (list '__kotoba_seq_absent items)
+        search (if (seq tests)
+                 (list 'loop [i 0]
+                       (list 'if (list '< i (list 'count items))
+                             (list 'let [x (list 'nth items index)]
+                                   (list 'if (if (next tests)
+                                               (cons 'and (map :test tests))
+                                               (:test (first tests)))
+                                         found
+                                         (list 'recur (list '+ i 1))))
+                             absent))
+                 (list 'if (list '< 0 (list 'count items))
+                       (list 'let [x (list 'nth items (if backward?
+                                                       (list '- (list 'count items) 1)
+                                                       0))]
+                             found)
+                       absent))]
+    (binding [*loop-known-types* (into {i :i64} (map (fn [t] [(:callback t) :i64])) callbacks)]
+      (desugar-expr
+       (list 'let (vec (concat (mapcat (juxt :callback :p-form) callbacks) [items source]))
+             search))))))
+
+#?(:kotoba nil :default (defn- require-rowed-callable-argument!
+  "A `[:fn ...]` parameter that declares an effect row is given a closure
+  whose row is known to be that one: a `fn` / `fn-ref` written there, lifted
+  under the contract and checked against its row, or a value of exactly that
+  type. Anything else is a closure of unknown row -- a let-bound `fn` lifted
+  under no contract -- and is refused by name rather than trapping closed at
+  the row's dispatcher."
+  [contract argument]
+  (when (callable-effect-row contract)
+    (when-not (or (and (seq? argument) (contains? '#{fn fn-ref} (first argument)))
+                  (= contract (expression-callable-contract argument)))
+      (reject! (str "a [:fn ...] parameter declaring the effect row "
+                    (pr-str (:effects (peek contract)))
+                    " takes a fn literal or a value of that same type; the row of this closure is not known (ADR 0353)")
+               argument :kotoba.error/callable-effect-row)))))
