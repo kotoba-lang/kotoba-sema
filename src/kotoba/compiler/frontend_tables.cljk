@@ -1148,7 +1148,7 @@
 
 #?(:kotoba
    (defn document-fixed-operations [] [:ref :form/r]
-     (form/edn-form "{document-null 0 document-bool 1 document-i64 1 document-f64 1 document-string 1 document-keyword 1 document-symbol 1 document-count 1 document-kind 1 document-sha256 1 document-print 1 document-read 1 document-edn-print 1 document-edn-read 1 document-vector-at 2 document-list-at 2 document-map-entry-at 2 document-vector-assoc 3 document-vector-conj 2 document-vector-drop 2 document-vector-remove 2 document-vector-sort 1 document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2 document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1 document-i64-value 1 document-f64-value 1}"))
+     (form/edn-form "{document-null 0 document-bool 1 document-i64 1 document-f64 1 document-string 1 document-keyword 1 document-symbol 1 document-count 1 document-kind 1 document-sha256 1 document-print 1 document-read 1 document-edn-print 1 document-edn-read 1 document-vector-at 2 document-list-at 2 document-map-entry-at 2 document-vector-assoc 3 document-vector-conj 2 document-vector-drop 2 document-vector-remove 2 document-vector-sort 1 document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2 document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1 document-i64-value 1 document-f64-value 1 document-bytes 1 document-bytes-value 1 document-link 1 document-link-value 1}"))
    :default
    (def document-fixed-operations
      '{document-null 0 document-bool 1 document-i64 1 document-f64 1
@@ -1158,7 +1158,9 @@
        document-vector-drop 2 document-vector-remove 2 document-vector-sort 1
        document-equal? 2 document-set-contains? 2 document-contains 2 document-get 2 document-assoc 3 document-dissoc 2
        document-merge 2 document-string-value 1 document-keyword-value 1 document-symbol-value 1 document-bool-value 1
-       document-i64-value 1 document-f64-value 1}))
+       document-i64-value 1 document-f64-value 1
+       ;; root ADR-2610092310 S2: the IPLD :bytes and :link document kinds
+       document-bytes 1 document-bytes-value 1 document-link 1 document-link-value 1}))
 
 #?(:kotoba
    (defn document-variadic-operations [] [:ref :form/r]

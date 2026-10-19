@@ -3152,6 +3152,16 @@
       (do (require-expression-type! (first types) :document (first args)) [:option :i64])
       (= op 'document-f64-value)
       (do (require-expression-type! (first types) :document (first args)) [:option :f64])
+      ;; root ADR-2610092310 S2. document-link answers an option: bytes that
+      ;; are not one binary CIDv1 make no link (osaho kotoba.kir).
+      (= op 'document-bytes)
+      (do (require-expression-type! (first types) :bytes (first args)) :document)
+      (= op 'document-bytes-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :bytes])
+      (= op 'document-link)
+      (do (require-expression-type! (first types) :bytes (first args)) [:option :document])
+      (= op 'document-link-value)
+      (do (require-expression-type! (first types) :document (first args)) [:option :bytes])
 
       (contains? (disj comparisons '=) op)
       (do (numeric-operand-type! op args types) :bool)
