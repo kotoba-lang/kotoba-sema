@@ -9050,7 +9050,8 @@
         (if (contains? *function-arities* 'invoke)
           (apply list 'invoke (map desugar-expr args))
           (let [declared-result (first args)
-                typed? (closure-result-type? declared-result)
+                typed? (or (callable-type? declared-result)
+                           (closure-result-type? declared-result))
                 _ (when (and (or (keyword? declared-result)
                                  (structured-type? declared-result))
                              (not typed?))
@@ -9073,7 +9074,9 @@
                        form))
             (let [[closure & invoke-args] call-args]
               (apply list (request-invoke-dispatcher result-type (count invoke-args))
-                     (desugar-result-expr result-type closure)
+                     (if (callable-type? result-type)
+                       (desugar-expr closure)
+                       (desugar-result-expr result-type closure))
                      (map desugar-expr invoke-args)))))
         apply
         (if (contains? *function-arities* 'apply)
