@@ -57,6 +57,7 @@
 ;; call, RECORDS the argument types instead of type-checking the arguments
 ;; against the (placeholder) declared param-types. Both nil in the normal
 ;; check-value-types! pass, so ordinary type-checking is unchanged.
+#?(:kotoba nil :default (def ^:dynamic *lenient-branch-joins?* nil))
 #?(:kotoba nil :default (def ^:dynamic *loop-helper-names* nil))
 #?(:kotoba nil :default (def ^:dynamic *loop-helper-recorder* nil))
 
@@ -3763,6 +3764,7 @@
                (if (schema-ref-type? else-type) else-type then-type)
                (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
                (lenient-branch-join then-type else-type)
+               *lenient-branch-joins?* then-type
                :else (reject! "if branches must have the same value type" form)))
         do (let [tail? *absence-tail*]
              (last (map-indexed (fn [index arg]
@@ -4703,7 +4705,8 @@
   consequence of typing its exits."
   [helper declared-result signatures]
   (let [own-codes #{:kotoba.error/loop-exit-type :kotoba.error/loop-result-type}
-        inferred (try (loop-helper-exit-type helper signatures)
+        inferred (try (binding [*lenient-branch-joins?* true]
+                        (loop-helper-exit-type helper signatures))
                       (catch #?(:clj Exception :cljs :default) e
                         (if (contains? own-codes (:kotoba.error/code (ex-data e)))
                           (throw e)
