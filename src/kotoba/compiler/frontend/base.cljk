@@ -396,8 +396,16 @@
   ;; already bounds how large that one pass can be.
   (let [out (try
               (kr/read-forms source)
+              ;; The reader's own reason is IN the message, not only in the
+              ;; cause: callers that report `ex-message` -- amu's
+              ;; `test --manifest` :compiler-admit row among them -- printed
+              ;; "source reader rejected input" and nothing else, so a
+              ;; negative case could not name the refusal it exists for
+              ;; (kotoba-lang negative/malformed_reader_conditional.cljk).
               (catch #?(:clj Exception :cljs :default) error
-                (throw (ex-info "source reader rejected input"
+                (throw (ex-info (if-let [reason (ex-message error)]
+                                  (str "source reader rejected input: " reason)
+                                  "source reader rejected input")
                                 {:phase :read} error))))]
     (when (> (count out) 10000)
       (throw (ex-info "too many top-level forms" {:phase :read})))
