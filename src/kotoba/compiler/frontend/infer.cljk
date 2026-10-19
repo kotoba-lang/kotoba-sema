@@ -1988,9 +1988,9 @@
   (throw (fe-reject-data (str "set item type mismatch: this set is " (pr-form type)
                               ", so every item must be " (pr-form expected)
                               "; this one is " (pr-form actual)
-                              ". A `#{...}` literal is [:set :keyword], [:set :string] or "
-                              "[:set :i64] by its items; one mixing item types is outside "
-                              "the bounded profile. Write "
+                              ". A `#{...}` literal is always [:set :keyword]: a set "
+                              "literal of another item type, and one mixing item types, "
+                              "are both outside the bounded profile. Write "
                               "(typed-set-new [:set item-type] item ...) for any other "
                               "item type.")
                          "kotoba.error/subset-reject" item (expected-actual-data expected actual))))
@@ -2481,9 +2481,9 @@
       (reject! (str "set item type mismatch: this set is " (pr-str type)
                     ", so every item must be " (pr-str expected)
                     "; this one is " (pr-str actual)
-                    ". A `#{...}` literal is [:set :keyword], [:set :string] or "
-                    "[:set :i64] by its items; one mixing item types is outside "
-                    "the bounded profile. Write "
+                    ". A `#{...}` literal is always [:set :keyword]: a set "
+                    "literal of another item type, and one mixing item types, "
+                    "are both outside the bounded profile. Write "
                     "(typed-set-new [:set item-type] item ...) for any other "
                     "item type.")
                item :kotoba.error/subset-reject

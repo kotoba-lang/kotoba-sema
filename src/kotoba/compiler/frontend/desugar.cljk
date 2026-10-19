@@ -4319,14 +4319,6 @@
 
 ;; ---- set and f64 literals ----
 #?(:kotoba
-   (defn set-all-of? [s [:ref :form/r] kind :string i :i64] :bool
-     (if (>= i (form/count-of s))
-       true
-       (and (if (string=? kind "string") (form/is-string? (form/nth-of s i)) (form/is-int? (form/nth-of s i)))
-            (set-all-of? s kind (+ i 1)))))
-   :default nil)
-
-#?(:kotoba
    (defn set-member-position [sorted [:list [:ref :form/r]] key :string i :i64] :i64
      (if (>= i (vector-count sorted))
        i
@@ -4345,16 +4337,12 @@
          (set-sorted-members s (+ i 1) (slice-forms acc p (vector-count acc) (form/append-form (slice-forms acc 0 p (form/no-forms)) m))))))
    :default nil)
 
-;; a bounded non-empty keyword set lowers to the typed-set profile in canonical order; the item type is read off the literal
+;; a bounded non-empty keyword set lowers to the typed-set profile in canonical order; a `#{...}` literal is always [:set :keyword]
 #?(:kotoba
    (defn desugar-set-literal [env [:ref :fe/env] s [:ref :form/r]] [:ref :fe/dr]
-     (let [kind (cond
-                  (and (> (form/count-of s) 0) (set-all-of? s "string" 0)) :string
-                  (and (> (form/count-of s) 0) (set-all-of? s "i64" 0)) :i64
-                  :else :keyword)]
-       (dr env (head-call (form/symbol-form "typed-set-new")
-                          (form/cons-onto (form/vec2 (form/keyword-form :set) (form/keyword-form kind))
-                                          (set-sorted-members s 0 (form/no-forms)))))))
+     (dr env (head-call (form/symbol-form "typed-set-new")
+                        (form/cons-onto (form/vec2 (form/keyword-form :set) (form/keyword-form :keyword))
+                                        (set-sorted-members s 0 (form/no-forms))))))
    :default nil)
 
 ;; a floating literal is its bits
@@ -8778,18 +8766,8 @@
     ;; Top-level constants admit only bounded, non-empty keyword sets. Lower
     ;; them into the typed-set profile in canonical order so raw set iteration
     ;; order is never observable in KIR or an artifact.
-    ;; The item type is read off the literal: all strings is `[:set :string]`,
-    ;; all integers `[:set :i64]`. It was hard-coded `[:set :keyword]`, which made
-    ;; `#{"eval" "exec"}` -- ordinary Clojure, and how the compiler's own sources
-    ;; write a set of names to test membership in -- unwritable. A literal that
-    ;; mixes kinds (or is empty) keeps `[:set :keyword]` and is refused by name
-    ;; at the item that does not fit.
-    (set? form) (let [item-type (cond
-                                  (and (seq form) (every? string? form)) :string
-                                  (and (seq form) (every? kotoba-integer? form)) :i64
-                                  :else :keyword)]
-                  (list* 'typed-set-new [:set item-type]
-                         (sort-by pr-str form)))
+    (set? form) (list* 'typed-set-new [:set :keyword]
+                       (sort-by pr-str form))
     ;; Vector literals now enter the owned bounded vector-i64 profile rather
     ;; than the legacy untagged pair arena. Binding and parameter vectors are
     ;; consumed by their enclosing forms and never reach this branch.
