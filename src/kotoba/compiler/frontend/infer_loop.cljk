@@ -2,7 +2,7 @@
   "Kotoba-native loop-helper result inference split from frontend.infer."
   #?(:kotoba {:kotoba/export [infer-loop-helper-results]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [fe-reject-data fget fl-nth fput ftruthy? pr-form]]
+            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [fe-reject-data fget fl-nth fput ftruthy? pr-form] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [preserve-form-meta]]])
             #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [a abort-bottom-form absence-kind? absence-type argc empty-fmap fn-signature ie-type-of lenient-branch-join map2 nil-kind-form none-kind-form option-of option-vector-type? same-expression-type? sym-is? tk type-text type-valid! zip-locals]]]))
 

@@ -2,7 +2,7 @@
   #?(:kotoba {:kotoba/export [lint lint-forms]})
   (:require [kotoba.form :as form]
             [kotoba.compiler.frontend.analyze :as analyze]
-            [kotoba.compiler.frontend.base :refer [fget fkw fput form-span form-text simple-symbol-form?]]
+            [kotoba.compiler.frontend.base :refer [form-span #?@(:kotoba [fget fkw fput form-text simple-symbol-form?])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer?]]
             [kotoba.compiler.frontend.infer :refer [use-site-text]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]

@@ -2,7 +2,7 @@
   "Kotoba-native loop-helper recur argument checks split from frontend.infer."
   #?(:kotoba {:kotoba/export [check-loop-recur-argument-types!]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [fe-reject-data fget fl-has? fl-slice form-text fput ftruthy?]]
+            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [fe-reject-data fget fl-has? fl-slice form-text fput ftruthy?] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [a abort-bottom-form argc empty-fmap fn-signature ie-type-of map2 same-expression-type? sym-is? tk type-text zip-locals]]]))
 
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]

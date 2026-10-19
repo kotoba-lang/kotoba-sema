@@ -2,7 +2,7 @@
   "Kotoba-native absence, abort, and value-checking inference passes split from frontend.infer."
   #?(:kotoba {:kotoba/export [abort-signatures abort-type-text check-value-types! elaborate-aborts elaborate-named-abilities infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-type-or-nil resolve-absence-if]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-registry fdrop fe-reject fe-reject-data fget fl-has? fl-nth fl-slice form-text fput fsource-head ftruthy? simple-symbol-form? source-operation-registry]]
+            [kotoba.compiler.frontend.base :refer [abort-escapes? abort-form-mentions? capability-registry source-operation-registry #?@(:kotoba [fdrop fe-reject fe-reject-data fget fl-has? fl-nth fl-slice form-text fput fsource-head ftruthy? simple-symbol-form?])]]
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker?]]
             [kotoba.compiler.frontend.closure-types :refer [schema-ref-type? validate-value-type!]]
             [kotoba.compiler.frontend.expand :refer [preserve-form-meta]]

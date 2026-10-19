@@ -330,6 +330,12 @@
    linker puts on a linked closure."
   8388608)
 
+(def max-definition-source-bytes
+  "Maximum canonical UTF-8 bytes in one top-level source form. This is the
+   former whole-source ceiling, applied to the unit the compiler identifies,
+   caches, and compiles independently."
+  (* 1024 1024))
+
 #?(:kotoba
    (defn read-forms-result [source :string] [:ref :kotoba.reader/out]
      (if (> (string-byte-length source) max-source-bytes)

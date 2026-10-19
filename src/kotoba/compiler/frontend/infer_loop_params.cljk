@@ -2,7 +2,7 @@
   "Kotoba-native loop-helper parameter type inference split from frontend.infer."
   #?(:kotoba {:kotoba/export [resolve-loop-helper-param-types]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [fget fl-has? fput ftruthy?]]
+            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [fget fl-has? fput ftruthy?] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [empty-fmap ie-ctx ie-infer tk zip-locals]]]))
 
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]

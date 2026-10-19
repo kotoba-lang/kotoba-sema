@@ -3,7 +3,7 @@
 (ns kotoba.compiler.frontend.constant-substitution
   #?(:kotoba {:kotoba/export [resolve-constant-aliases! substitute-constants]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [fl-has? fl-slice fmeta-from reject!]]
+            [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [fl-has? fl-slice fmeta-from])]]
             [kotoba.compiler.frontend.closure-types :refer [type-alias-form?]]
             [kotoba.compiler.frontend.expand :refer [binding-symbols]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]

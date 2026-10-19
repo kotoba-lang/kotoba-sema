@@ -2,7 +2,7 @@
   "Pure signature preparation helpers for result inference."
   #?(:kotoba {:kotoba/export [repeat-i64-types with-default-param-types inference-dispatchers]})
   (:require #?@(:kotoba [[kotoba.form :as form]])
-            [kotoba.compiler.frontend.base :refer [fget fput ftruthy?]]
+            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [fget fput ftruthy?] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [invoke-dispatcher-name]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                                   [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]})))
