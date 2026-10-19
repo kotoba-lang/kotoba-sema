@@ -6085,7 +6085,7 @@
                            ;; dispatcher family, and its inferred effects are
                            ;; checked against the row once effects are known.
                            (callable-effect-row expected-contract)
-                           (assoc :effect-row (callable-effect-row expected-contract)))))
+                           (assoc :effect-row (callable-effect-row expected-contract))))))
                      lowered))))
       ;; Closure IDs and chain tails retain the internal i64 pair-chain ABI.
       ;; Only an explicitly typed opaque leaf changes its cell/projection.
@@ -6095,7 +6095,7 @@
                 (reduce (fn [tail [capture type]]
                           (list (if (= :js-value type) 'js-capture-new 'pair) capture tail))
                         0 (reverse (map vector captures capture-types)))
-                (desugar-list captures form)))))))))))
+                (desugar-list captures form))))))))))
 
 #?(:kotoba
    (defn lazy-take-helper-name [] [:ref :form/r]
