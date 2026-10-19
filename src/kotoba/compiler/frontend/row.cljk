@@ -11,7 +11,9 @@
             [kotoba.compiler.frontend.closure-types :refer [#?@(:kotoba [] :default [*schemas*]) max-record-fields record-type?]]
             [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text #?@(:kotoba [zip-locals ctx-schemas] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil]]])
-            [kotoba.compiler.frontend.record-projection :refer [rewrite-record-projection #?@(:kotoba [rewrite-record-projection-or] :default [])]])
+            #?@(:kotoba [] :default [[kotoba.compiler.frontend.desugar :refer [*module-list-fields* list-field-read-key]]
+                                     [kotoba.compiler.frontend.namespace-defs :refer [reserved-binding-name?]]])
+            [kotoba.compiler.frontend.record-projection :refer [rewrite-record-projection #?@(:kotoba [rewrite-record-projection-or] :default [match-has-marker])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -1919,3 +1921,137 @@
         (if (or (zero? budget) (= fs' fs))
           fs'
           (recur fs' (dec budget))))))))
+
+
+;; --- main-only preservation forms (a7ef280 monolith), host twins only ---
+;; row-scope cluster: preserved verbatim (typed twins and wiring are follow-ups).
+
+#?(:kotoba nil :default (defn- row-scope
+  "FORM with every reference to PARAM that a `let` has shadowed renamed out of
+  the way, so what row inference reads off PARAM is what the parameter is
+  read for: in `(let [m (norm m)] (:a m))` the first m is the parameter and
+  the second is norm's result. A `let` binder equal to PARAM is renamed too,
+  and so is each later reference in that `let` -- its following binding
+  values and its body. browser.text-edit rebinds its state parameter this way
+  in every function (ADR 0353 floor :browser-text-edit); before, a rebinding
+  anywhere left the parameter the provisional :i64."
+  [param form]
+  (let [shadowed (symbol (str "__kotoba_row_shadowed_" (name param)))
+        rename (fn rename [x]
+                 (cond (= param x) shadowed
+                       (seq? x) (with-meta (apply list (map rename x)) (meta x))
+                       (map-entry? x) x
+                       (vector? x) (with-meta (mapv rename x) (meta x))
+                       :else x))]
+    (letfn [(scope [x]
+              (cond
+                (and (seq? x) (= 'let (first x)) (vector? (second x))
+                     (even? (count (second x))))
+                (loop [pairs (partition 2 (second x)) out []]
+                  (if-let [[b v] (first pairs)]
+                    (if (= param b)
+                      (apply list 'let
+                             (into (conj out shadowed (scope v))
+                                   (mapcat (fn [[b2 v2]] [(if (= param b2) shadowed b2) (rename v2)]))
+                                   (next pairs))
+                             (map rename (drop 2 x)))
+                      (recur (next pairs) (conj out b (scope v))))
+                    (apply list 'let out (map scope (drop 2 x)))))
+                (seq? x) (with-meta (apply list (map scope x)) (meta x))
+                (map-entry? x) x
+                (vector? x) (with-meta (mapv scope x) (meta x))
+                :else x))]
+      (scope form)))))
+
+#?(:kotoba nil :default (defn- row-aliases
+  "PARAM and the synthetic names bound to PARAM itself in FORM: `match` binds
+  its scrutinee to a `__kotoba_match_N` temp and projects that (floor
+  :row-get-and-match), so a read off the temp is a read off PARAM. Only a
+  reserved name -- a program cannot write one -- so a binding the author wrote
+  stays a rebinding."
+  [param form]
+  (into #{param}
+        (mapcat (fn [x]
+                  (when (and (seq? x) (= 'let (first x)) (vector? (second x)))
+                    (keep (fn [[b v]] (when (and (= param v) (reserved-binding-name? b)) b))
+                          (partition 2 (second x))))))
+        (tree-seq coll? seq form))))
+
+#?(:kotoba nil :default (defn- row-get-receiver?
+  "Is X a `get` (or a match's presence test) whose receiver is one of
+  ALIASES? A `get` reads a row as `(:k m)` does (floor :row-get-and-match)."
+  [aliases x]
+  (and (seq? x)
+       (or (and (= 'get (first x)) (<= 3 (count x) 4))
+           (= match-has-marker (first x))
+           ;; floor :options-map-argument: `{:keys [extend?]}` over a
+           ;; parameter. It reads a row as `(get m :k)` with an absent key
+           ;; does -- not requiring the key.
+           (= '__kotoba_destructure_get (first x)))
+       (contains? aliases (second x)))))
+
+#?(:kotoba nil :default (defn- row-updates
+  "binder -> the keys written since PARAM, for each name a `let` in FORM binds
+  to an assoc of PARAM -- or of a name already here -- with keyword keys:
+  `(let [s (update s :n inc)] (update s :m inc))`, its rebinding renamed out
+  of the way by `row-scope`, binds the shadowed name to `(map-assoc PARAM :n
+  ..)`. That name is PARAM's row with :n written, so a field read off it that
+  it did not write is a field read off PARAM (ADR 0353 floor
+  :native-rebound-row-update). A name bound more than once is left out: which
+  binding a read sees is a question of scope this walk does not answer."
+  [param form]
+  (let [lets (filter (fn [x] (and (seq? x) (= 'let (first x)) (vector? (second x))
+                                  (even? (count (second x)))))
+                     (tree-seq coll? seq form))
+        pairs (mapcat #(partition 2 (second %)) lets)
+        once (into #{} (keep (fn [[b n]] (when (= 1 n) b)))
+                   (frequencies (map first pairs)))]
+    (reduce (fn [known [b v]]
+              (if (and (simple-symbol? b) (contains? once b) (not= param b)
+                       (seq? v) (= 'map-assoc (first v)) (<= 4 (count v)) (even? (count v))
+                       (or (= param (second v)) (contains? known (second v)))
+                       (every? keyword? (take-nth 2 (drop 2 v))))
+                (assoc known b (into (get known (second v) #{}) (take-nth 2 (drop 2 v))))
+                known))
+            {} pairs))))
+
+#?(:kotoba nil :default (defn- row-list-item?
+  "Is PARAM an item `(conj (record-get m k) .. PARAM ..)` conj's onto an open
+  `[]` key k of the module (floor :list-item-from-expression), or onto a key a
+  vector literal of records is written at (floor :record-list-field-literal:
+  browser.surface's {.. :surface/windows [{:window/id \"w1\" ..}]} beside
+  open-window's conj of its window)? The item is then checked against the
+  list's R by `typed-list-conj`."
+  [param form]
+  (boolean
+   (first-truthy
+    (fn [x]
+      (and (seq? x) (= 'conj (first x))
+           (let [k (list-field-read-key (second x))]
+             (or (contains? (:open *module-list-fields*) k)
+                 (contains? (:record-lists *module-list-fields*) k)))
+           (first-truthy #{param} (drop 2 x))))
+    (tree-seq coll? seq form)))))
+
+#?(:kotoba nil :default (defn- row-list-item-slot?
+  "Is the row slot READS (`row-generics`) a parameter only conj'd onto an open
+  `[]` field (floor :list-item-from-expression)?"
+  [reads]
+  (boolean (::list-item (meta reads)))))
+
+#?(:kotoba nil :default (defn- row-param-text
+  "PARAM as the author wrote it: a destructured parameter is a synthetic name
+  (`param-name+wrap`), so it is shown as the `{:keys [..]}` its body reads
+  off it (floor :options-map-argument)."
+  [param body]
+  (if (and (reserved-binding-name? param)
+           (str/starts-with? (name param) "__kotoba_param-destr"))
+    (let [aliases (row-aliases param body)
+          ks (into [] (comp (filter #(and (seq? %) (= '__kotoba_destructure_get (first %))
+                                          (contains? aliases (second %))
+                                          (keyword? (nth % 2 nil))))
+                            (map #(symbol (name (nth % 2))))
+                            (distinct))
+                   (tree-seq coll? seq body))]
+      (str "{:keys " (pr-str ks) "}"))
+    param)))
