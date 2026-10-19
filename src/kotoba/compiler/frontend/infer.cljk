@@ -7989,3 +7989,58 @@
    :default nil)
 
    ))
+
+
+;; --- main-only preservation forms (a7ef280 monolith), host twins only ---
+;; str / sequence-first cluster: preserved verbatim (typed twins and wiring are follow-ups).
+
+#?(:kotoba nil :default (def ^:dynamic ^:private *provisional-parameters*
+  "The parameters `infer-absent-parameter-types` is still refining: unannotated,
+  and :i64 only because nothing has refused that yet."
+  #{}))
+
+#?(:kotoba nil :default (defn- str-part-type!
+  "ADR 0353 floor :integer-str: a part `str` formats is a :string or an
+  :i64. Anything else is refused by what it is -- there is no implicit
+  printing of an aggregate, and no coercion of anything else.
+
+  An unannotated parameter that is :i64 only provisionally is required to be
+  a :string, as it was when `str` was `string-concat`: refinement reads that
+  refusal and types the parameter :string. A string-building function's
+  text parameter (browser.text-edit's insert-text) stays a string; an :i64
+  `str` formats is one its source types -- a field, a literal, arithmetic,
+  an annotated parameter."
+  [type part]
+  (when (and (= :i64 type) (contains? *provisional-parameters* part))
+    (require-expression-type! type :string part))
+  (when-not (contains? #{:string :i64} type)
+    (reject! (str "str of "
+                  (cond
+                    (and (vector? type) (= :record (first type))) "a record"
+                    (or (contains? #{:vector-i64 :vector-f64} type)
+                        (and (vector? type) (contains? #{:vector :list} (first type))))
+                    "a vector"
+                    (or (= :option-i64 type)
+                        (and (vector? type) (= :option (first type))))
+                    "an option"
+                    :else (pr-str type))
+                  " is refused: str formats a string or an i64, and an aggregate "
+                  "is not printed implicitly")
+             part :kotoba.error/str-part-type))))
+
+#?(:kotoba nil :default (defn- sequence-first-exit-type
+  "ADR 0353 floor :record-list-sequence: the type of an exit of a fused
+  `first` search over `items`. Over a [:list T], [:option T]; over a bounded
+  i64 / f64 vector the item's type. An unannotated parameter (the provisional
+  :i64) is required to be the :vector-i64 its callers pass, as `nth` does;
+  any other receiver is refused by name."
+  [op [items] locals signatures]
+  (let [value-type (infer-expression-type items locals signatures)]
+    (cond
+      (canonical-list-type? value-type) [:option (second value-type)]
+      (= :vector-i64 value-type) :i64
+      (= :vector-f64 value-type) :f64
+      (= :i64 value-type) (require-expression-type! value-type :vector-i64 items)
+      :else (reject! (str "first of filter / remove / reverse searches a bounded "
+                          "vector or a [:list T]; got " (pr-str value-type))
+                     items :kotoba.error/sequence-first-receiver)))))
