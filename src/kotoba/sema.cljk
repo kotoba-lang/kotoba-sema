@@ -1,8 +1,79 @@
 (ns kotoba.sema
   "Stable public entry points for Kotoba source semantic analysis."
-  {:kotoba/export [analyze capability-id->name capability-registry forbidden-heads kernel-operation-heads kernel-region-report lint max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map->clauses namespace-attr-map-keys read-forms schema-identities source-operation-registry validate-schema-table!]}
+  {:kotoba/export [analyze analyze-forms capability-registry lint lint-forms max-functions max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map-clauses read-error read-forms-result]}
   (:require [kotoba.compiler.frontend :as frontend]
-            [kotoba.compiler.schema :as schema]))
+            #?@(:default [[kotoba.compiler.frontend.analyze :as fe-analyze]
+                          [kotoba.compiler.frontend.expand :as fe-expand]
+                          [kotoba.compiler.frontend.namespace-defs :as fe-namespace-defs]
+                          [kotoba.compiler.frontend.validate :as fe-validate]
+                          [kotoba.compiler.schema :as schema]]))
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                                  [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
+                         :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string] [:data [:ref :form/r]]]]
+                         :fe/namespace-attr-clauses [:record :fe/namespace-attr-clauses [[:clauses [:list [:ref :form/r]]]]]
+                         :kotoba.reader/out [:record :kotoba.reader/out [[:forms [:list [:ref :form/r]]] [:err :string] [:at :i64]]]
+                         :ana/ir [:record :ana/ir [[:ok :bool] [:val [:ref :form/r]] [:err [:ref :fe/err]]]]})))
+
+#?(:kotoba
+(defn analyze [source :string opts [:ref :form/r]] [:ref :ana/ir]
+  (frontend/analyze source opts))
+   :default nil)
+
+#?(:kotoba
+(defn analyze-forms [source-forms [:ref :form/r] opts [:ref :form/r]] [:ref :ana/ir]
+  (frontend/analyze-forms source-forms opts))
+   :default nil)
+
+#?(:kotoba
+(defn lint [source :string opts [:ref :form/r]] [:ref :ana/ir]
+  (frontend/lint source opts))
+   :default nil)
+
+#?(:kotoba
+(defn lint-forms [source-forms [:ref :form/r] opts [:ref :form/r]] [:ref :ana/ir]
+  (frontend/lint-forms source-forms opts))
+   :default nil)
+
+#?(:kotoba
+(defn capability-registry [] [:ref :form/r]
+  (frontend/capability-registry))
+   :default nil)
+
+#?(:kotoba
+(defn max-functions [] :i64
+  (frontend/max-functions))
+   :default nil)
+
+#?(:kotoba
+(defn max-namespace-capabilities [] :i64
+  (frontend/max-namespace-capabilities))
+   :default nil)
+
+#?(:kotoba
+(defn max-namespace-docstring-chars [] :i64
+  (frontend/max-namespace-docstring-chars))
+   :default nil)
+
+#?(:kotoba
+(defn namespace-attr-map-clauses [attr-map [:ref :form/r]
+                                  explicit-clauses [:list [:ref :form/r]]]
+  [:ref :fe/namespace-attr-clauses]
+  (frontend/namespace-attr-map-clauses attr-map explicit-clauses))
+   :default nil)
+
+#?(:kotoba
+(defn read-error [message :string] [:ref :fe/err]
+  (frontend/read-error message))
+   :default nil)
+
+#?(:kotoba
+(defn read-forms-result [source :string] [:ref :kotoba.reader/out]
+  (frontend/read-forms-result source))
+   :default nil)
+
+
+#?(:kotoba nil :default
+(do
 
 (def read-forms
   "Read Kotoba source using the admitted reader profile."
@@ -84,14 +155,14 @@
     ;; Rebinding is only entered when a caller explicitly overrides the public
     ;; facade controls (principally bounded tests). Normal concurrent analysis
     ;; stays on the direct, mutation-free path above.
-    (with-redefs [frontend/max-functions max-functions
-                  frontend/max-expression-nodes max-expression-nodes
-                  frontend/max-lowered-nodes max-lowered-nodes
-                  frontend/max-bindings max-bindings
-                  frontend/max-list-items max-list-items
-                  frontend/max-namespace-capabilities max-namespace-capabilities
-                  frontend/max-namespace-docstring-chars max-namespace-docstring-chars
-                  frontend/max-function-docstring-chars max-function-docstring-chars]
+    (with-redefs [fe-namespace-defs/max-functions max-functions
+                  fe-validate/max-expression-nodes max-expression-nodes
+                  fe-analyze/max-lowered-nodes max-lowered-nodes
+                  fe-validate/max-bindings max-bindings
+                  fe-validate/max-list-items max-list-items
+                  fe-namespace-defs/max-namespace-capabilities max-namespace-capabilities
+                  fe-namespace-defs/max-namespace-docstring-chars max-namespace-docstring-chars
+                  fe-expand/max-function-docstring-chars max-function-docstring-chars]
       (frontend/analyze source opts))))
 
 (def lint
@@ -107,3 +178,4 @@
   controls are authoritative when explicitly overridden."
   ([source] (analyze-with-controls source nil))
   ([source opts] (analyze-with-controls source opts)))
+))
