@@ -2788,6 +2788,7 @@
 ;; call, RECORDS the argument types instead of type-checking the arguments
 ;; against the (placeholder) declared param-types. Both nil in the normal
 ;; check-value-types! pass, so ordinary type-checking is unchanged.
+(def ^:dynamic *lenient-branch-joins?* nil)
 (def ^:dynamic *loop-helper-names* nil)
 (def ^:dynamic *loop-helper-recorder* nil)
 
@@ -11948,6 +11949,8 @@
                (= then-type else-type) then-type
                (and (or tail? absent-then? absent-else?) (lenient-branch-join then-type else-type))
                (lenient-branch-join then-type else-type)
+               (same-expression-type? then-type else-type) then-type
+               *lenient-branch-joins?* then-type
                :else (reject! "if branches must have the same value type" form)))
         do (let [tail? *absence-tail*]
              (last (map-indexed (fn [index arg]
@@ -12844,6 +12847,7 @@
     (if (empty? helper-names)
       functions
       (letfn [(placeholder [{:keys [params]}] (vec (repeat (count params) :i64)))
+
               (overlay [helper-name params recorded]
                 (if-let [known (get-in shapes [helper-name :known-types])]
                   (mapv (fn [p t] (or (get known p) t)) params recorded)
@@ -12862,7 +12866,8 @@
                                                :result (or result :i64)}]))
                                  functions)]
                   (binding [*loop-helper-names* (into #{} (remove #(contains? resolved %) helper-names))
-                            *loop-helper-recorder* recorder]
+                            *loop-helper-recorder* recorder
+                            *lenient-branch-joins?* true]
                     (doseq [{:keys [name params body] :as f} functions
                             :when (or (not (contains? helper-names name))
                                       (contains? resolved name))]
@@ -13035,7 +13040,8 @@
   consequence of typing its exits."
   [helper declared-result signatures]
   (let [own-codes #{:kotoba.error/loop-exit-type :kotoba.error/loop-result-type}
-        inferred (try (loop-helper-exit-type helper signatures)
+        inferred (try (binding [*lenient-branch-joins?* true]
+                        (loop-helper-exit-type helper signatures))
                       (catch #?(:clj Exception :cljs :default) e
                         (if (contains? own-codes (:kotoba.error/code (ex-data e)))
                           (throw e)
@@ -13080,6 +13086,7 @@
   permissive -- an intermediate disagreement is usually a placeholder that has
   not settled yet -- and the last one refuses."
   [functions shapes]
+
   (if-not (first-truthy :loop-helper? functions)
     functions
     (letfn [(result-of [f fs]
