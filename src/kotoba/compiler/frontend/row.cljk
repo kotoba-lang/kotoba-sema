@@ -7,7 +7,7 @@
             [kotoba.lang.text :as str]
             [kotoba.compiler.frontend-tables :as tables]
             [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [code-point-width fdrop fget fkw fl-add fl-has? fl-nth fl-slice fmeta-from fname fnamespace form-text fput ftruthy? pr-form simple-symbol-form?] :default [first-truthy])]]
-            [kotoba.compiler.frontend.kernel-region :refer [#?@(:kotoba [] :default [map-literal-record-namespace]) map-literal-record-type]]
+            [kotoba.compiler.frontend.kernel-region :refer [#?@(:kotoba [] :default [map-literal-key-order map-literal-record-namespace]) map-literal-record-type]]
             [kotoba.compiler.frontend.closure-types :refer [#?@(:kotoba [] :default [*schemas*]) max-record-fields record-type?]]
             [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text #?@(:kotoba [zip-locals ctx-schemas] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil]]])
@@ -1743,6 +1743,30 @@
       (and (= 'map-new op) (seq args) (even? (count args))
            (every? keyword? (take-nth 2 args)))
       (let [entries (partition 2 args)
+            types (mapv #(literal-item-type (second %) locals table) entries)]
+        (if (every? some? types)
+          (do (when (> (count entries) max-record-fields)
+                (reject! (str "map literal with keyword keys lowers to a closed record and "
+                              "exceeds the record field limit: " (count entries)
+                              " entries, at most " max-record-fields)
+                         form :kotoba.error/map-literal-value))
+              (list* 'record-new
+                     (map-literal-record-type (mapv (fn [[k _] t] [k t]) entries types))
+                     (map second entries)))
+          form))
+
+      ;; ADR 0353 floor :empty-map-literal. `{}` has no row of its own, so
+      ;; `(assoc {} :a x :b y)` is the literal `{:a x :b y}` -- the record of
+      ;; the keys it assoc's, fields in a map literal's key order, a repeated
+      ;; key's last value winning as `assoc`'s does -- and never the
+      ;; keyword->i64 pair map `(map-new)` used to be. An integer or string
+      ;; first key is the typed map `rewrite-record-projection` retypes
+      ;; (monolith a7ef280 15518-15543).
+      (and (= 'map-assoc op) (= '(map-new) (first args)) (seq (rest args))
+           (even? (count (rest args)))
+           (every? keyword? (take-nth 2 (rest args))))
+      (let [entries (reduce (fn [m [k v]] (assoc m k v)) {} (partition 2 (rest args)))
+            entries (sort-by key (map-literal-key-order :keyword) entries)
             types (mapv #(literal-item-type (second %) locals table) entries)]
         (if (every? some? types)
           (do (when (> (count entries) max-record-fields)

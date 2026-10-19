@@ -2388,8 +2388,7 @@
               ;; take its key type from the first key. Only the two key types
               ;; a literal may carry are retyped, so a keyword-keyed `(assoc
               ;; {} :a 1)` still lowers to the legacy map it always did.
-              retyped-key (when (and (= :map value-type)
-                                     (= '(map-new) receiver)
+              retyped-key (when (and (= '(map-new) receiver)
                                      (seq pairs))
                             (let [key-type
                                   (try (infer-expression-type (first pairs)
