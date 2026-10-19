@@ -2207,18 +2207,24 @@
           (when (canonical-typed-map-type? value-type)
             (reject! "match map patterns admit the bounded map only; this scrutinee is a canonical typed map"
                      form))
-          (when (record-type? descriptor)
-            (reject! "match map patterns admit the bounded map only; this scrutinee is a record"
-                     form))
-          ;; Presence, on a value type with no presence primitive. `map-get`
-          ;; answers the DEFAULT for an absent key, so one lookup cannot tell
-          ;; an absent key from a key whose value happens to equal the
-          ;; default. Two lookups with different defaults can: a present value
-          ;; equals itself, and 0 never equals 1. Both are pure and total, and
-          ;; the receiver is always a symbol here (the scrutinee binding or a
-          ;; projection temp), so neither the map nor the key is re-evaluated.
-          (let [[value key] rewritten-args]
-            (list '= (list 'map-get value key 0) (list 'map-get value key 1))))
+          (if (record-type? descriptor)
+            ;; ADR 0353 floor :empty-map-literal: a map literal is a record,
+            ;; so a map pattern reads one. A record's field set is its type,
+            ;; so presence is decided here, statically: a field it has is
+            ;; present, and an arm naming a key it lacks does not match -- in
+            ;; a row function's specialization, the arm written for another
+            ;; record. Both are constants the enclosing `if` folds away.
+            (let [key (second rewritten-args)]
+              (boolean (first-truthy (fn [[field _]] (= field key)) (nth descriptor 2))))
+            ;; Presence, on a value type with no presence primitive. `map-get`
+            ;; answers the DEFAULT for an absent key, so one lookup cannot tell
+            ;; an absent key from a key whose value happens to equal the
+            ;; default. Two lookups with different defaults can: a present value
+            ;; equals itself, and 0 never equals 1. Both are pure and total, and
+            ;; the receiver is always a symbol here (the scrutinee binding or a
+            ;; projection temp), so neither the map nor the key is re-evaluated.
+            (let [[value key] rewritten-args]
+              (list '= (list 'map-get value key 0) (list 'map-get value key 1)))))
 
         (= op 'get)
         (let [rewritten-args

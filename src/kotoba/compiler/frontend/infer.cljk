@@ -2888,6 +2888,23 @@
                        args))
             :bool))
 
+      (contains? '#{js-nullish? js-truthy? js-strict-equal? js-typeof js-array?} op)
+      (do (doseq [[arg type] (map vector args types)]
+            (require-expression-type! type :js-value arg))
+          (if (= op 'js-typeof) :string :bool))
+
+      (= op 'js-bool-value)
+      (do (require-expression-type! (first types) :bool (first args)) :js-value)
+
+      (= op 'js-undefined) :js-value
+
+      (= op 'js-capture-new)
+      (do (require-expression-type! (first types) :js-value (first args))
+          (require-expression-type! (second types) :i64 (second args)) :i64)
+
+      (= op 'js-capture-value)
+      (do (require-expression-type! (first types) :i64 (first args)) :js-value)
+
       (= op 'bool-not)
       (do (require-expression-type! (first types) :bool (first args)) :bool)
 

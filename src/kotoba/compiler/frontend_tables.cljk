@@ -900,10 +900,12 @@
 
 #?(:kotoba
    (defn typed-safe-value-operations [] [:ref :form/r]
-     (form/edn-form "{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2 result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2}"))
+     (form/edn-form "{js-undefined 0 js-nullish? 1 js-truthy? 1 js-strict-equal? 2 js-typeof 1 js-array? 1 js-bool-value 1 js-capture-new 2 js-capture-value 1 bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2 result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2}"))
    :default
    (def typed-safe-value-operations
-     '{bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
+     '{js-undefined 0 js-nullish? 1 js-truthy? 1 js-strict-equal? 2 js-typeof 1 js-array? 1 js-bool-value 1
+       js-capture-new 2 js-capture-value 1
+       bool-not 1 option-some 1 option-none 0 option-some? 1 option-value 2
        result-ok 1 result-err 1 result-ok? 1 result-value 2 result-error 2}))
 
 #?(:kotoba

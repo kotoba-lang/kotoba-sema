@@ -5,7 +5,7 @@
   #?(:kotoba {:kotoba/export [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? check-linear-resource-ownership! closure-default-value-expr closure-result-type? env-schemas fe-error generic-option-type? heterogeneous-vector-type? invoke-dispatcher-name kw-text lambda-dispatchers max-record-fields parametric-result-type? record-type? resolve-type-alias! schema-ref-type? slice-element-type slice-element-widths slice-type? structured-type? type-alias-form? typed-param-parts typed-set-type? validate-value-type! variant-type?]})
   (:require [kotoba.artifact.core :as artifact]
             #?@(:kotoba [[kotoba.form :as form] [kotoba.compiler.value-type :as vt] [kotoba.compiler.frontend-tables :as tables]])
-            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [] :default [reject!]) #?@(:kotoba [fl-add fl-nth fl-slice form->document simple-symbol-form?] :default [first-truthy])]])
+            [kotoba.compiler.frontend.base :refer [#?@(:kotoba [] :default [capability-registry reject!]) #?@(:kotoba [fl-add fl-nth fl-slice form->document simple-symbol-form?] :default [first-truthy])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -128,13 +128,13 @@
 ;; osaho ADR 0025; a descriptor of depth 9..12 was admitted by the reference
 ;; interpreter and refused by this frontend. Unified at 12 on 2026-09-24.
 #?(:kotoba
-   (defn max-type-depth [] :i64 64)
+   (defn max-type-depth [] :i64 12)
    :default
-(def max-type-depth 64))
+(def max-type-depth 12))
 #?(:kotoba
-   (defn max-type-nodes [] :i64 512)
+   (defn max-type-nodes [] :i64 64)
    :default
-(def max-type-nodes 512))
+(def max-type-nodes 64))
 #?(:kotoba
    (defn max-variant-cases [] :i64 32)
    :default
@@ -149,17 +149,51 @@
 (def max-record-fields 32))
 #?(:kotoba
    (defn value-types [] [:ref :form/r]
-     (form/edn-form "#{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document}"))
+     (form/edn-form "#{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes :option-i64 :result-i64 :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :js-value}"))
    :default
 (def value-types #{:i64 :f32 :f64 :string :keyword :symbol :map :bool :bytes
                    :option-i64 :result-i64
-                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document}))
+                   :vector-i64 :vector-f64 :string-index :disjoint-set-i64 :document :js-value}))
+
+;; The optional effect row of a `[:fn ...]` type is a trailing map, not a
+;; clause. These two are the row-aware half of the callable predicates below
+;; (preserved from the frontend monolith; ADR 0353 floor :function-effect-rows).
+#?(:kotoba nil :default
+(defn- callable-row-map?
+  "The optional last element of a `[:fn ...]` type: `{:effects #{...}}`, the
+  effect row the function type declares (ADR 0353 floor :function-effect-rows)."
+  [x]
+  (and (map? x) (= #{:effects} (set (keys x))))))
+
+#?(:kotoba nil :default
+(defn- callable-type-clauses-part [type]
+  (if (and (< 1 (count type)) (callable-row-map? (peek type))) (pop type) type)))
+
+#?(:kotoba nil :default
+(defn- opaque-js-type? [type]
+  ;; Source descriptors are bounded before this walk; labels are inert.
+  (loop [pending [type]]
+    (if (empty? pending)
+      false
+      (let [current (peek pending) rest-types (pop pending)]
+        (cond
+          (= :js-value current) true
+          (not (vector? current)) (recur rest-types)
+          :else (recur
+                 (into rest-types
+                       (case (first current)
+                         (:option :list :set :stream :task) [(second current)]
+                         (:result :map) [(second current) (nth current 2)]
+                         :vector (second current)
+                         (:record :variant) (map second (nth current 2))
+                         [])))))))))
 
 #?(:kotoba
    (defn callable-type? [type [:ref :form/r]] :bool (vt/callable-type? type))
    :default
 (defn callable-type? [type]
-  (and (vector? type) (= :fn (first type)) (<= 2 (count type) 6))))
+  (and (vector? type) (= :fn (first type))
+       (<= 2 (count (callable-type-clauses-part type)) 6))))
 
 #?(:kotoba
    (defn callable-clauses [type [:ref :form/r]] [:ref :form/r]
@@ -168,7 +202,7 @@
        (form/nil-form)))
    :default
 (defn callable-clauses [type]
-  (when (callable-type? type) (subvec type 1))))
+  (when (callable-type? type) (subvec (callable-type-clauses-part type) 1))))
 
 #?(:kotoba
    (defn parametric-result-type? [type [:ref :form/r]] :bool (vt/result-type? type))
@@ -327,34 +361,34 @@
                       (= (count arities) (count (distinct arities))))
          (reject! "callable type requires one to five unique [parameter-types result-type] clauses"
                   type :kotoba.error/callable-type))
+       (when (callable-row-map? (peek type))
+         (let [row (:effects (peek type))]
+           (when-not (and (set? row) (every? keyword? row))
+             (reject! "a [:fn ...] effect row is {:effects #{...}}, a set of capability keywords (ADR 0353)"
+                      type :kotoba.error/callable-effect-row))
+           (doseq [kw row]
+             (when-not (or (= :state kw) (contains? capability-registry kw))
+               (reject! (str "a [:fn ...] effect row names an unregistered capability: " kw)
+                        type :kotoba.error/callable-effect-row)))))
        (doseq [[parameter-types result-type] clauses]
-         ;; A parameter type is admitted exactly when it is admitted as a
-         ;; closure RESULT type -- one predicate, `closure-result-type?`, so
-         ;; the two sides cannot drift (2026-09-12, adr-2609111900;
-         ;; `lang/guest-grammar.edn` `:callable-type` `:parameter-types`).
-         ;; Until then the sentence here was `callable parameter types
-         ;; currently require the i64 closure ABI`, and that was
-         ;; IMPLEMENTATION STATE: a dispatcher is an ordinary KIR function
-         ;; with a typed signature, and the helper a lambda lowers to is
-         ;; another, so an argument of any admitted value type crosses a
-         ;; closure call exactly as it crosses a direct call. What the rule
-         ;; keeps out is what the result side keeps out: a callable (no
-         ;; closure-typed word exists) and a linear resource (no dispatcher
-         ;; may duplicate or drop it), by the same sentence shape.
+         ;; Logical callable contracts travel as refined i64 closure words.
+         ;; Parameters and results admit the same dispatcher profile; nested
+         ;; contracts retain their type/effect rows separately from this ABI.
+         ;; Linear resources stay refused: a dispatcher may duplicate/drop
+         ;; ordinary values, but cannot do that to a linear resource.
          (doseq [parameter-type parameter-types]
-           (when (or (callable-type? parameter-type)
-                     (linear-resource-type? parameter-type))
-             (reject! "callable parameter types cannot be callable or linear resources"
+           (when (linear-resource-type? parameter-type)
+             (reject! "callable parameter types cannot be linear resources"
                       type :kotoba.error/callable-parameter-type))
            (validate-value-type! parameter-type (inc depth) nodes)
-           (when-not (or (schema-ref-type? parameter-type) (closure-result-type? parameter-type {}))
+           (when-not (or (callable-type? parameter-type) (closure-result-type? parameter-type {}))
              (reject! "callable parameter type is outside the admitted dispatcher profile (a parameter type is admitted exactly when it is admitted as a closure result type)"
                       type :kotoba.error/callable-parameter-type)))
-         (when (or (callable-type? result-type) (linear-resource-type? result-type))
-           (reject! "callable results cannot be callable or linear resources"
+         (when (linear-resource-type? result-type)
+           (reject! "callable results cannot be linear resources"
                     type :kotoba.error/callable-result-type))
          (validate-value-type! result-type (inc depth) nodes)
-         (when-not (or (schema-ref-type? result-type) (closure-result-type? result-type {}))
+         (when-not (or (callable-type? result-type) (closure-result-type? result-type {}))
            (reject! "callable result type is outside the admitted dispatcher profile"
                     type :kotoba.error/callable-result-type)))
        type)
@@ -425,6 +459,8 @@
      (do (when (contains? #{:f32 :f64} (second type))
            (reject! "direct floating set items are outside the structured scalar ABI" type :kotoba.error/floating-set-item))
          (validate-value-type! (second type) (inc depth) nodes)
+         (when (opaque-js-type? (second type))
+           (reject! "opaque JS values cannot be ordered set items" type :kotoba.error/js-value-unordered))
          type)
      (canonical-typed-map-type? type)
      ;; Said as two refusals because they are two different facts. A floating
@@ -446,15 +482,20 @@
                     type :kotoba.error/floating-map-kv))
          (validate-value-type! (second type) (inc depth) nodes)
          (validate-value-type! (nth type 2) (inc depth) nodes)
+         (when (opaque-js-type? (second type))
+           (reject! "opaque JS values cannot be ordered map keys" type :kotoba.error/js-value-unordered))
          type)
      (record-type? type)
      (let [[_ type-id fields] type]
        (when-not (and (keyword? type-id) (namespace type-id))
          (reject! "record type id must be a qualified keyword" type :kotoba.error/record-type-id))
-       (when-not (and (vector? fields) (seq fields) (<= (count fields) max-record-fields)
+       ;; ADR 0353 floor :options-map-argument: the record with no fields is
+       ;; what `{}` is where a row says it is a record -- an options map
+       ;; passed empty, `(move-caret state delta {})`.
+       (when-not (and (vector? fields) (<= (count fields) max-record-fields)
                       (every? #(and (vector? %) (= 2 (count %)) (keyword? (first %))) fields)
                       (= (count fields) (count (distinct (map first fields)))))
-         (reject! "record fields must be a non-empty unique bounded vector" type :kotoba.error/record-fields))
+         (reject! "record fields must be a unique bounded vector" type :kotoba.error/record-fields))
        (vswap! nodes + (+ 2 (* 2 (count fields))))
        (when (> @nodes max-type-nodes)
          (reject! "value type exceeds node limit" type :kotoba.error/value-type-node-limit))
@@ -485,7 +526,7 @@
 
 #?(:kotoba nil :default
 (def closure-flat-result-types
-  #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document}))
+  #{:i64 :bool :f32 :f64 :string :bytes :vector-i64 :vector-f64 :document :js-value}))
 
 ;; variants, vector literals, throw/try/catch =====
 ;; a top-level schema reference resolved through the env's schemas (nested references stay closed edges)
@@ -1245,6 +1286,7 @@
     (= :vector-i64 type) '(vector-new)
     (= :vector-f64 type) '(vector-f64-new)
     (= :document type) '(document-null)
+    (= :js-value type) '(js-undefined)
     (= :map type) '(map-new)
     (= :option-i64 type) '(option-none)
     (= :result-i64 type) '(result-ok 0)
