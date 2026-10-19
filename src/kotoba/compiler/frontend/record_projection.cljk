@@ -94,6 +94,71 @@
 (def doc-vals-helper-name '__kotoba_doc_vals))
 
 ;; ---------------------------------------------------------------------------
+;; `count` / `nth` on the legacy i64 pair chain -- `list`, `cons`, `take`, a
+;; variadic rest parameter. Monolith (a7ef280) 6376-6443, host route.
+;; `__kotoba_list_count` is the "bounded pair-chain walk" `lang/guest-grammar.edn`
+;; names for `count`; `__kotoba_list_drop` answers the chain from index N on --
+;; 0, the empty chain, when N is negative or past the end -- so the `nth` arm
+;; reads the item with `pair-first` and a default can be chosen without walking
+;; twice. Each step costs one call of the run's fuel. Injected by the `count` /
+;; `nth` arms' rewrites only when one writes a call, so a module that never
+;; counts or indexes a chain is byte-identical.
+
+#?(:kotoba nil :default
+(defn- nonzero-integer-literal?
+  "An integer literal other than 0: a value `count` / `nth` refuse as no pair
+  chain at all. 0 IS one -- the empty chain `(list)` desugars to. Compared by
+  digits, because a ClojureScript BigInt is not `zero?`."
+  [form]
+  (and (kotoba-integer? form) (not= "0" (str form)))))
+
+#?(:kotoba nil :default (def list-count-helper-name '__kotoba_list_count))
+
+#?(:kotoba nil :default
+(def list-count-helper
+  {:name list-count-helper-name
+   :params '[xs]
+   :param-types [:i64]
+   :result :i64
+   :effects #{}
+   :body '(if (= xs 0)
+            0
+            (+ 1 (__kotoba_list_count (pair-second xs))))}))
+
+#?(:kotoba nil :default
+(defn uses-list-count? [form]
+  (cond
+    (seq? form) (or (= list-count-helper-name (first form))
+                    (first-truthy uses-list-count? (rest form)))
+    (coll? form) (first-truthy uses-list-count? form)
+    :else false)))
+
+#?(:kotoba nil :default (def list-drop-helper-name '__kotoba_list_drop))
+
+#?(:kotoba nil :default
+(def list-drop-helper
+  {:name list-drop-helper-name
+   :params '[xs n]
+   :param-types [:i64 :i64]
+   :result :i64
+   :effects #{}
+   :body '(if (< n 0)
+            0
+            (if (= xs 0)
+              0
+              (if (= n 0)
+                xs
+                (__kotoba_list_drop (pair-second xs) (- n 1)))))}))
+
+#?(:kotoba nil :default
+(defn uses-list-drop? [form]
+  (cond
+    (seq? form) (or (= list-drop-helper-name (first form))
+                    (first-truthy uses-list-drop? (rest form)))
+    (coll? form) (first-truthy uses-list-drop? form)
+    :else false)))
+
+;; ---------------------------------------------------------------------------
 ;; `match` -- the authority's `:bounded-control-and-sugar` sugar, whose safety
 ;; row reads `:single-evaluation-pure-desugar`.
 ;;
@@ -2546,6 +2611,30 @@
               (cons (if (= 3 (count rewritten-args)) 'vector-f64-get 'vector-f64-at)
                     rewritten-args))
 
+            ;; The legacy pair chain -- `list`, `cons`, `take`, a variadic
+            ;; rest. Without a default an index outside the chain traps in
+            ;; `pair-first` of the empty chain, as vector nth without a
+            ;; default traps; with one it answers the default. See
+            ;; `list-drop-helper`.
+            (and (= :i64 value-type)
+                 (not (nonzero-integer-literal? (first rewritten-args))))
+            (do
+              (when-not (<= 2 (count rewritten-args) 3)
+                (reject! "list nth requires value, index, and optional default" form))
+              (let [[items index default] rewritten-args
+                    walked (list list-drop-helper-name items index)]
+                (when (= 3 (count rewritten-args))
+                  (require-expression-type!
+                   (infer-expression-type default locals signatures)
+                   :i64 default))
+                (if (= 3 (count rewritten-args))
+                  (let [rest-name (synthetic "nth_rest")]
+                    (list 'let [rest-name walked]
+                          (list 'if (list '= rest-name 0)
+                                default
+                                (list 'pair-first rest-name))))
+                  (list 'pair-first walked))))
+
             ;; A receiver `nth` does not index. Before this the arm fell
             ;; through to `(cons op ...)` and validation reported `operation
             ;; has no admitted lowering` -- true of `nth` on nothing, since
@@ -2619,6 +2708,14 @@
             ;; the count was reachable by hand and only the friendly head was
             ;; missing. That is why no `typed-list-count` was added for it.
             (canonical-list-type? value-type) (list 'vector-count receiver)
+            ;; The legacy pair chain: `(list ...)`, `cons`, a variadic rest
+            ;; parameter. See `list-count-helper`. A chain is typed `:i64`,
+            ;; so the type cannot tell `(count rest)` from `(count n)`. A
+            ;; nonzero integer LITERAL can never be a chain and keeps the
+            ;; refusal below (0 is the empty chain `(list)` desugars to); any
+            ;; other `:i64` that is not one traps in the walk.
+            (and (= :i64 value-type) (not (nonzero-integer-literal? receiver)))
+            (list list-count-helper-name receiver)
             :else
             (reject! (str "count requires a bounded vector, a typed set or a "
                           "canonical typed map; got " (pr-str value-type) "."

@@ -32,7 +32,7 @@
             [kotoba.compiler.frontend.validate :refer [#?@(:kotoba [def-parts quote-form? validate-expr] :default [constant-literal? def-parts quote-form? validate-expr])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-bridge :refer [abort-signatures abort-type-text absence-in-tail? check-loop-recur-argument-types! check-value-types! elaborate-aborts elaborate-named-abilities ie-new-ctx infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-loop-helper-results infer-type-or-nil legacy-absence resolve-absence-if resolve-loop-helper-param-types same-expression-type? use-site-text zip-locals]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.infer :refer [*loop-helper-names* *loop-helper-recorder* *row-op-schemas* *state-handlers* absence-in-tail? check-loop-recur-argument-types! check-value-types! elaborate-aborts elaborate-named-abilities infer-abort-error-types infer-absent-parameter-types infer-absent-results infer-closure-refinements infer-expression-type infer-loop-helper-results legacy-absence resolve-absence-if same-expression-type? use-site-text]]])
-            [kotoba.compiler.frontend.record-projection :refer [#?@(:kotoba [rewrite-record-projections] :default [doc-keys-helper-name doc-nth-helper-name doc-rest-helper-name doc-vals-helper-name rewrite-record-projections])]]
+            [kotoba.compiler.frontend.record-projection :refer [#?@(:kotoba [rewrite-record-projections] :default [doc-keys-helper-name doc-nth-helper-name doc-rest-helper-name doc-vals-helper-name list-count-helper list-count-helper-name list-drop-helper list-drop-helper-name rewrite-record-projections uses-list-count? uses-list-drop?])]]
             [kotoba.compiler.frontend.desugar :refer [#?@(:kotoba [desugar-expr desugar-result-expr dr-env dr-form expression-callable-contract put2] :default [*absence-mode* *document-functions* *expected-callable-contract* *function-arities* *function-callable-param-contracts* *function-callable-result-contracts* *lambda-counter* *lexical-bindings* *lexical-callable-contracts* *local-option-types* *local-types* *loop-counter* *loop-helper-shapes* *opaque-result-functions* *pending-lambdas* *pending-loop-helpers* *required-closure-dispatchers* *used-capability-keywords* *uses-apply?* *uses-lazy?* char-helper-name desugar-expr desugar-result-expr doc-append-from-helper-name expression-callable-contract lazy-drop-helper-name lazy-take-helper-name realized-lowering string-from-i64-helper-name])]]
             [kotoba.compiler.frontend.row :refer [#?@(:kotoba [specialize-row-parameters type-literals] :default [specialize-row-parameters type-literals])]]
             [kotoba.compiler.frontend.state-ability :refer [#?@(:kotoba [specialize-state-abilities state-handle-bodies state-refuse-impure-handler! thread-state-abilities] :default [specialize-state-abilities state-handle-bodies state-refuse-impure-handler! thread-state-abilities])]])
@@ -4510,6 +4510,14 @@
                  (first-truthy #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
                  (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                  (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
+                 ;; ... and a pair-chain `count` / `nth` as a `__kotoba_list_count` /
+                 ;; `__kotoba_list_drop` call.
+                 (and (first-truthy #(uses-list-count? (:body %)) parsed)
+                      (not (first-truthy #(= list-count-helper-name (:name %)) parsed)))
+                 (conj list-count-helper)
+                 (and (first-truthy #(uses-list-drop? (:body %)) parsed)
+                      (not (first-truthy #(= list-drop-helper-name (:name %)) parsed)))
+                 (conj list-drop-helper)
                  (first-truthy #(uses-char? (:body %)) parsed)
                  (conj char-helper)
                  (uses-documents? parsed)
