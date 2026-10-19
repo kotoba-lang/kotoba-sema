@@ -4510,14 +4510,6 @@
                  (first-truthy #(uses-map-without? (:body %)) parsed) (conj map-without-helper)
                  (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                  (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
-                 ;; ... and a pair-chain `count` / `nth` as a `__kotoba_list_count` /
-                 ;; `__kotoba_list_drop` call.
-                 (and (first-truthy #(uses-list-count? (:body %)) parsed)
-                      (not (first-truthy #(= list-count-helper-name (:name %)) parsed)))
-                 (conj list-count-helper)
-                 (and (first-truthy #(uses-list-drop? (:body %)) parsed)
-                      (not (first-truthy #(= list-drop-helper-name (:name %)) parsed)))
-                 (conj list-drop-helper)
                  (first-truthy #(uses-char? (:body %)) parsed)
                  (conj char-helper)
                  (uses-documents? parsed)
@@ -4601,6 +4593,16 @@
         parsed (thread-state-abilities parsed state-clones @*state-handlers*)
         parsed (rewrite-record-projections parsed (:schemas namespace-info)
                                            protocol-dispatch)
+        ;; ... and a pair-chain `count` / `nth` as a `__kotoba_list_count` /
+        ;; `__kotoba_list_drop` call. Injected AFTER the rewrite above, which
+        ;; is what writes those calls (monolith a7ef280 21609-21617).
+        parsed (cond-> parsed
+                 (and (first-truthy #(uses-list-count? (:body %)) parsed)
+                      (not (first-truthy #(= list-count-helper-name (:name %)) parsed)))
+                 (conj list-count-helper)
+                 (and (first-truthy #(uses-list-drop? (:body %)) parsed)
+                      (not (first-truthy #(= list-drop-helper-name (:name %)) parsed)))
+                 (conj list-drop-helper))
         parsed (mapv #(update % :body retire-absence-markers) parsed)
         ;; `option-or` intentionally survives syntactic desugaring until the
         ;; rewrite above can infer its payload descriptor from locals and
