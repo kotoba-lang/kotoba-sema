@@ -204,6 +204,19 @@
 (defn callable-clauses [type]
   (when (callable-type? type) (subvec (callable-type-clauses-part type) 1))))
 
+#?(:kotoba nil :default
+(defn closure-word-type [type]
+  (if (callable-type? type) :i64 type)))
+
+#?(:kotoba nil :default
+(defn callable-effect-row
+  "The row a `[:fn ...]` type declares, as a sorted vector of the row's
+  keywords, or nil when the type declares none. A type with no row keeps the
+  row it always had: the union of the closures its dispatcher family reaches."
+  [type]
+  (when (and (callable-type? type) (callable-row-map? (peek type)))
+    (vec (sort-by str (:effects (peek type)))))))
+
 #?(:kotoba
    (defn parametric-result-type? [type [:ref :form/r]] :bool (vt/result-type? type))
    :default
@@ -1375,6 +1388,24 @@
   (every? #(= :i64 %) parameter-types)))
 
 #?(:kotoba nil :default
+(defn dispatcher-key
+  "The key a dispatcher family is requested and built under. `[result arity]`
+  for the all-`:i64` parameter shape -- every key that existed before typed
+  parameters is unchanged -- and `[result arity parameter-types]` otherwise."
+  ([result-type arity parameter-types]
+   (dispatcher-key result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
+   (cond
+     ;; A family whose contract declares an effect row (ADR 0353 floor
+     ;; :function-effect-rows) is keyed by that row as well: it reaches only
+     ;; the closures lifted under a contract declaring exactly that row.
+     row [result-type arity
+          (when-not (i64-parameter-types? parameter-types) (vec parameter-types))
+          row]
+     (i64-parameter-types? parameter-types) [result-type arity]
+     :else [result-type arity (vec parameter-types)]))))
+
+#?(:kotoba nil :default
 (defn dispatcher-parameter-label
   "The name segment a typed-parameter dispatcher family carries, or nil for
   the all-`:i64` family. A digest, like a structured result's label: the
@@ -1389,10 +1420,22 @@
   ([arity] (invoke-dispatcher-name :i64 arity))
   ([result-type arity] (invoke-dispatcher-name result-type arity nil))
   ([result-type arity parameter-types]
-   (when-not (or (schema-ref-type? result-type)
+   (invoke-dispatcher-name result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
+   (when-not (or (callable-type? result-type)
+                 (schema-ref-type? result-type)
                  (closure-result-type? (canonical-closure-result-type result-type) {}))
      (reject! "closure result type is outside the admitted dispatcher profile"
               result-type))
+   (if row
+     ;; One digest of the clause signature and the declared row, as the
+     ;; typed-parameter, structured-result family is named: two digests would
+     ;; pass `max-symbol-chars`.
+     (symbol (str "__kotoba_invoke_r_"
+                  (artifact/sha256 [(when-not (i64-parameter-types? parameter-types)
+                                      (vec parameter-types))
+                                    result-type row])
+                  "$arity" arity))
    (let [parameter-label (dispatcher-parameter-label parameter-types)
          structured-result? (not (keyword? result-type))]
      (symbol (str "__kotoba_invoke"
@@ -1416,7 +1459,7 @@
                     (str (when parameter-label (str "_" parameter-label))
                          (when-not (= :i64 result-type)
                            (str "_" (dispatcher-result-label result-type)))))
-                  "$arity" arity))))))
+                  "$arity" arity)))))))
 
 #?(:kotoba nil :default
 (defn nth-pair-second [expr n]
