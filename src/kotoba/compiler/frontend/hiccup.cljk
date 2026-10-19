@@ -82,7 +82,7 @@
       (cond (hiccup-node-type? r) :node (= :string r) :string))
     :else nil)))
 
-#?(:kotoba nil :default (defn- expand-hiccup-forms
+#?(:kotoba nil :default (defn expand-hiccup-forms
   "{:forms :schemas}: FORMS with hiccup literals and node shape tests
   rewritten (ADR 0353 :hiccup-node), and the node schemas when the module
   names `:kotoba.hiccup/node`. FORMS itself, and no schemas, otherwise."

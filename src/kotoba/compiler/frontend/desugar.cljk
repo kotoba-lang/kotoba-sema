@@ -10773,7 +10773,7 @@
 
 #?(:kotoba nil :default (def ^:dynamic ^:private *list-item-notes* nil))
 
-#?(:kotoba nil :default (def ^:dynamic ^:private *module-absent-fields* {}))
+#?(:kotoba nil :default (def ^:dynamic *module-absent-fields* {}))
 
 #?(:kotoba nil :default (def ^:dynamic *module-list-fields* {}))
 
@@ -10794,7 +10794,7 @@
                    (if (compiler-rejection? error) nil (throw error))))]
       (when (and (some? t) (not= :map t)) t)))))
 
-#?(:kotoba nil :default (defn- module-absent-fields
+#?(:kotoba nil :default (defn module-absent-fields
   "`*module-absent-fields*` for one module's source forms: every keyword key
   written with a `nil` value -- a keyword-keyed map literal entry or an
   `assoc` pair -- with the types every non-nil value written at that key
@@ -10850,7 +10850,7 @@
   [k]
   (get-in *module-absent-fields* [:fields k])))
 
-#?(:kotoba nil :default (defn- module-list-fields
+#?(:kotoba nil :default (defn module-list-fields
   "`*module-list-fields*` for one module's source forms (floor
   :empty-vector-field): every keyword key written `[]`, with the item types
   the module's `conj`s and vector literals at that key spell
