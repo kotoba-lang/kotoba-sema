@@ -1468,59 +1468,77 @@
 #?(:kotoba nil :default
 (defn lambda-dispatchers [lambda-infos required-dispatchers]
   (let [requested (into #{}
-                        (mapcat (fn [{:keys [arity helper parameter-types]}]
+                        (mapcat (fn [{:keys [arity helper parameter-types effect-row contract-result]}]
                                   ;; A lambda with contract-typed parameters
                                   ;; belongs to the family of exactly its
                                   ;; clause signature and to no i64 family:
                                   ;; an i64 dispatcher calling it would hand
-                                  ;; an i64 word to a typed parameter.
-                                  (if parameter-types
-                                    [[(:result helper) arity parameter-types]]
-                                    [[:i64 arity] [(:result helper) arity]])))
+                                  ;; an i64 word to a typed parameter. A
+                                  ;; lambda lifted under a declared effect
+                                  ;; row belongs to that row's family as well.
+                                  (let [result (if (callable-type? contract-result) contract-result (:result helper))]
+                                    (cond-> (cond
+                                              parameter-types [[result arity parameter-types]]
+                                              (callable-type? result) [[result arity]]
+                                              :else [[:i64 arity] [result arity]])
+                                      effect-row
+                                      (conj (dispatcher-key result arity parameter-types effect-row))))))
                         lambda-infos)
         requested (into requested required-dispatchers)]
     (mapv
-     (fn [[result-type arity parameter-types]]
+     (fn [[result-type arity parameter-types row]]
        (let [closure (symbol (str "__kotoba_closure_"
                                   (dispatcher-result-label result-type) "_" arity))
              args (mapv #(symbol (str "__kotoba_invoke_arg_" %)) (range arity))
+             ;; a row family reaches only the lambdas lifted under exactly
+             ;; that row, each checked against it: a caller through the
+             ;; row is bounded by the row, not by every lifted closure
              candidates (filter #(and (= arity (:arity %))
-                                      (= result-type (get-in % [:helper :result]))
-                                      (= parameter-types (:parameter-types %)))
+                                      (= result-type (if (callable-type? (:contract-result %))
+                                                       (:contract-result %) (get-in % [:helper :result])))
+                                      (= parameter-types (:parameter-types %))
+                                      (or (nil? row) (= row (:effect-row %))))
                                 lambda-infos)
              ;; A closure id belonging to a different result family is a
              ;; type error at the dynamic boundary.  Produce a result-typed
              ;; trap instead of silently coercing it to false/zero.
-             fallback (case result-type
+             fallback (case (closure-word-type result-type)
                         :bool '(= (quot 1 0) 0)
                         :string '(if (= (quot 1 0) 0) "" "")
                         :vector-i64 '(vector-drop (vector-new) 1)
                         :document '(if (= (quot 1 0) 0)
                                      (document-null)
                                      (document-null))
-                        (if-let [default (closure-default-value-expr result-type)]
+                        (if-let [default (closure-default-value-expr (closure-word-type result-type))]
                           (list 'if '(= (quot 1 0) 0) default default)
                           '(quot 1 0)))
              body (reduce
-                   (fn [fallback {:keys [id captures helper]}]
+                   (fn [fallback {:keys [id captures capture-types helper]}]
                      (let [capture-chain (list 'pair-second closure)
                            capture-values
                            (map-indexed (fn [index _]
-                                          (list 'pair-first
+                                          (list (if (= :js-value (nth capture-types index nil))
+                                                  'js-capture-value 'pair-first)
                                                 (nth-pair-second capture-chain index)))
                                         captures)]
                        (list 'if (list '= (list 'pair-first closure) id)
                              (apply list (:name helper) (concat capture-values args))
                              fallback)))
                    fallback (reverse candidates))]
-         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types)
+         (cond-> {:name (invoke-dispatcher-name result-type arity parameter-types row)
                   :params (into [closure] args)
-                  :result result-type :effects #{} :body body}
+                  :result (closure-word-type result-type) :effects #{} :body body}
            ;; the typed family says its argument types; the i64 family is
            ;; defaulted to all-i64 downstream exactly as before
-           parameter-types (assoc :param-types (into [:i64] parameter-types)))))
+           parameter-types (assoc :param-types (into [:i64] (map closure-word-type parameter-types)))
+           (some callable-type? parameter-types)
+           (assoc :callable-param-contracts
+                  (into {} (keep-indexed (fn [index type]
+                                         (when (callable-type? type) [(inc index) type]))) parameter-types))
+           (callable-type? result-type) (assoc :callable-result-contract result-type))))
      (sort-by (juxt (comp dispatcher-result-label first) second
-                    #(or (dispatcher-parameter-label (nth % 2 nil)) ""))
+                    #(or (dispatcher-parameter-label (nth % 2 nil)) "")
+                    #(pr-str (nth % 3 nil)))
               requested)))))
 
 #?(:kotoba nil :default

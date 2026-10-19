@@ -9,7 +9,7 @@
             #?@(:kotoba [[kotoba.form :as form] [kotoba.artifact.core :as artifact] [kotoba.compiler.value-type :as vt]])
             #?@(:kotoba [[kotoba.compiler.frontend.base :refer [dr env-counter form->document synthetic]]] :default [[kotoba.compiler.frontend.base :refer [capability-registry capability-wire-id effect-capability-id first-truthy form-span if-parts refuse-reader-tagged-host-literal! reject! reject-operation-arity! synthetic try-clause-parts #?@(:kotoba [dr])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? head-is? map-literal-record-type sym-is?]]] :default [[kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-key-order map-literal-record-type #?@(:kotoba [head-is? sym-is?])]]])
-            #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? kw-text parametric-result-type? record-type? schema-ref-type? structured-type? typed-set-type? variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? env-schemas generic-option-type? heterogeneous-vector-type? kw-text parametric-result-type? record-type? schema-ref-type? structured-type? typed-set-type? variant-type?]]] :default [[kotoba.compiler.frontend.closure-types :refer [callable-clauses callable-effect-row callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? closure-result-type? closure-word-type dispatcher-key generic-option-type? heterogeneous-vector-type? i64-parameter-types? invoke-dispatcher-name max-record-fields parametric-result-type? record-type? structured-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [env-schemas kw-text])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol? max-typed-set-items]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
@@ -5492,24 +5492,18 @@
 #?(:kotoba nil :default (def ^:dynamic *expected-callable-contract* nil))
 #?(:kotoba nil :default (def ^:dynamic *contextual-closure-result-type* nil))
 #?(:kotoba nil :default (def ^:dynamic *required-closure-dispatchers* nil))
-
-#?(:kotoba nil :default (defn dispatcher-key
-  "The key a dispatcher family is requested and built under. `[result arity]`
-  for the all-`:i64` parameter shape -- every key that existed before typed
-  parameters is unchanged -- and `[result arity parameter-types]` otherwise."
-  [result-type arity parameter-types]
-  (if (i64-parameter-types? parameter-types)
-    [result-type arity]
-    [result-type arity (vec parameter-types)])))
+#?(:kotoba nil :default (def ^:dynamic *opaque-result-functions* #{}))
 
 #?(:kotoba nil :default (defn request-invoke-dispatcher
   ([result-type arity] (request-invoke-dispatcher result-type arity nil))
   ([result-type arity parameter-types]
+   (request-invoke-dispatcher result-type arity parameter-types nil))
+  ([result-type arity parameter-types row]
    (let [result-type (canonical-closure-result-type result-type)]
      (when *required-closure-dispatchers*
        (vswap! *required-closure-dispatchers* conj
-               (dispatcher-key result-type arity parameter-types)))
-     (invoke-dispatcher-name result-type arity parameter-types)))))
+               (dispatcher-key result-type arity parameter-types row)))
+     (invoke-dispatcher-name result-type arity parameter-types row)))))
 
 #?(:kotoba nil :default (def non-shadowable-special-heads tables/non-shadowable-special-heads))
 
@@ -5524,13 +5518,77 @@
       (reject! "callable contract does not admit this arity"
                form :kotoba.error/callable-arity))))
 
+#?(:kotoba nil :default (defn rowed-field-contract
+  "The `[:fn ...]` contract of a record field read, `(record-get T v :f)` or
+  `(:f v)` over a local of a record type, when that contract declares an
+  effect row (ADR 0353 floor :function-effect-rows); nil otherwise. Only a
+  ROWED field answers: a field with no row keeps the untyped call it always
+  had, so a module with no row keeps its HIR and its CIDs."
+  [form]
+  (when (seq? form)
+    (let [[type field]
+          (cond
+            (and (= 'record-get (first form)) (= 4 (count form)))
+            [(second form) (nth form 3)]
+            (and (keyword? (first form)) (= 2 (count form)) (symbol? (second form)))
+            [(get *local-types* (second form)) (first form)]
+            :else nil)
+          type (when type (canonical-closure-result-type type))]
+      (when (and (record-type? type) (keyword? field))
+        (let [contract (record-field-type type field)]
+          (when (callable-effect-row contract) contract)))))))
+
 #?(:kotoba nil :default (defn expression-callable-contract [form]
   (cond
     (symbol? form) (get *lexical-callable-contracts* form)
-    (seq? form) (or (get *function-callable-result-contracts*
-                         [(first form) (dec (count form))])
-                    (get *function-callable-result-contracts* (first form)))
+    (seq? form)
+    (let [[op & args] form]
+      (if (or (contains? *lexical-bindings* op)
+              (contains? *lexical-callable-contracts* op))
+        (when-let [contract (get *lexical-callable-contracts* op)]
+          (let [result (second (callable-clause-for-arity contract (count args) form))]
+            (when (callable-type? result) result)))
+        (or (get *function-callable-result-contracts* [op (count args)])
+            (get *function-callable-result-contracts* op)
+            (rowed-field-contract form))))
     :else nil)))
+
+#?(:kotoba nil :default (defn require-matching-callable-contract! [expected form]
+  (when-let [actual (expression-callable-contract form)]
+    (when (not= expected actual)
+      (reject! "callable contract does not match the expected contract"
+               {:expected expected :actual actual :expression form}
+               :kotoba.error/callable-contract)))))
+
+#?(:kotoba nil :default (defn opaque-expression? [form]
+  ;; Capture storage must be chosen before lifting, ahead of full type checking.
+  ;; Carry only proven opaque leaves; the ordinary checker validates operands
+  ;; and signatures later. Unknown values retain the existing word ABI.
+  (cond
+    (symbol? form) (= :js-value (get *local-types* form))
+    (seq? form)
+    (let [[op & args] form]
+      (cond
+        (contains? *lexical-bindings* op)
+        (when-let [contract (get *lexical-callable-contracts* op)]
+          (= :js-value (second (callable-clause-for-arity contract (count args) form))))
+        (contains? *opaque-result-functions* [op (count args)]) true
+        (contains? *function-arities* op) false
+        (contains? '#{js-undefined js-bool-value js-capture-value} op) true
+        (= 'do op) (opaque-expression? (last args))
+        (= 'if op) (and (opaque-expression? (second args))
+                       (opaque-expression? (nth args 2 nil)))
+        (= 'let op)
+        (let [[bindings body] args]
+          (when (and (vector? bindings) (even? (count bindings)))
+            (loop [remaining (partition 2 bindings) types *local-types*]
+              (if-let [[name value] (first remaining)]
+                (let [opaque? (binding [*local-types* types] (opaque-expression? value))]
+                  (recur (rest remaining)
+                         (cond-> (dissoc types name) opaque? (assoc name :js-value))))
+                (binding [*local-types* types] (opaque-expression? body))))))
+        :else false))
+    :else false)))
 
 #?(:kotoba nil :default (defn desugar-lexical-call [result-type form]
   (let [closure (fe-nth form 0) args (fe-nthnext form 1)]
@@ -5549,7 +5607,8 @@
       ;; TYPE is checked where every call's is -- against the dispatcher's
       ;; signature by the ordinary checker (`expression type mismatch:
       ;; expected document, got i64`) -- not by a second table here.
-      (apply list (request-invoke-dispatcher result-type (count args) parameter-types)
+      (apply list (request-invoke-dispatcher result-type (count args) parameter-types
+                                             (callable-effect-row contract))
              closure
              (if parameter-types
                (map (fn [argument wanted]
@@ -5572,11 +5631,17 @@
   operands are desugared without inheriting it."
   [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
-    (when-not (closure-result-type? result-type {})
+    (when-not (or (callable-type? result-type) (closure-result-type? result-type {}))
       (reject! "closure result type is outside the admitted dispatcher profile"
                result-type))
-    (binding [*contextual-closure-result-type* result-type]
-      (desugar-expr form)))))
+    (if (callable-type? result-type)
+      (do
+        (require-matching-callable-contract! result-type form)
+        (binding [*expected-callable-contract* result-type
+                  *contextual-closure-result-type* nil]
+          (desugar-expr form)))
+      (binding [*contextual-closure-result-type* result-type]
+        (desugar-expr form))))))
 
 #?(:kotoba
    (defn desugar-vector-i64-source [env [:ref :fe/env] form [:ref :form/r]] [:ref :fe/dr]
@@ -5629,16 +5694,13 @@
 (defn desugar-expected-value [result-type form]
   (let [result-type (canonical-closure-result-type result-type)]
     (cond
+      (callable-type? result-type)
+      (do
+        (require-matching-callable-contract! result-type form)
+        (binding [*expected-callable-contract* result-type]
+          (desugar-expr form)))
       (closure-result-type? result-type {})
       (desugar-result-expr result-type form)
-      ;; ADR 0353 floor :function-values: a `fn` written where a `[:fn ...]`
-      ;; record field is declared is lifted under that contract -- its
-      ;; parameters take the clause's types and it joins that dispatcher
-      ;; family, exactly as a `fn` argument in a contract-typed parameter
-      ;; position does (`desugar-ordinary-call`).
-      (and (callable-type? result-type) (seq? form) (= 'fn (first form)))
-      (binding [*expected-callable-contract* result-type]
-        (desugar-expr form))
       :else (desugar-expr form)))))
 
 ;; the forms of FORM from index I (inclusive), each desugared, the last under RESULT-TYPE when it is not nil
@@ -5909,7 +5971,7 @@
                                      ;; gap 1: a fn literal with no declared
                                      ;; result answers absence as an option
                                      (binding [*absence-mode* :none]
-                                       (realized-lowering (desugar-expr body)))))}))))))))) :default (mapv (fn [dd__224103_1]
+                                       (realized-lowering (desugar-expr body)))))})))))))))                     :default (mapv (fn [dd__224103_1]
                           (let [params (fe-nth dd__224103_1 0) body (fe-nth dd__224103_1 1)]
                             (let [clause-result (get contract-results (count params))
                                 clause-params (get contract-params (count params))]
@@ -5918,16 +5980,20 @@
                            :body (binding [*lexical-bindings*
                                            (into *lexical-bindings* params)
                                            *abort-lexical-context* :fn
+                                           *lexical-callable-contracts*
+                                           (merge (apply dissoc *lexical-callable-contracts* params)
+                                                  (into {} (keep (fn [[p t]]
+                                                                   (when (callable-type? t) [p t])))
+                                                        (map vector params clause-params)))
                                            ;; typed parameters are locals of
                                            ;; their type inside the body (a
                                            ;; record-field projection reads
-                                           ;; them); the i64 clause binds
-                                           ;; nothing new
+                                           ;; them). Untyped parameters shadow any
+                                           ;; outer opaque local with an i64 slot
                                            *local-types*
-                                           (if clause-params
-                                             (merge *local-types*
-                                                    (zipmap params clause-params))
-                                             *local-types*)
+                                           (merge *local-types*
+                                                  (zipmap params (or clause-params
+                                                                     (repeat (count params) :i64))))
                                            *local-option-types*
                                            (if clause-params
                                              (into (or *local-option-types* {})
@@ -5955,6 +6021,10 @@
                                                      body (fe-get dd__226635_1 :body)]
                                                  (form-free-symbols body (set params))))
                                              lowered)))))
+          ;; Opaque leaves are stored in typed arena cells. Other captures
+          ;; retain the existing integer ABI and existing admission/refusals.
+          capture-types (mapv #(if (= :js-value (get *local-types* %)) :js-value :i64) captures)
+          opaque-captures? (some #{:js-value} capture-types)
           id (vswap! *lambda-counter* inc)]
       (doseq [{:keys [params]} lowered]
         (when (> (+ (count captures) (count params)) max-parameters)
@@ -5980,7 +6050,7 @@
                                            (into (vec (repeat (count captures) :i64))
                                                  contract-params)))}
                            contract-result (assoc :contract-result contract-result)
-                           contract-params (assoc :parameter-types contract-params))))))))))) :default (mapv (fn [dd__227132_1]
+                           contract-params (assoc :parameter-types contract-params)))))))))))                     :default (mapv (fn [dd__227132_1]
                        (let [params (fe-get dd__227132_1 :params)
                              body (fe-get dd__227132_1 :body)
                              contract-result (fe-get dd__227132_1 :contract-result)
@@ -5992,21 +6062,40 @@
                                            :result :i64 :result-inferred? true
                                            :effects #{} :body body
                                            :lazy-thunk? *lifting-lazy-thunk?*}
-                                    ;; captures stay the i64 pair-chain words
-                                    ;; they are read out of; only the clause's
-                                    ;; own parameters carry the contract's types
-                                    contract-params
+                                    ;; Integer captures keep their word ABI; opaque
+                                    ;; captures are projected from typed cells and
+                                    ;; arrive at the helper as raw JS values.
+                                    (or contract-params opaque-captures?)
                                     (assoc :param-types
-                                           (into (vec (repeat (count captures) :i64))
-                                                 contract-params)))}
+                                           (into capture-types
+                                                 (map closure-word-type (or contract-params (repeat (count params) :i64)))))
+                                    (some callable-type? contract-params)
+                                    (assoc :callable-param-contracts
+                                           (into {} (keep-indexed (fn [index type]
+                                                                  (when (callable-type? type)
+                                                                    [(+ (count captures) index) type])))
+                                                 contract-params))
+                                    (callable-type? contract-result)
+                                    (assoc :callable-result-contract contract-result))}
+                           opaque-captures? (assoc :capture-types capture-types)
                            contract-result (assoc :contract-result contract-result)
-                           contract-params (assoc :parameter-types contract-params)))))
+                           contract-params (assoc :parameter-types contract-params)
+                           ;; ADR 0353 floor :function-effect-rows: the row the
+                           ;; contract declares. The lambda joins that row's
+                           ;; dispatcher family, and its inferred effects are
+                           ;; checked against the row once effects are known.
+                           (callable-effect-row expected-contract)
+                           (assoc :effect-row (callable-effect-row expected-contract)))))
                      lowered))))
-      ;; Closure captures are always the internal i64 pair-chain ABI, even
-      ;; when the lambda's result is a canonical `[:list T]` value.
+      ;; Closure IDs and chain tails retain the internal i64 pair-chain ABI.
+      ;; Only an explicitly typed opaque leaf changes its cell/projection.
       (list 'pair id
             (binding [*contextual-closure-result-type* nil]
-              (desugar-list captures form)))))))))
+              (if opaque-captures?
+                (reduce (fn [tail [capture type]]
+                          (list (if (= :js-value type) 'js-capture-new 'pair) capture tail))
+                        0 (reverse (map vector captures capture-types)))
+                (desugar-list captures form)))))))))))
 
 #?(:kotoba
    (defn lazy-take-helper-name [] [:ref :form/r]
@@ -9120,6 +9209,10 @@
                             (let [value-contract
                                   (binding [*lexical-callable-contracts* contracts]
                                     (expression-callable-contract value))
+                                  opaque? (binding [*local-types* types
+                                                    *lexical-bindings* env
+                                                    *lexical-callable-contracts* contracts]
+                                            (opaque-expression? value))
                                   ;; `reduce`/`map`/`filter` choose their lowering
                                   ;; by the collection's type at desugar time, so a
                                   ;; `let` local that is a document must be known
@@ -9137,11 +9230,12 @@
                                                 (not document?)
                                                 (binding [*local-types* types]
                                                   (str-integer-form? value)))
-                                  next-types (cond
-                                               document? (assoc (or types {}) pattern :document)
+                                  next-types (cond-> (apply dissoc types (map first expanded))
+                                               document? (assoc pattern :document)
                                                ;; so `str` can print it later
-                                               integer? (assoc (or types {}) pattern :i64)
-                                               :else types)
+                                               integer? (assoc pattern :i64)
+                                               (and (symbol? pattern) opaque?)
+                                               (assoc pattern :js-value))
                                   next-env (into env (map first expanded))
                                   next-contracts
                                   (if (and (symbol? pattern) value-contract)
