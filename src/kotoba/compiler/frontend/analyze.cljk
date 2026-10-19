@@ -1880,6 +1880,49 @@
               (recur next-resolved))))))))))
 
 #?(:kotoba nil :default
+(defn resolve-loop-helper-signatures
+  "Settle capture parameter types and loop result types together.
+
+  A loop can return a vector which a later loop captures. In the first pass,
+  that captured call sees the earlier loop's provisional i64 result. Repeating
+  only result inference leaves the later helper's capture incorrectly typed.
+  Each pass can settle one more dependent loop; stop when signatures stabilize."
+  [functions shapes]
+  (let [helper-count (count (filter :loop-helper? functions))]
+    (loop [current functions remaining (+ helper-count 1)]
+      (let [next-fns (-> current
+                         (resolve-loop-helper-param-types shapes)
+                         (infer-loop-helper-results shapes))
+            signature (fn [fs] (mapv (juxt :param-types :result) fs))]
+        (if (= (signature next-fns) (signature current))
+          next-fns
+          (if (zero? remaining)
+            (reject! "loop helper signature inference did not converge"
+                     (:body (first (filter :loop-helper? functions)))
+                     :kotoba.error/loop-signature-inference)
+            (recur next-fns (dec remaining)))))))))
+
+#?(:kotoba nil :default
+(defn type-literals-and-loop-slots
+  "ADR 0353 floor :loop-slot-types. A loop-helper's parameters were typed
+  from its call site BEFORE literals were (a map literal was `:map`, a
+  vector literal of records refused as not i64 and left the `:i64`
+  placeholder). Once literals are typed, the call site says what the slot
+  is: the literal's record, the `[:list T]` of its items. Re-resolve the
+  helpers' signatures from the typed call sites and type the literals the
+  new slot types reach, to a fixed point."
+  [functions shapes]
+  (if-not (first-truthy :loop-helper? functions)
+    (type-literals functions)
+    (loop [fs (type-literals functions) budget 8]
+      (let [fs' (-> fs
+                    (resolve-loop-helper-signatures shapes)
+                    type-literals)]
+        (if (or (zero? budget) (= fs' fs))
+          fs'
+          (recur fs' (dec budget))))))))
+
+#?(:kotoba nil :default
 (defn resolve-absence-non-tails
   "FORM, an absence root, with everything that is not one of its tails
   resolved (a test, a let binding, a statement, a call's arguments)."
@@ -4534,12 +4577,14 @@
         ;; the `:param-types` defaulting above because it reads them.
         slice-parameter-functions (volatile! #{})
         parsed (erase-slice-values parsed slice-parameter-functions)
-        parsed (resolve-loop-helper-param-types parsed @loop-helper-shapes)
-        ;; ADR 0027: and then the loop-helper's RESULT, from the exits of the
-        ;; loop it was made from. Immediately after its parameter types and
-        ;; before anything reads its signature, so no later pass ever sees the
+        parsed (resolve-loop-helper-signatures parsed @loop-helper-shapes)
+        ;; ADR 0027: the loop-helper's RESULT (from the exits of the loop it
+        ;; was made from) and the captured parameter types settle together --
+        ;; a loop can return a vector which a later loop captures, and that
+        ;; captured call first sees the earlier loop's provisional `:i64`
+        ;; result, so the two inferences alternate to a fixed point before
+        ;; anything reads the signatures, and no later pass ever sees the
         ;; `:i64` placeholder the desugar had to write.
-        parsed (infer-loop-helper-results parsed @loop-helper-shapes)
         parsed (check-loop-recur-argument-types! parsed @loop-helper-shapes)
         ;; Parameters before results: a result is inferred from a body whose
         ;; locals include the parameters, so refining one changes the other.
@@ -4550,15 +4595,26 @@
         ;; ADR 0353 floor :literal-typing: a map or vector literal lowered
         ;; before any type was inferred is typed by its items, before rows
         ;; read it (a let-bound literal passed to a row is its record).
-        parsed (type-literals parsed)
-        parsed (binding [*schemas* (:schemas namespace-info)]
-                 (specialize-row-parameters
-                  parsed
-                  (cond
-                    (some? (:exports namespace-info)) (set (:exports namespace-info))
-                    (first-truthy (complement :public?) def-parts)
-                    (set (map :source-name (filter :public? def-parts)))
-                    :else nil)))
+        parsed (type-literals-and-loop-slots parsed @loop-helper-shapes)
+        parsed (let [specialized
+                     (binding [*schemas* (:schemas namespace-info)]
+                       (specialize-row-parameters
+                        parsed
+                        (cond
+                          (some? (:exports namespace-info)) (set (:exports namespace-info))
+                          (first-truthy (complement :public?) def-parts)
+                          (set (map :source-name (filter :public? def-parts)))
+                          :else nil)))]
+                 ;; ADR 0353 floor :record-list-sequence: a loop helper's
+                 ;; captures were typed from its call site in the generic,
+                 ;; where a row's field is not yet known -- the placeholder
+                 ;; `:i64`. The call site is now in a specialization, whose
+                 ;; row is its record, so the helpers are settled again from
+                 ;; there. A module with no row-polymorphic function is
+                 ;; unchanged.
+                 (if (= specialized parsed)
+                   specialized
+                   (resolve-loop-helper-signatures specialized @loop-helper-shapes)))
         parsed (infer-absent-parameter-types parsed)
         ;; ADR 0189: resolve `(record-get value :field)` to the canonical
         ;; 3-arity form. This must precede every later pass that runs type
