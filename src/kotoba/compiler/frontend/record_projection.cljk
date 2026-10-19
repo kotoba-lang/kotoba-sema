@@ -11,7 +11,7 @@
             [kotoba.compiler.frontend.closure-types :refer [canonical-list-type? canonical-typed-map-type? closure-default-value-expr heterogeneous-vector-type? record-type? schema-ref-type? typed-set-type? variant-type? #?@(:kotoba [fe-error])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
             [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! #?@(:kotoba [] :default [collection-count-operations map-projection-operations set-operations vector-end-operations])]]
-            [kotoba.compiler.frontend.infer :refer [document-of-constructor! infer-expression-type library-predicate-answer! nominal-type-identity option-vector-type? record-field-type record-get-default-type require-expression-type! #?@(:kotoba [zip-locals] :default [resolve-absence-if]) row-op-fields row-op-literal-entries row-op-not-record! row-op-record row-op-result-type #?@(:kotoba [argc ctx-row-schemas ctx-schemas use-site-text] :default [document-of-constructors float-arithmetic-resolution library-predicate-heads])]]
+            [kotoba.compiler.frontend.infer :refer [document-of-constructor! infer-expression-type library-predicate-answer! nominal-type-identity option-vector-type? record-field-type record-get-default-type require-expression-type! #?@(:kotoba [zip-locals] :default [resolve-absence-if]) row-op-fields row-op-literal-entries row-op-not-record! row-op-record row-op-result-type #?@(:kotoba [argc ctx-row-schemas ctx-schemas use-site-text] :default [document-of-constructors float-arithmetic-resolution library-predicate-heads use-site-text])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil resolve-absence-if]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -2002,11 +2002,23 @@
         ;; refuse ("if test must be bool or an option"; an `:i64` by its own
         ;; name, floor :bool-predicates).
         (= op 'if)
-        (let [[test & branches] (mapv #(rewrite-record-projection % locals signatures schemas) args)
-              test-type (try (infer-expression-type test locals signatures)
-                             (catch #?(:clj Exception :cljs :default) _ nil))]
-          (resolve-absence-if (list* 'if (option-presence-test test test-type) branches)
-                              locals signatures))
+        (let [test (rewrite-record-projection (first args) locals signatures schemas)
+              static (when (and (boolean? test)
+                                (first-truthy #(and (seq? %) (= match-has-marker (first %)))
+                                              (tree-seq coll? seq (first args))))
+                       test)]
+          (if (some? static)
+            ;; A map pattern on a record: presence was decided statically
+            ;; (floor :empty-map-literal), so the test is gone, not wrapped,
+            ;; and an arm that cannot match is not there to be typed.
+            (rewrite-record-projection (if static (second args) (nth args 2 false))
+                                       locals signatures schemas)
+            (let [branches (mapv #(rewrite-record-projection % locals signatures schemas)
+                                 (rest args))
+                  test-type (try (infer-expression-type test locals signatures)
+                                 (catch #?(:clj Exception :cljs :default) _ nil))]
+            (resolve-absence-if (list* 'if (option-presence-test test test-type) branches)
+                              locals signatures))))
 
         (= op '__kotoba_present)
         (let [value (rewrite-record-projection (first args) locals signatures schemas)
@@ -2326,6 +2338,23 @@
                 (if (record-field-type descriptor key)
                   (list 'record-get descriptor value key)
                   (list 'do value default)))
+
+            ;; A match pattern's projection of a key the record lacks: its
+            ;; arm does not match and is folded away (floor
+            ;; :empty-map-literal), so the temp is never read.
+            (and (record-type? descriptor)
+                 (:kotoba.compiler.frontend/match-projection (meta form))
+                 (not (record-field-type descriptor key)))
+            (list 'do value 0)
+
+            ;; floor :row-get-and-match: a record's fields are static, so
+            ;; the field a get reads is written, not computed.
+            (and (record-type? descriptor) (not (keyword? key)))
+            (reject! (str "get on record " (second descriptor) " has the computed key "
+                          (use-site-text (nth args 1))
+                          ": a record's fields are static, so the field a get reads is a"
+                          " keyword literal; a computed key needs a [:map K V]")
+                     form :kotoba.error/record-projection-unresolved)
 
             (record-type? descriptor)
             (do

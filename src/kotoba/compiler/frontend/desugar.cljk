@@ -7999,7 +7999,8 @@
                   (let [projection (synthetic "match-key")
                       sub (match-pattern-plan sub-pattern projection form true)]
                   (-> plan
-                      (update :temps conj [projection (list 'get subject key)])
+                      (update :temps conj [projection (with-meta (list 'get subject key)
+                                                        {:kotoba.compiler.frontend/match-projection true})])
                       (update :temps into (:temps sub))
                       (update :tests conj (list match-has-marker subject key))
                       (update :tests into (:tests sub))
