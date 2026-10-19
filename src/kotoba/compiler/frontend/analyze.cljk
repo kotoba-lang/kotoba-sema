@@ -513,12 +513,16 @@
   [form]
   (cond
     (seq? form)
-    (let [form* (apply list (map expand-app-data-bytes-writes form))]
+    (let [form* (apply list (map expand-app-data-bytes-writes form))
+          form* (if-let [m (meta form)] (with-meta form* m) form*)]
       (if (and (= 'fs/app-data-bytes (first form*)) (= 3 (count form*)))
-        (list 'fs/app-data-bytes
-              (list 'bytes-concat (list 'string-to-utf8 (second form*)) (nth form* 2)))
+        (let [rewritten (list 'fs/app-data-bytes
+                              (list 'bytes-concat (list 'string-to-utf8 (second form*)) (nth form* 2)))]
+          (if-let [m (meta form)] (with-meta rewritten m) rewritten))
         form*))
-    (vector? form) (mapv expand-app-data-bytes-writes form)
+    (vector? form)
+    (let [v (mapv expand-app-data-bytes-writes form)]
+      (if-let [m (meta form)] (with-meta v m) v))
     :else form)))
 
 #?(:kotoba
