@@ -4,11 +4,11 @@
   (:require [kotoba.artifact.core :as artifact]))
 
 #?(:kotoba (defn max-schemas [] :i64 32) :default (def max-schemas 32))
-#?(:kotoba (defn max-schema-nodes [] :i64 512) :default (def max-schema-nodes 512))
+#?(:kotoba (defn max-schema-nodes [] :i64 64) :default (def max-schema-nodes 64))
 ;; kotoba-lang lang/limits.edn :language/static :type-descriptor-depth
 ;; (8 -> 12 on 2026-09-24, adr-2609242100 P1; the frontend's max-type-depth
 ;; and osaho's adt-depth-limit are the same bound).
-#?(:kotoba (defn max-schema-depth [] :i64 64) :default (def max-schema-depth 64))
+#?(:kotoba (defn max-schema-depth [] :i64 12) :default (def max-schema-depth 12))
 
 #?(:kotoba nil
    :default
