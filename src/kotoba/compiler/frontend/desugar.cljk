@@ -50,7 +50,7 @@
 
 
 ;; forward references inside this module (the cut keeps the original form order)
-#?(:kotoba nil :default (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*))
+#?(:kotoba nil :default (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call sequence-first-chain desugar-sequence-first desugar-update require-rowed-callable-argument! reject-absent-field-conflict! reject-list-field-conflict! absent-field-type list-field-type desugar-absent-field-value guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*))
 
 
 ;; Dataspace v1 is a language-owned typed capability contract. These
@@ -8951,7 +8951,9 @@
         ;; `remove` joined the set 2026-09-25 when it gained its lowering
         ;; (the `(filter remove)` arm below): lang/stdlib/core defines its own
         ;; `remove`, and that definition must keep winning.
-        (and (contains? '#{mapv filterv remove} op)
+        ;; `update` joined it 2026-10-06 with its desugar (floor
+        ;; :record-field-update), on the same terms.
+        (and (contains? '#{mapv filterv remove update} op)
              (top-level-function-symbol? op))
         (apply list op (map desugar-expr args))
 
@@ -9378,7 +9380,9 @@
         cons (do (when-not (= 2 (count args)) (reject! "cons requires two operands" form))
                  (list 'pair (desugar-expr (first args)) (desugar-expr (second args))))
         first (do (when-not (= 1 (count args)) (reject! "first requires one operand" form))
-                  (list 'pair-first (desugar-expr (first args))))
+                  (if-let [chain (sequence-first-chain (first args))]
+                    (desugar-sequence-first chain)
+                    (list 'pair-first (desugar-expr (first args)))))
         second (do (when-not (= 1 (count args)) (reject! "second requires one operand" form))
                    (list 'pair-first (list 'pair-second (desugar-expr (first args)))))
         rest (do (when-not (= 1 (count args)) (reject! "rest requires one operand" form))
@@ -9423,6 +9427,7 @@
         -> (desugar-thread args form false)
         ->> (desugar-thread args form true)
         as-> (desugar-as-thread args form)
+        update (desugar-update args form)
         some-> (desugar-some-thread args form false)
         some->> (desugar-some-thread args form true)
         cond (desugar-cond args form)
@@ -10695,16 +10700,20 @@
         ;; program keeps its HIR and its CIDs.
         contracts (into {}
                         (filter (fn [[_ contract]]
-                                  (first-truthy (fn [[parameter-types _]]
-                                          (not (i64-parameter-types? parameter-types)))
-                                        (callable-clauses contract))))
+                                  (or (callable-effect-row contract)
+                                      (first-truthy (fn [[parameter-types result-type]]
+                                              (or (callable-type? result-type)
+                                                  (not (i64-parameter-types? parameter-types))))
+                                            (callable-clauses contract)))))
                         contracts)]
     (apply list op
            (if (seq contracts)
              (map-indexed (fn [index argument]
                             (if-let [contract (get contracts index)]
-                              (binding [*expected-callable-contract* contract]
-                                (desugar-expr argument))
+                              (do
+                                (require-rowed-callable-argument! contract argument)
+                                (binding [*expected-callable-contract* contract]
+                                  (desugar-expr argument)))
                               (desugar-expr argument)))
                           args)
              (map desugar-expr args))))))
@@ -10773,7 +10782,7 @@
 
 #?(:kotoba nil :default (def ^:dynamic ^:private *list-item-notes* nil))
 
-#?(:kotoba nil :default (def ^:dynamic ^:private *module-absent-fields* {}))
+#?(:kotoba nil :default (def ^:dynamic *module-absent-fields* {}))
 
 #?(:kotoba nil :default (def ^:dynamic *module-list-fields* {}))
 
@@ -10794,7 +10803,7 @@
                    (if (compiler-rejection? error) nil (throw error))))]
       (when (and (some? t) (not= :map t)) t)))))
 
-#?(:kotoba nil :default (defn- module-absent-fields
+#?(:kotoba nil :default (defn module-absent-fields
   "`*module-absent-fields*` for one module's source forms: every keyword key
   written with a `nil` value -- a keyword-keyed map literal entry or an
   `assoc` pair -- with the types every non-nil value written at that key
@@ -10850,7 +10859,7 @@
   [k]
   (get-in *module-absent-fields* [:fields k])))
 
-#?(:kotoba nil :default (defn- module-list-fields
+#?(:kotoba nil :default (defn module-list-fields
   "`*module-list-fields*` for one module's source forms (floor
   :empty-vector-field): every keyword key written `[]`, with the item types
   the module's `conj`s and vector literals at that key spell

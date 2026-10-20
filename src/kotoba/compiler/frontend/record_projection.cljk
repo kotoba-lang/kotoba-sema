@@ -2942,6 +2942,20 @@
             (= :vector-i64 value-type)
             (if first? (list 'vector-at receiver 0) (list 'vector-drop receiver 1))
 
+            ;; ADR 0353 floor :record-list-sequence: `first` of a [:list T]
+            ;; is [:option T] -- absent on an empty list, which Clojure
+            ;; answers nil -- read through the list's own accessor. The
+            ;; receiver is bound once. `rest` of a list stays refused: the
+            ;; list has no drop.
+            (and first? (canonical-list-type? value-type))
+            (let [items (synthetic "first_list")
+                  option-type [:option (second value-type)]]
+              (list 'let [items receiver]
+                    (list 'if (list '< 0 (list 'vector-count items))
+                          (list 'option-some-of option-type
+                                (list 'typed-list-nth value-type items 0))
+                          (list 'option-none-of option-type))))
+
             (= :vector-f64 value-type)
             (if first?
               (list 'vector-f64-at receiver 0)
@@ -2957,6 +2971,25 @@
                             :kotoba.error/pair-second-receiver))
 
             :else (cons op rewritten-args)))
+
+        ;; ADR 0353 floor :record-list-sequence: the exits of a fused
+        ;; `first` search, resolved by the sequence searched. A bounded vector
+        ;; keeps what `(first (filter ..))` always answered on it -- the item,
+        ;; and the trap `(vector-at <empty result> 0)` raised when nothing
+        ;; was found, index 0 of an empty vector -- and a [:list T] answers
+        ;; [:option T].
+        (contains? '#{__kotoba_seq_found __kotoba_seq_absent} op)
+        (let [[items item] (mapv #(rewrite-record-projection % locals signatures schemas) args)
+              value-type (infer-expression-type items locals signatures)
+              found? (= op '__kotoba_seq_found)]
+          (cond
+            (canonical-list-type? value-type)
+            (if found?
+              (list 'option-some-of [:option (second value-type)] item)
+              (list 'option-none-of [:option (second value-type)]))
+            found? item
+            (= :vector-f64 value-type) (list 'vector-f64-at (list 'vector-f64-new) 0)
+            :else (list 'vector-at (list 'vector-new) 0)))
 
         ;; Type-directed numeric resolution: `(+ a b)` on two f64 operands is
         ;; `(f64-add a b)`, on two f32 `(f32-add a b)`; i64 operands are left
