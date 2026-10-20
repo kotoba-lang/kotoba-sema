@@ -236,4 +236,4 @@
 #?(:kotoba
 (defn lint-forms [source-forms [:ref :form/r] opts [:ref :form/r]] [:ref :ana/ir]
   (lint-core/lint-forms source-forms opts))
-   :default nil)
+   :default (def lint-forms analyze/lint-forms))

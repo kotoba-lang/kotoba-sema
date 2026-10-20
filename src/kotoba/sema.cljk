@@ -1,6 +1,6 @@
 (ns kotoba.sema
   "Stable public entry points for Kotoba source semantic analysis."
-  {:kotoba/export [analyze analyze-forms capability-registry lint lint-forms max-functions max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map-clauses read-error read-forms-result]}
+  {:kotoba/export [analyze analyze-forms capability-id->name capability-registry forbidden-heads kernel-operation-heads kernel-region-report lint lint-forms max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map->clauses namespace-attr-map-keys read-forms schema-identities source-operation-registry validate-schema-table!]}
   (:require [kotoba.compiler.frontend :as frontend]
             #?@(:default [[kotoba.compiler.frontend.analyze :as fe-analyze]
                           [kotoba.compiler.frontend.expand :as fe-expand]
@@ -178,4 +178,33 @@
   controls are authoritative when explicitly overridden."
   ([source] (analyze-with-controls source nil))
   ([source opts] (analyze-with-controls source opts)))
+
+(defn- analyze-forms-with-controls [source-forms opts]
+  (if (default-controls?)
+    (frontend/analyze-forms source-forms opts)
+    ;; Rebinding is only entered when a caller explicitly overrides the public
+    ;; facade controls (principally bounded tests). Normal concurrent analysis
+    ;; stays on the direct, mutation-free path above.
+    (with-redefs [fe-namespace-defs/max-functions max-functions
+                  fe-validate/max-expression-nodes max-expression-nodes
+                  fe-analyze/max-lowered-nodes max-lowered-nodes
+                  fe-validate/max-bindings max-bindings
+                  fe-validate/max-list-items max-list-items
+                  fe-namespace-defs/max-namespace-capabilities max-namespace-capabilities
+                  fe-namespace-defs/max-namespace-docstring-chars max-namespace-docstring-chars
+                  fe-expand/max-function-docstring-chars max-function-docstring-chars]
+      (frontend/analyze-forms source-forms opts))))
+
+(defn analyze-forms
+  "Analyze already-read Kotoba source FORMS and return a validated HIR
+  envelope. Public admission controls are authoritative when explicitly
+  overridden, exactly as for `analyze`."
+  ([source-forms] (analyze-forms-with-controls source-forms nil))
+  ([source-forms opts] (analyze-forms-with-controls source-forms opts)))
+
+(def lint-forms
+  "Analyze already-read Kotoba source FORMS as `lint` does its source text,
+  then return a vector of non-fatal findings -- empty when there is nothing
+  to say. A refusal propagates unchanged."
+  frontend/lint-forms)
 ))

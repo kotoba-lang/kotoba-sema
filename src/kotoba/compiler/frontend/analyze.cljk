@@ -5119,3 +5119,19 @@
                      (when-not (str/includes? (str name) "__")
                        (zero-multiply-findings name body))))
            (:functions hir))))))
+
+#?(:kotoba nil :default
+(defn lint-forms
+  "Analyze SOURCE-FORMS as `analyze-forms*` does, then return a vector of
+  non-fatal findings about them -- empty when there is nothing to say. The
+  forms-level peer of `lint`: same findings, same propagation rule (a refusal
+  raised by analysis propagates unchanged), and synthesized functions (names
+  carrying `__`) are not reported on; the source never wrote them."
+  ([source-forms] (lint-forms source-forms nil))
+  ([source-forms opts]
+   (let [hir (analyze-forms* source-forms opts)]
+     (into []
+           (mapcat (fn [{:keys [name body]}]
+                     (when-not (str/includes? (str name) "__")
+                       (zero-multiply-findings name body))))
+           (:functions hir))))))
