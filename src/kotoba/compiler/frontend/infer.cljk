@@ -6175,6 +6175,34 @@
                                          first-use second-use)
                 (recur applied (dec budget)))))))))))
 
+(defn- param-types-from-uses
+  "#117: a body whose inference threw under the :i64 parameter seed gets its
+  parameter types from their uses as call arguments (the callee's declared
+  parameter type at that index). A parameter with no recoverable use keeps the
+  seed. Strictly informative; the final check-value-types! is unchanged."
+  [body params param-types table]
+  (let [found (volatile! {})]
+    (letfn [(scan [form]
+              (cond
+                (seq? form)
+                (do (let [op (first form)
+                          args (rest form)]
+                      (when (and (symbol? op) (contains? table op))
+                        (let [pts (:param-types (get table op))]
+                          (doseq [[i a] (map-indexed vector args)]
+                            (when (and (symbol? a)
+                                       (some #{a} params)
+                                       pts
+                                       (< i (count pts))
+                                       (not= :i64 (nth pts i))
+                                       (not (contains? @found a)))
+                              (vswap! found assoc a (nth pts i)))))))
+                    (doseq [a (rest form)] (scan a)))
+                (vector? form) (doseq [a form] (scan a))
+                :else nil))]
+      (scan body))
+    (mapv (fn [p t] (get @found p t)) params param-types)))
+
 #?(:kotoba nil :default (defn infer-absent-results
   "Give every unannotated `defn` the result type its body actually has.
 
@@ -6201,7 +6229,12 @@
                                                 body (zipmap params param-types) table)
                                                (catch #?(:clj Exception :cljs :default) _ nil))]
                           (assoc f :result inferred)
-                          f)
+                          (if-let [inferred2 (try (infer-expression-type
+                                                   body (zipmap params (param-types-from-uses body params param-types table))
+                                                   table)
+                                                  (catch #?(:clj Exception :cljs :default) _ nil))]
+                            (assoc f :result inferred2)
+                            f))
                         f))
                     fs)))]
     (-> functions pass pass))))
