@@ -13,7 +13,7 @@
             #?@(:kotoba [[kotoba.compiler.frontend.expand :refer [all-distinct?]]] :default [[kotoba.compiler.frontend.expand :refer [all-distinct? binding-symbols implicit-do-body kotoba-integer? max-parameters specialize-variadic-clause valid-name?]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.namespace-defs :refer [compiler-rejection? internal-failure! #?@(:kotoba [] :default [typed-vector-operations])]]])
             #?@(:kotoba [[kotoba.compiler.frontend.validate :refer [holds-symbol? max-typed-set-items]]] :default [[kotoba.compiler.frontend.validate :refer [document-reader-f64-form? holds-symbol? max-list-items max-typed-map-entries quote-form? quoted-symbol-datum-kind reject-quoted-symbol-datum!]]])
-            #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [kw-head? record-field-type]]] :default [[kotoba.compiler.frontend.infer :refer [record-field-type #?@(:kotoba [kw-head?])]]])
+            #?@(:kotoba [[kotoba.compiler.frontend.infer :refer [kw-head? record-field-type]]] :default [[kotoba.compiler.frontend.infer :refer [record-field-type *module-list-fields* *module-list-inferred* #?@(:kotoba [kw-head?])]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.record-projection :refer [doc-nth-helper-name f32-literal-bits! match-has-marker]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -10789,14 +10789,11 @@
 ;; --- main-only preservation forms (a7ef280 monolith), host twins only ---
 ;; These 18 forms are preserved from the monolith verbatim (feature wiring is
 ;; absent in the split -- see PR notes: typed twins and wiring are follow-ups).
-
-#?(:kotoba nil :default (def ^:dynamic ^:private *list-item-notes* nil))
+;; 13 remain here; the 5 of the list-note cluster (*list-item-notes*,
+;; *module-list-fields*, *module-list-inferred*, list-field-read-key,
+;; note-list-item-type!) moved to infer.cljk (M11).
 
 #?(:kotoba nil :default (def ^:dynamic *module-absent-fields* {}))
-
-#?(:kotoba nil :default (def ^:dynamic *module-list-fields* {}))
-
-#?(:kotoba nil :default (def ^:dynamic ^:private *module-list-inferred* {}))
 
 #?(:kotoba nil :default (defn- absent-field-spelled-type
   "The type ONE value written at a key spells on its own, for
@@ -10947,36 +10944,9 @@
                               @record-lists))
                  *module-list-inferred*)))))
 
-#?(:kotoba nil :default (defn list-field-read-key
-  "The keyword key RECEIVER reads, `(record-get m k)` / `(get m k)` / `(k m)`,
-  or nil."
-  [receiver]
-  (when (seq? receiver)
-    (let [[op & args] receiver]
-      (cond
-        (and (contains? '#{record-get get} op) (keyword? (last args))) (last args)
-        (and (keyword? op) (= 1 (count args))) op
-        :else nil)))))
-
-#?(:kotoba nil :default (defn- note-list-item-type!
-  "floor :list-item-from-expression: an item of type T is conj'd onto the field
-  RECEIVER reads. Noted when that is an open `[]` key and T is known and not
-  `:i64`. Floor :record-list-field-literal: onto a record-lists key T is
-  noted, and where its list is known to be LIST-TYPE `[:list R]`, R before
-  it, so a T /= R is a second type at the key (`:record-conflicts`)."
-  ([receiver t] (note-list-item-type! receiver t nil))
-  ([receiver t list-type]
-   (when-let [notes *list-item-notes*]
-     (when-let [k (list-field-read-key receiver)]
-       (when (and (some? t) (not= :i64 t))
-         (cond
-           (contains? (:open *module-list-fields*) k)
-           (vswap! notes conj [k t])
-
-           (contains? (:record-lists *module-list-fields*) k)
-           (if (canonical-list-type? list-type)
-             (vswap! notes conj [k (second list-type)] [k t])
-             (vswap! notes conj [k t])))))))))
+;; list-field-read-key and note-list-item-type! moved to infer.cljk (M11):
+;; record-projection's `conj` arms call note-list-item-type!, and
+;; record-projection cannot require desugar (desugar requires it).
 
 #?(:kotoba nil :default (defn- reject-list-field-conflict!
   "A key the module writes `[]` at and conj's items of two types at: which one
