@@ -5045,6 +5045,12 @@
 
 ;; ── result inference ─────────────────────────────────────────────────────────
 
+#?(:kotoba (defn ptfu-param-index "Index of the parameter symbol X in PARAMS, else -1." (x [:ref :form/r] params [:ref :form/r] i :i64) :i64 (if (>= i (form/count-of params)) -1 (if (form/eq x (form/nth-of params i)) i (ptfu-param-index x params (+ i 1))))) :default nil)
+
+#?(:kotoba (defn ptfu-scan "Walk the body forms; accumulate param -> callee param type into ACC." (x [:ref :form/r] params [:ref :form/r] table [:ref :form/r] acc [:ref :form/r]) [:ref :form/r] (if (form/is-seq? x) (let (op (form/nth-of x 0) k (form/count-of x) sig (form/form-get table op) pts (if (form/is-nil? sig) (form/nil-form) (fget sig :param-types)) acc2 (if (form/is-nil? pts) acc (loop (j 1 acc acc) (if (>= j k) acc (recur (+ j 1) (let (a (form/nth-of x j)) (if (and (form/is-symbol? a) (< (- j 1) (form/count-of pts)) (not (ftruthy? (form/form-get acc a)))) (if (< (ptfu-param-index a params 0) 0) acc (form/assoc-form acc a (form/nth-of pts (- j 1)))) acc))))))) (loop (t 1 acc acc2) (if (>= t k) acc (recur (+ t 1) (ptfu-scan (form/nth-of x t) params table acc))))) (if (form/is-vec? x) (loop (u 0 acc acc) (if (>= u (form/count-of x)) acc (recur (+ u 1) (ptfu-scan (form/nth-of x u) params table acc)))) acc))) :default nil)
+
+#?(:kotoba (defn param-types-from-uses-form "Rebuild the param-types form with each parameter type from its first use as a call argument." (body [:ref :form/r] params [:ref :form/r] param-types [:ref :form/r] table [:ref :form/r]) [:ref :form/r] (let (found (ptfu-scan body params table (form/no-forms)) n (form/count-of params)) (loop (i 0 acc (form/no-forms)) (if (>= i n) acc (recur (+ i 1) (form/append-form acc (let (got (form/form-get found (form/nth-of params i))) (if (form/is-nil? got) (form/nth-of param-types i) got)))))))) :default nil)
+
 #?(:kotoba
 (defn absent-results-pass-from [ctx [:ref :ie/ctx] fs [:ref :form/r] table [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:ref :form/r]
   (if (>= i (form/count-of fs))
@@ -5052,7 +5058,10 @@
     (let [f (form/nth-of fs i)
           g (if (ftruthy? (fget f :result-inferred?))
               (let [inferred (infer-type-or-nil ctx (fget f :body) (zip-locals (fget f :params) (fget f :param-types)) table)]
-                (if (form/is-nil? inferred) f (fput f :result inferred)))
+                (if (form/is-nil? inferred)
+                  (let [inferred2 (infer-type-or-nil ctx (fget f :body) (zip-locals (fget f :params) (param-types-from-uses-form (fget f :body) (fget f :params) (fget f :param-types) table)) table)]
+                    (if (form/is-nil? inferred2) f (fput f :result inferred2)))
+                  (fput f :result inferred)))
               f)]
       (absent-results-pass-from ctx fs table (+ i 1) (form/append-form acc g)))))
    :default nil)
