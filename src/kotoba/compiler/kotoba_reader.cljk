@@ -665,6 +665,17 @@
                        (let [[st clauses] (read-delimited (advance st) ")")
                              [form matched?] (reader-conditional-branch clauses)]
                          (cond
+                           ;; An erasure is a FACT about this reading and only
+                           ;; the reader knows it: `#?(:clj a :cljs b)` in a
+                           ;; :kotoba reading leaves nothing, and until now the
+                           ;; downstream could not tell "the author wrote
+                           ;; nothing" from "this host has no reading here".
+                           ;; A marker keeps the difference; the frontend turns
+                           ;; it into a named refusal (issue #785). Splices
+                           ;; stay omitted: a marker cannot stand in for
+                           ;; elements of a collection.
+                           (and (not matched?) (not splicing?))
+                           [st {:kotoba.reader/no-reading true} false]
                            (not matched?) [st nil true]
                            ;; `#?@(...)` splices the chosen branch's elements
                            ;; into the enclosing collection. Clojure requires

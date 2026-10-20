@@ -125,8 +125,14 @@
 ;; ------------------------------------------------ still refused, by name
 
 (deftest an-empty-body-is-still-refused-by-its-sentence
-  (testing "defn whose only body form is a #?(:clj ...) -- reads as empty on this reader"
-    (is (= "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
+  ;; 2026-10-20 (issue #785, option (a)): the erased-body case below no longer
+  ;; refuses at load. The reader's no-reading marker tells it apart from a body
+  ;; the author left empty, and a HOST-ONLY function is admitted with a body
+  ;; that refuses by name when called -- the module loads, the refusal lands at
+  ;; the call site. Measured before the change: load refusal, sentence below;
+  ;; after: `unhandled abort at export boundary` at the call.
+  (testing "defn whose only body form is a #?(:clj ...) -- a HOST-ONLY function traps at the call"
+    (is (= "unhandled abort at export boundary; catch it with try: main"
            (:message (refusal "(defn f [x :i64] :i64 #?(:clj (inc x) :cljs (inc x)))" "(f 21)")))))
   (testing "defn"
     (is (= "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)"
