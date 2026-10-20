@@ -1,5 +1,5 @@
 (ns kotoba.compiler.frontend
-  {:kotoba/export [analyze analyze-forms capability-id->name capability-registry forbidden-heads kernel-region-report lint lint-forms max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map-clauses namespace-attr-map-keys read-error read-forms read-forms-result source-operation-registry]}
+  {:kotoba/export [analyze analyze-forms capability-id->name capability-registry forbidden-heads kernel-region-report lint lint-forms max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map->clauses namespace-attr-map-clauses namespace-attr-map-keys read-error read-forms read-forms-result source-operation-registry]}
   (:require [kotoba.compiler.frontend.base :as base]
             [kotoba.compiler.frontend.kernel-region :as kernel-region]
             [kotoba.compiler.frontend.closure-types :as closure-types]
@@ -59,6 +59,19 @@
                                   explicit-clauses [:list [:ref :form/r]]]
   [:ref :fe/namespace-attr-clauses]
   (namespace-defs/namespace-attr-map-clauses attr-map explicit-clauses))
+   :default nil)
+
+;; `namespace-attr-map->clauses` on the Kotoba route is TWO arguments. The
+;; host's third argument `reject-fn` is a host refusal CALLBACK, and the
+;; Kotoba route has no function values -- its refusal model is a throw
+;; (`require-k`, ADR 0007), which is exactly namespace-defs' own route twin.
+;; Same refusals (unknown key named, declared twice), different reporting
+;; shape: thrown, not called back.
+#?(:kotoba
+(defn namespace-attr-map->clauses [attr-map [:ref :form/r]
+                                   explicit-clauses [:list [:ref :form/r]]]
+  [:list [:ref :form/r]]
+  (namespace-defs/namespace-attr-map->clauses attr-map explicit-clauses))
    :default nil)
 
 #?(:kotoba
