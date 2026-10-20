@@ -9,7 +9,7 @@
             [kotoba.compiler.frontend.base :refer [reject! #?@(:kotoba [code-point-width fdrop fget fkw fl-add fl-has? fl-nth fl-slice fmeta-from fname fnamespace form-text fput ftruthy? pr-form simple-symbol-form?] :default [first-truthy])]]
             [kotoba.compiler.frontend.kernel-region :refer [#?@(:kotoba [] :default [map-literal-key-order map-literal-record-namespace]) map-literal-record-type]]
             [kotoba.compiler.frontend.closure-types :refer [#?@(:kotoba [] :default [*schemas*]) max-record-fields record-type?]]
-            [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text #?@(:kotoba [zip-locals ctx-schemas] :default [])]]
+            [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text #?@(:kotoba [zip-locals ctx-schemas] :default [infer-absent-parameter-types row-aliases])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.desugar :refer [*module-list-fields* list-field-read-key]]
                                      [kotoba.compiler.frontend.namespace-defs :refer [reserved-binding-name?]]
@@ -356,7 +356,10 @@
 
 ;; the row-scope cluster (preserved verbatim at the end of this file) is
 ;; declared here so the host twins below can wire its mono a7ef280 call sites
-#?(:kotoba nil :default (declare row-scope row-aliases row-get-receiver? row-updates row-list-item? row-list-item-slot? row-param-text))
+;; (row-aliases now comes from infer: infer-absent-parameter-types needs it and
+;; infer <- row would be a require cycle; type-literals is defined below this
+;; cluster's specialize-row-parameters)
+#?(:kotoba nil :default (declare row-scope row-get-receiver? row-updates row-list-item? row-list-item-slot? row-param-text type-literals))
 
 #?(:kotoba
 ;; The fields FORM reads off PARAM, as a set: a descriptor-less `(record-get PARAM :k)`, and the fields
@@ -1695,7 +1698,25 @@
                                           f))
                                       fs)))
               round (fn [fs final?]
-                      (let [fs (infer-results (infer-results fs))
+                      ;; Parameters first (ADR 0353 floor :rebound-row-argument):
+                      ;; this pass runs before the module-wide parameter
+                      ;; inference, so a helper's unannotated string parameter
+                      ;; is still the provisional :i64 here. A specialization
+                      ;; calling it -- normalize-selection's (code-unit-count
+                      ;; value) -- had no inferable result, kept :i64, and a
+                      ;; caller's (let [state (normalize-selection state)] ..)
+                      ;; passed that :i64 on to the next row.
+                      ;;
+                      ;; Literals next (ADR 0353 floor
+                      ;; :merge-literal-reads-its-row): a literal whose item is
+                      ;; a field read off a row -- open-window's (merge
+                      ;; {:window/title title ..} (dissoc window ..)) -- has
+                      ;; no type in the generic, where that field is not known,
+                      ;; so `type-literals` left it untyped there. In a
+                      ;; specialization the field is its record's: typed here,
+                      ;; the literal is the record its result is, and a caller
+                      ;; passing that result on to the next row passes a record.
+                      (let [fs (infer-results (infer-results (type-literals (infer-absent-parameter-types fs))))
                             table (signatures fs)]
                         (mapv (fn [{:keys [params param-types] :as f}]
                                 (update f :body rewrite (zipmap params param-types) table final?))
@@ -2029,20 +2050,6 @@
                 (vector? x) (with-meta (mapv scope x) (meta x))
                 :else x))]
       (scope form)))))
-
-#?(:kotoba nil :default (defn- row-aliases
-  "PARAM and the synthetic names bound to PARAM itself in FORM: `match` binds
-  its scrutinee to a `__kotoba_match_N` temp and projects that (floor
-  :row-get-and-match), so a read off the temp is a read off PARAM. Only a
-  reserved name -- a program cannot write one -- so a binding the author wrote
-  stays a rebinding."
-  [param form]
-  (into #{param}
-        (mapcat (fn [x]
-                  (when (and (seq? x) (= 'let (first x)) (vector? (second x)))
-                    (keep (fn [[b v]] (when (and (= param v) (reserved-binding-name? b)) b))
-                          (partition 2 (second x))))))
-        (tree-seq coll? seq form))))
 
 #?(:kotoba nil :default (defn- row-get-receiver?
   "Is X a `get` (or a match's presence test) whose receiver is one of
