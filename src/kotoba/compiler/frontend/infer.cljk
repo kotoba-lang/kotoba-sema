@@ -5058,7 +5058,7 @@
     (let [f (form/nth-of fs i)
           g (if (ftruthy? (fget f :result-inferred?))
               (let [inferred (infer-type-or-nil ctx (fget f :body) (zip-locals (fget f :params) (fget f :param-types)) table)]
-                (if (form/is-nil? inferred)
+                (if (or (form/is-nil? inferred) (ty? inferred :i64))
                   (let [inferred2 (infer-type-or-nil ctx (fget f :body) (zip-locals (fget f :params) (param-types-from-uses-form (fget f :body) (fget f :params) (fget f :param-types) table)) table)]
                     (if (form/is-nil? inferred2) f (fput f :result inferred2)))
                   (fput f :result inferred)))
@@ -6237,7 +6237,13 @@
                         (if-let [inferred (try (infer-expression-type
                                                 body (zipmap params param-types) table)
                                                (catch #?(:clj Exception :cljs :default) _ nil))]
-                          (assoc f :result inferred)
+                          (if (and (= inferred :i64) (some #{:i64} param-types))
+                            (if-let [inferred2 (try (infer-expression-type
+                                                     body (zipmap params (param-types-from-uses body params param-types table)) table)
+                                                    (catch #?(:clj Exception :cljs :default) _ nil))]
+                              (assoc f :result inferred2)
+                              (assoc f :result inferred))
+                            (assoc f :result inferred))
                           (if-let [inferred2 (try (infer-expression-type
                                                    body (zipmap params (param-types-from-uses body params param-types table))
                                                    table)
