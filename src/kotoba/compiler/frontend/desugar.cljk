@@ -8951,7 +8951,9 @@
         ;; `remove` joined the set 2026-09-25 when it gained its lowering
         ;; (the `(filter remove)` arm below): lang/stdlib/core defines its own
         ;; `remove`, and that definition must keep winning.
-        (and (contains? '#{mapv filterv remove} op)
+        ;; `update` joined it 2026-10-06 with its desugar (floor
+        ;; :record-field-update), on the same terms.
+        (and (contains? '#{mapv filterv remove update} op)
              (top-level-function-symbol? op))
         (apply list op (map desugar-expr args))
 
