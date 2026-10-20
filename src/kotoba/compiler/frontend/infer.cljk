@@ -12,7 +12,7 @@
             [kotoba.compiler.frontend.kernel-region :refer [absence-marker? map-literal-record-type #?@(:kotoba [] :default [map-literal-key-order kernel-memory-operations])]]
             [kotoba.compiler.frontend.closure-types :refer [callable-type? canonical-closure-result-type canonical-list-type? canonical-typed-map-type? heterogeneous-vector-type? parametric-result-type? record-type? schema-ref-type? typed-set-type? validate-value-type! variant-type? #?@(:kotoba [] :default [*schemas*])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
-            [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids unbound-symbol-error unknown-operation-error])]])
+            [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! internal-failure! unbound-symbol! unknown-operation! #?@(:kotoba [] :default [arithmetic comparisons float-division-heads heap-operations i32-operations i64-operations kernel-privileged-operations kgraph-operations reserved-binding-name? rodata-literal-operations set-operations]) #?@(:kotoba [heads-kids unbound-symbol-error unknown-operation-error])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]
@@ -6016,6 +6016,30 @@
                       :kotoba.error/uses [(use-data first-use) (use-data second-use)]}
                (:span first-use) (assoc :span (:span first-use)))))))
 
+;; mono a7ef280 order: *provisional-parameters* (11040) and row-aliases
+;; (14922) precede infer-absent-parameter-types (15637). row-aliases is
+;; `defn-` in the monolith; the module cut makes it public so row.cljk's
+;; row cluster can refer it (infer <- row would be a require cycle).
+
+#?(:kotoba nil :default (def ^:dynamic ^:private *provisional-parameters*
+  "The parameters `infer-absent-parameter-types` is still refining: unannotated,
+  and :i64 only because nothing has refused that yet."
+  #{}))
+
+#?(:kotoba nil :default (defn row-aliases
+  "PARAM and the synthetic names bound to PARAM itself in FORM: `match` binds
+  its scrutinee to a `__kotoba_match_N` temp and projects that (floor
+  :row-get-and-match), so a read off the temp is a read off PARAM. Only a
+  reserved name -- a program cannot write one -- so a binding the author wrote
+  stays a rebinding."
+  [param form]
+  (into #{param}
+        (mapcat (fn [x]
+                  (when (and (seq? x) (= 'let (first x)) (vector? (second x)))
+                    (keep (fn [[b v]] (when (and (= param v) (reserved-binding-name? b)) b))
+                          (partition 2 (second x))))))
+        (tree-seq coll? seq form))))
+
 #?(:kotoba nil :default (defn infer-absent-parameter-types
   "Give every unannotated parameter the type its body actually requires.
 
@@ -6058,24 +6082,49 @@
         total-params (reduce + 0 (map #(count (:params %)) functions))]
     (loop [fs functions
            budget (+ 1 (count functions) total-params)]
-      (if (or (zero? budget) (not-any? :param-types-inferred fs))
+      (if (or (zero? budget) (not-any? #(or (:param-types-inferred %) (:loop-helper? %)) fs))
         fs
         (let [table (signature-table fs)
               refinement
-              (first-truthy (fn [{:keys [name params param-types body param-types-inferred]}]
+              (first-truthy (fn [{:keys [name params param-types body loop-helper?]
+                                  :as function}]
+                      ;; A loop helper has no written parameter at all (ADR
+                      ;; 0353 floor :record-list-sequence): a capture typed
+                      ;; the provisional :i64 off its call site is refined by
+                      ;; what the loop body requires, as an unannotated
+                      ;; parameter is, and the call site then refines the
+                      ;; enclosing function's own parameter -- window-at's
+                      ;; point, read as a vector only inside the search.
+                      (let [param-types-inferred
+                            (if loop-helper?
+                              (set (range (count params)))
+                              (:param-types-inferred function))]
                       (when (seq param-types-inferred)
                         (try
-                          (do (infer-expression-type body (zipmap params param-types) table)
+                          (do (binding [*provisional-parameters*
+                                        (set (keep (fn [index]
+                                                     (when (= :i64 (nth param-types index))
+                                                       (nth params index)))
+                                                   param-types-inferred))]
+                                (infer-expression-type body (zipmap params param-types) table))
                               nil)
                           (catch #?(:clj Exception :cljs :default) error
                             (let [{:keys [form span]
                                    expected :kotoba.error/expected
                                    actual :kotoba.error/actual
                                    use-site :kotoba.error/use-site} (ex-data error)
+                                  ;; A vector-destructured parameter is read
+                                  ;; through the synthetic temp bound to it
+                                  ;; (`(let [destr-vector p] (nth destr-vector
+                                  ;; 0))`, floor :vector-parameter): a refused
+                                  ;; temp is a refused parameter.
                                   index (when (simple-symbol? form)
                                           (first (keep-indexed
                                                   (fn [index parameter]
-                                                    (when (= parameter form) index))
+                                                    (when (or (= parameter form)
+                                                              (and (simple-symbol? parameter)
+                                                                   (contains? (row-aliases parameter body) form)))
+                                                      index))
                                                   params)))]
                               (when (and index
                                          (contains? param-types-inferred index)
@@ -6085,7 +6134,7 @@
                                 {:function name :index index :type expected
                                  :first-use {:expected expected :actual actual
                                              :form form :span span
-                                             :use-site use-site}}))))))
+                                             :use-site use-site}})))))))
                     fs)]
           (if-not refinement
             fs
@@ -8021,11 +8070,8 @@
 
 ;; --- main-only preservation forms (a7ef280 monolith), host twins only ---
 ;; str / sequence-first cluster: preserved verbatim (typed twins and wiring are follow-ups).
-
-#?(:kotoba nil :default (def ^:dynamic ^:private *provisional-parameters*
-  "The parameters `infer-absent-parameter-types` is still refining: unannotated,
-  and :i64 only because nothing has refused that yet."
-  #{}))
+;; (*provisional-parameters* moved above infer-absent-parameter-types: the
+;; host twin now binds it, and a binding form needs the var interned earlier.)
 
 #?(:kotoba nil :default (defn- str-part-type!
   "ADR 0353 floor :integer-str: a part `str` formats is a :string or an
