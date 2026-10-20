@@ -2,11 +2,11 @@
   "Stable public entry points for Kotoba source semantic analysis."
   {:kotoba/export [analyze analyze-forms capability-id->name capability-registry forbidden-heads kernel-operation-heads kernel-region-report lint lint-forms max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map->clauses namespace-attr-map-keys read-forms schema-identities source-operation-registry validate-schema-table!]}
   (:require [kotoba.compiler.frontend :as frontend]
+            [kotoba.compiler.schema :as schema]
             #?@(:default [[kotoba.compiler.frontend.analyze :as fe-analyze]
                           [kotoba.compiler.frontend.expand :as fe-expand]
                           [kotoba.compiler.frontend.namespace-defs :as fe-namespace-defs]
-                          [kotoba.compiler.frontend.validate :as fe-validate]
-                          [kotoba.compiler.schema :as schema]]))
+                          [kotoba.compiler.frontend.validate :as fe-validate]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                                   [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                          :fe/err [:record :fe/err [[:msg :string] [:code :string] [:form [:ref :form/r]] [:phase :string] [:data [:ref :form/r]]]]
@@ -69,6 +69,78 @@
 #?(:kotoba
 (defn read-forms-result [source :string] [:ref :kotoba.reader/out]
   (frontend/read-forms-result source))
+   :default nil)
+
+;; The remaining export surface gets its Kotoba-route twin here, delegating
+;; exactly where the host `def`s below delegate: through `frontend` for the
+;; eleven frontend-routed names, straight to `schema` for the two schema
+;; names. A constant is a no-arg defn on this route (the max-* convention).
+;; `kernel-operation-heads` and `namespace-attr-map->clauses` are still open
+;; follow-ups (a typed merge of the three kernel tables, and the host's
+;; reject-fn arity against the typed route's throwing twin).
+#?(:kotoba
+(defn capability-id->name [] [:ref :form/r]
+  (frontend/capability-id->name))
+   :default nil)
+
+#?(:kotoba
+(defn forbidden-heads [] [:ref :form/r]
+  (frontend/forbidden-heads))
+   :default nil)
+
+#?(:kotoba
+(defn kernel-region-report [functions [:list [:ref :form/r]]] [:ref :form/r]
+  (frontend/kernel-region-report functions))
+   :default nil)
+
+#?(:kotoba
+(defn max-bindings [] :i64
+  (frontend/max-bindings))
+   :default nil)
+
+#?(:kotoba
+(defn max-expression-nodes [] :i64
+  (frontend/max-expression-nodes))
+   :default nil)
+
+#?(:kotoba
+(defn max-function-docstring-chars [] :i64
+  (frontend/max-function-docstring-chars))
+   :default nil)
+
+#?(:kotoba
+(defn max-list-items [] :i64
+  (frontend/max-list-items))
+   :default nil)
+
+#?(:kotoba
+(defn max-lowered-nodes [] :i64
+  (frontend/max-lowered-nodes))
+   :default nil)
+
+#?(:kotoba
+(defn namespace-attr-map-keys [] [:ref :form/r]
+  (frontend/namespace-attr-map-keys))
+   :default nil)
+
+#?(:kotoba
+(defn read-forms [source :string] [:ref :form/r]
+  (frontend/read-forms source))
+   :default nil)
+
+#?(:kotoba
+(defn source-operation-registry [] [:ref :form/r]
+  (frontend/source-operation-registry))
+   :default nil)
+
+#?(:kotoba
+(defn validate-schema-table! [table :document] :document
+  (schema/validate-table! table))
+   :default nil)
+
+#?(:kotoba
+(defn schema-identities [table :document] :document
+  (schema/identities table))
    :default nil)
 
 
