@@ -1283,6 +1283,29 @@
    :default nil)
 
 ;; the checks on the clause before it is read
+(defn- host-only-body?
+  "The reader's no-reading marker: the map KEY plus METADATA (review P2) -- an
+  ordinary literal map is not mistaken for it. A body that is only this marker
+  is a HOST-ONLY function."
+  [body]
+  (and (= 1 (count body))
+       (map? (first body))
+       (true? (:kotoba.reader/no-reading (first body)))
+       (true? (:kotoba.reader/no-reading (meta (first body))))))
+
+(defn- host-only-body
+  "A body that is ONLY the reader's no-reading marker is a HOST-ONLY function:
+  the author gave it no :kotoba reading (a `#?(:clj ... :cljs ...)`-only body,
+  which the :kotoba reader erases). It is admitted with a body that refuses by
+  name when called -- the module loads, the refusal lands at the call site
+  (issue #785, option (a)). A genuinely empty body still refuses below: the
+  marker is what separates 'no reading on this host' from 'the author wrote
+  nothing'."
+  [body]
+  (if (host-only-body? body)
+    [(list (quote throw) "no :kotoba reading: function is defined only for host readings")]
+    body))
+
 #?(:kotoba
 (defn an-part-gate [part [:ref :form/r]] :i64
   (let [name (fget part :name)
@@ -4357,7 +4380,9 @@
                      (mapcat
                      (fn [{:keys [name source-name raw-params result body effects-ceiling
                                   result-inferred? callable-result-contract]}]
-                       (let [source-name (or source-name name)]
+                       (let [host-only? (host-only-body? body)
+                             body (host-only-body body)
+                             source-name (or source-name name)]
                          (when-not (valid-name? name) (reject! "invalid function name" name))
                          (when (contains? reserved-function-names name)
                            (reject! "reserved function name" name))
@@ -4373,6 +4398,10 @@
                          ;; this reader (features #{:kotoba}) reads as NOTHING.
                          ;; The sentence says so; "one result expression" alone
                          ;; read as if the sequencing had not landed.
+                         ;; 2026-10-20: those bodies now carry the reader's
+                         ;; no-reading marker and become a named trap body
+                         ;; (host-only-body, issue #785) -- this refusal is
+                         ;; left for the body the author genuinely left empty.
                          (when-not (= 1 (count body))
                            (reject! "function body is empty; a function must contain one result expression (a body that is only a `#?(:clj ...)` with no :kotoba or :default clause reads as nothing)" body))
                          (let [param-parts (typed-param-parts raw-params constants)
@@ -4455,6 +4484,14 @@
                                              :result result :effects #{}
                                              :result-inferred? result-inferred?
                                              :body desugared}
+                                      ;; A HOST-ONLY function's body always
+                                      ;; aborts by design (issue #785); the
+                                      ;; always-aborts annotation policy below
+                                      ;; cannot be answered for it, so the
+                                      ;; flag tells inference to skip that one
+                                      ;; refusal (review P3).
+                                      host-only?
+                                      (assoc :host-only? true)
                                       (seq param-types-inferred)
                                       (assoc :param-types-inferred param-types-inferred)
                                       (seq callable-param-contracts)

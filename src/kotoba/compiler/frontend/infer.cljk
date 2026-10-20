@@ -5846,7 +5846,11 @@
         error-type (form/form-get aet name)]
     (cond
       (not (form/is-nil? error-type))
-      (let [_ (if (form/eq result (abort-bottom-form))
+      (let [_ (if (and (form/eq result (abort-bottom-form))
+                       ;; A HOST-ONLY function's body always aborts by design
+                       ;; (issue #785): the annotation the policy asks for is
+                       ;; unanswerable, so the refusal is skipped for it.
+                       (not (ftruthy? (fget f :host-only?))))
                 (throw (fe-reject (str "function " (form-text label) " always aborts; annotate the result type it would return")
                                   "kotoba.error/abort-result" name))
                 0)
