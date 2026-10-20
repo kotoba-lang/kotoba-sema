@@ -11,7 +11,7 @@
             [kotoba.compiler.frontend.closure-types :refer [canonical-list-type? canonical-typed-map-type? closure-default-value-expr heterogeneous-vector-type? record-type? schema-ref-type? typed-set-type? variant-type? #?@(:kotoba [fe-error])]]
             [kotoba.compiler.frontend.expand :refer [kotoba-integer? preserve-form-meta]]
             [kotoba.compiler.frontend.namespace-defs :refer [heterogeneous-vector-index! #?@(:kotoba [] :default [collection-count-operations map-projection-operations set-operations vector-end-operations])]]
-            [kotoba.compiler.frontend.infer :refer [document-of-constructor! infer-expression-type library-predicate-answer! nominal-type-identity option-vector-type? record-field-type record-get-default-type require-expression-type! #?@(:kotoba [zip-locals] :default [resolve-absence-if]) row-op-fields row-op-literal-entries row-op-not-record! row-op-record row-op-result-type #?@(:kotoba [argc ctx-row-schemas ctx-schemas use-site-text] :default [document-of-constructors float-arithmetic-resolution library-predicate-heads use-site-text])]]
+            [kotoba.compiler.frontend.infer :refer [document-of-constructor! infer-expression-type library-predicate-answer! nominal-type-identity option-vector-type? record-field-type record-get-default-type require-expression-type! #?@(:kotoba [zip-locals] :default [resolve-absence-if]) row-op-fields row-op-literal-entries row-op-not-record! row-op-record row-op-result-type #?@(:kotoba [argc ctx-row-schemas ctx-schemas use-site-text] :default [document-of-constructors float-arithmetic-resolution library-predicate-heads str-part-type! use-site-text])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil resolve-absence-if]]]))
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -3009,6 +3009,26 @@
         (with-meta (apply list 'string=?
                           (map #(rewrite-record-projection % locals signatures schemas) args))
           {:kotoba.diag/source-head '=})
+
+        ;; ADR 0353 floor :integer-str: `str` is the nested `string-concat` of
+        ;; its parts, an :i64 part its decimal digits (`string-from-i64`'s
+        ;; printer, injected after this pass). A part of any other type was
+        ;; refused by name in `infer-call-type-impl`.
+        (= op 'str)
+        (let [parts (mapv (fn [arg]
+                            (let [part (rewrite-record-projection arg locals signatures schemas)
+                                  type (infer-expression-type part locals signatures)]
+                              (str-part-type! type part)
+                              (if (= :i64 type)
+                                ;; `desugar/string-from-i64-helper-name` =
+                                ;; '__kotoba_string_from_i64; quoted here because
+                                ;; desugar depends on record-projection, not the
+                                ;; reverse (same as infer's quote of the name).
+                                (list '__kotoba_string_from_i64 part)
+                                part)))
+                          args)]
+          (reduce (fn [acc part] (list 'string-concat acc part))
+                  (first parts) (rest parts)))
 
         ;; `true?` / `integer?` (adr-2609242330): see
         ;; `library-predicate-answer!`. A module's own

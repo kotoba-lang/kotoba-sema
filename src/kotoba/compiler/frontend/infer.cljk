@@ -8077,7 +8077,7 @@
 ;; (*provisional-parameters* moved above infer-absent-parameter-types: the
 ;; host twin now binds it, and a binding form needs the var interned earlier.)
 
-#?(:kotoba nil :default (defn- str-part-type!
+#?(:kotoba nil :default (defn str-part-type!
   "ADR 0353 floor :integer-str: a part `str` formats is a :string or an
   :i64. Anything else is refused by what it is -- there is no implicit
   printing of an aggregate, and no coercion of anything else.
