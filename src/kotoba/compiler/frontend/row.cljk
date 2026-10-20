@@ -12,7 +12,8 @@
             [kotoba.compiler.frontend.infer :refer [infer-expression-type use-site-text #?@(:kotoba [zip-locals ctx-schemas] :default [])]]
             #?@(:kotoba [[kotoba.compiler.frontend.infer-passes :refer [abort-signatures infer-type-or-nil]]])
             #?@(:kotoba [] :default [[kotoba.compiler.frontend.desugar :refer [*module-list-fields* list-field-read-key]]
-                                     [kotoba.compiler.frontend.namespace-defs :refer [reserved-binding-name?]]])
+                                     [kotoba.compiler.frontend.namespace-defs :refer [reserved-binding-name?]]
+                                     [kotoba.compiler.frontend.expand :refer [max-symbol-chars]]])
             [kotoba.compiler.frontend.record-projection :refer [rewrite-record-projection #?@(:kotoba [rewrite-record-projection-or] :default [match-has-marker])]])
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
@@ -1550,7 +1551,10 @@
                 x (tree-seq coll? seq (:body f))
                 :when (and (coll? x) (seq x) (not (and (seq? x) (= 'quote (first x)))))
                 arg (if (seq? x) (rest x) (seq x))
-                :when (contains? generics arg)]
+                ;; symbol? first: past eight generics this is a hash map, and
+                ;; an integer literal is a ClojureScript BigInt, which has no
+                ;; hash (floor :cljs-literal-hash).
+                :when (and (symbol? arg) (contains? generics arg))]
           (reject! (str "row-polymorphic function " (label arg)
                         " cannot be used as a value: it exists only as its specializations, "
                         "one per record type a call passes it")
@@ -1566,6 +1570,14 @@
                           base (str g "__row_"
                                     (str/join "_" (map (fn [[i t]] (str i "_" (row-name-part t)))
                                                        types)))
+                          ;; A name is at most `max-symbol-chars` (the verifier
+                          ;; refuses a longer one, "runtime KIR function shape
+                          ;; rejected"): two record parameters spell past it
+                          ;; (floor :list-item-from-expression). Cut with room for
+                          ;; the `_k` that keeps a cut name distinct below.
+                          base (if (< (- max-symbol-chars 4) (count base))
+                                 (subs base 0 (- max-symbol-chars 4))
+                                 base)
                           sname (loop [k 1]
                                   (let [n (symbol (if (= 1 k) base (str base "_" k)))]
                                     (if (contains? @taken n) (recur (inc k)) n)))
@@ -1583,6 +1595,10 @@
               arg-type (fn [arg locals table]
                          (try (infer-expression-type arg locals table)
                               (catch #?(:clj Exception :cljs :default) _ nil)))
+              ;; A rebuilt form keeps its metadata: a match pattern's
+              ;; projection is marked (floor :row-get-and-match), and the
+              ;; specialization is where its arm is folded away.
+              keep-meta (fn [form rebuilt] (if (= form rebuilt) form (with-meta rebuilt (meta form))))
               rewrite
               (fn rw [form locals table final?]
                 (cond
@@ -1654,7 +1670,7 @@
                                                   (:body (get by-name op)))
                                   (get rows bad) (nth args bad) (get types bad))
                           :else (apply list op args)))
-                      :else (apply list op (map #(rw % locals table final?) args))))
+                      :else (keep-meta form (apply list op (map #(rw % locals table final?) args)))))
                   (vector? form) (mapv #(rw % locals table final?) form)
                   :else form))
               signatures (fn [fs]
