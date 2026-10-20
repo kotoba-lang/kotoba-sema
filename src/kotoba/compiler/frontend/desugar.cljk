@@ -7364,14 +7364,14 @@
     is spelled as one.
   * more than `max-record-fields` entries -- the bound `defrecord` has."
   [form entries]
-  (let [typed #?(:kotoba (let [fe-lc__297740 (form/kids-of entries) fe-ln__297740 (vector-count fe-lc__297740)] (form/form-vec (loop [fe-li__297740 0 fe-la__297740 (form/no-forms)] (if (>= fe-li__297740 fe-ln__297740) fe-la__297740 (recur (+ fe-li__297740 1) (form/append-form fe-la__297740 (let [dd__293259_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__297740 fe-li__297740)] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] [k (map-literal-record-field-type v)])))))))) :default (mapv (fn [dd__293259_1] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] [k (map-literal-record-field-type v)])) entries))]
+  (let [typed #?(:kotoba (let [fe-lc__297740 (form/kids-of entries) fe-ln__297740 (vector-count fe-lc__297740)] (form/form-vec (loop [fe-li__297740 0 fe-la__297740 (form/no-forms)] (if (>= fe-li__297740 fe-ln__297740) fe-la__297740 (recur (+ fe-li__297740 1) (form/append-form fe-la__297740 (let [dd__293259_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__297740 fe-li__297740)] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] [k (map-literal-record-field-type v)])))))))) :default (mapv (fn [dd__293259_1] (let [k (fe-nth dd__293259_1 0) v (fe-nth dd__293259_1 1)] (reject-absent-field-conflict! k form) (reject-list-field-conflict! k form) [k (or (absent-field-type k) (list-field-type k) (map-literal-record-field-type v))])) entries))]
     ;; ADR 0353 floor :absence -- `nil` as a value SPELLS a record: it makes
     ;; that field an absent `[:option T]`, so a literal holding one is never
     ;; the i64 pair map (where `nil` used to lower to a legacy `option-i64`
     ;; and fail as `expected i64`). With no record type in context, T is
     ;; unknown, and that is refused by name: the literal's own source does not
     ;; say what the field holds when it is present.
-    (when-let [[k _] (first #?(:kotoba (let [fe-lc__298338 (form/kids-of entries) fe-ln__298338 (vector-count fe-lc__298338)] (form/form-seq (loop [fe-li__298338 0 fe-la__298338 (form/no-forms)] (if (>= fe-li__298338 fe-ln__298338) fe-la__298338 (let [dd__293790_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__298338 fe-li__298338)] (recur (+ fe-li__298338 1) (if (do (let [v (fe-nth dd__293790_1 1)] (nil? v))) (form/append-form fe-la__298338 dd__293790_1) fe-la__298338))))))) :default (filter (fn [dd__293790_1] (let [v (fe-nth dd__293790_1 1)] (nil? v))) entries)))]
+    (when-let [[k _] (first #?(:kotoba (let [fe-lc__298338 (form/kids-of entries) fe-ln__298338 (vector-count fe-lc__298338)] (form/form-seq (loop [fe-li__298338 0 fe-la__298338 (form/no-forms)] (if (>= fe-li__298338 fe-ln__298338) fe-la__298338 (let [dd__293790_1 (typed-list-nth [:list [:ref :form/r]] fe-lc__298338 fe-li__298338)] (recur (+ fe-li__298338 1) (if (do (let [v (fe-nth dd__293790_1 1)] (nil? v))) (form/append-form fe-la__298338 dd__293790_1) fe-la__298338))))))) :default (filter (fn [dd__293790_1] (let [k (fe-nth dd__293790_1 0) v (fe-nth dd__293790_1 1)] (and (nil? v) (not (absent-field-type k))))) entries)))]
       (reject! (str "map literal value at key "
                     (map-literal-key-description-for-message k)
                     " is nil, which makes the field an absent [:option T], and "
@@ -7552,8 +7552,10 @@
           (if-let [fields (keyword-map-literal-record-fields form entries)]
             (list* 'record-new (map-literal-record-type fields)
                    (map (fn [dd__302812_1 dd__302812_2]
-                          (let [v (fe-nth dd__302812_1 1) field-type (fe-nth dd__302812_2 1)]
-                            (desugar-expected-value field-type v)))
+                          (let [k (fe-nth dd__302812_1 0) v (fe-nth dd__302812_1 1) field-type (fe-nth dd__302812_2 1)]
+                            (if (absent-field-type k)
+                              (desugar-absent-field-value field-type v)
+                              (desugar-expected-value field-type v))))
                         entries fields))
             (apply list 'map-new
                    (mapcat (fn [dd__303005_1] (let [k (fe-nth dd__303005_1 0) v (fe-nth dd__303005_1 1)] [k (desugar-expr v)])) entries)))
@@ -9489,7 +9491,15 @@
                     (reject! "assoc requires a map followed by one or more key/value pairs" form))
                   (let [[m & kvs] args]
                     (apply list 'map-assoc (desugar-expr m)
-                           (mapcat (fn [[k v]] [(desugar-expr k) (desugar-expr v)])
+                           (mapcat (fn [[k v]]
+                                     (reject-absent-field-conflict! k form)
+                                     (reject-list-field-conflict! k form)
+                                     [(desugar-expr k)
+                                      (if-let [option-type (absent-field-type k)]
+                                        (desugar-absent-field-value option-type v)
+                                        (if-let [list-type (and (vector? v) (list-field-type k))]
+                                          (desugar-expected-value list-type v)
+                                          (desugar-expr v)))])
                                    (partition 2 kvs)))))
         ;; Kept on the authored head for the same reason `get` is: which
         ;; primitive answers depends on the receiver's type, which is not
