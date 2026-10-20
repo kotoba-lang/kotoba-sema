@@ -6,7 +6,14 @@
             [kotoba.compiler.frontend.expand :as expand]
             [kotoba.compiler.frontend.namespace-defs :as namespace-defs]
             [kotoba.compiler.frontend.validate :as validate]
-            [kotoba.compiler.frontend.infer :as infer]
+            #?@(:kotoba [[kotoba.compiler.frontend.infer :as infer]]
+                :default [[kotoba.compiler.frontend.infer :as infer
+                           ;; `*numeric-resolution-final*` must be infer's OWN Var,
+                           ;; not a value copy -- a `def` copy makes `binding` on the
+                           ;; facade name a silent no-op on the checker it guards
+                           ;; (type_directed_arithmetic_test binds it and expects
+                           ;; the refusal to fire). One Var, one binding.
+                           :refer [*numeric-resolution-final*]]])
             [kotoba.compiler.frontend.record-projection :as record-projection]
             [kotoba.compiler.frontend.desugar :as desugar]
             [kotoba.compiler.frontend.row :as row]
@@ -204,7 +211,6 @@
 #?(:kotoba nil :default (def ^:dynamic *local-state-used* base/*local-state-used*))
 #?(:kotoba nil :default (def ^:dynamic *local-state-ids* base/*local-state-ids*))
 #?(:kotoba nil :default (def validate-expr validate/validate-expr))
-#?(:kotoba nil :default (def ^:dynamic *numeric-resolution-final* infer/*numeric-resolution-final*))
 #?(:kotoba nil :default (def ^:dynamic *row-op-schemas* infer/*row-op-schemas*))
 #?(:kotoba nil :default (def ^:dynamic *absence-tail* infer/*absence-tail*))
 #?(:kotoba nil :default (def interrupt-entry-signature base/interrupt-entry-signature))
