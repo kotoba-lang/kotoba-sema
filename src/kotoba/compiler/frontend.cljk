@@ -1,5 +1,5 @@
 (ns kotoba.compiler.frontend
-  {:kotoba/export [analyze analyze-forms capability-registry lint lint-forms max-functions max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map-clauses read-error read-forms-result]}
+  {:kotoba/export [analyze analyze-forms capability-id->name capability-registry forbidden-heads kernel-region-report lint lint-forms max-bindings max-expression-nodes max-function-docstring-chars max-functions max-list-items max-lowered-nodes max-namespace-capabilities max-namespace-docstring-chars namespace-attr-map-clauses namespace-attr-map-keys read-error read-forms read-forms-result source-operation-registry]}
   (:require [kotoba.compiler.frontend.base :as base]
             [kotoba.compiler.frontend.kernel-region :as kernel-region]
             [kotoba.compiler.frontend.closure-types :as closure-types]
@@ -69,6 +69,66 @@
 #?(:kotoba
 (defn read-forms-result [source :string] [:ref :kotoba.reader/out]
   (base/read-forms-result source))
+   :default nil)
+
+;; The rest of the facade's public surface gets its Kotoba-route twin here: the
+;; same delegations as the host `def`s below answer (base / namespace-defs /
+;; validate / expand / kernel-region / analyze), one export name per twin. A
+;; constant is a no-arg defn on this route -- the convention every max-* twin
+;; already follows.
+#?(:kotoba
+(defn capability-id->name [] [:ref :form/r]
+  (base/capability-id->name))
+   :default nil)
+
+#?(:kotoba
+(defn source-operation-registry [] [:ref :form/r]
+  (base/source-operation-registry))
+   :default nil)
+
+#?(:kotoba
+(defn read-forms [source :string] [:ref :form/r]
+  (base/read-forms source))
+   :default nil)
+
+#?(:kotoba
+(defn forbidden-heads [] [:ref :form/r]
+  (namespace-defs/forbidden-heads))
+   :default nil)
+
+#?(:kotoba
+(defn namespace-attr-map-keys [] [:ref :form/r]
+  (namespace-defs/namespace-attr-map-keys))
+   :default nil)
+
+#?(:kotoba
+(defn kernel-region-report [functions [:list [:ref :form/r]]] [:ref :form/r]
+  (kernel-region/kernel-region-report functions))
+   :default nil)
+
+#?(:kotoba
+(defn max-bindings [] :i64
+  (validate/max-bindings))
+   :default nil)
+
+#?(:kotoba
+(defn max-expression-nodes [] :i64
+  (validate/max-expression-nodes))
+   :default nil)
+
+#?(:kotoba
+(defn max-list-items [] :i64
+  (validate/max-list-items))
+   :default nil)
+
+#?(:kotoba
+(defn max-function-docstring-chars [] :i64
+  (expand/max-function-docstring-chars))
+   :default nil)
+
+#?(:kotoba
+(defn max-lowered-nodes [] :i64
+  (analyze/max-lowered-nodes))
    :default nil)
 
 ;; Facade over the split modules (amu refactor split). Each name is re-exported as a value;

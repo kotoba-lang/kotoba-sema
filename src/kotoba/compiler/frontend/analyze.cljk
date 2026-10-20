@@ -2,7 +2,7 @@
   "Coordinates Kotoba frontend analysis, whole-program checks, and HIR assembly across selfhost modules."
   ;; the Kotoba-route interface: the names the other frontend modules, kotoba.sema and the native guests use
   ;; (the linked project export bound is 1024 clauses, ADR 0363 port)
-  #?(:kotoba {:kotoba/export [analyze analyze-forms*]})
+  #?(:kotoba {:kotoba/export [analyze analyze-forms* max-lowered-nodes]})
   (:require #?@(:kotoba [] :default [[kotoba.lang.coll :as set]])
             #?@(:kotoba [] :default [[kotoba.lang.text :as str]])
             [kotoba.compiler.affine :as affine]
@@ -119,7 +119,10 @@
    :default nil)
 
 #?(:kotoba nil :default (def sequencing-operations tables/sequencing-operations))
-(def max-lowered-nodes 4194304)
+;; the lowered-program budget, exported so the facades can answer it: a no-arg
+;; defn on the Kotoba route (the constant-as-function convention every max-*
+;; twin follows) and a plain def on the host.
+#?(:kotoba (defn max-lowered-nodes [] :i64 4194304) :default (def max-lowered-nodes 4194304))
 
 #?(:kotoba nil :default
 (defn definition-failure!
@@ -2745,7 +2748,7 @@
 #?(:kotoba
 (defn an-bounded-add [total :i64 value :i64] :i64
   (let [s (+ total value)
-        cap (+ max-lowered-nodes 1)]
+        cap (+ (max-lowered-nodes) 1)]
     (if (< s cap) s cap)))
    :default nil)
 
@@ -2807,7 +2810,7 @@
 #?(:kotoba
 (defn check-lowering-budget! [functions [:ref :form/r]] :i64
   (let [cost (an-total-cost functions 0 0)
-        u_1 (an-fail (> cost max-lowered-nodes) "lowered program budget exhausted" "kotoba.error/subset-reject" (form/int-form cost))]
+        u_1 (an-fail (> cost (max-lowered-nodes)) "lowered program budget exhausted" "kotoba.error/subset-reject" (form/int-form cost))]
     0))
    :default
 (defn check-lowering-budget! [functions]
