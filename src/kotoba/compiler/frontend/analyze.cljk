@@ -1283,6 +1283,16 @@
    :default nil)
 
 ;; the checks on the clause before it is read
+(defn- host-only-body?
+  "The reader's no-reading marker: the map KEY plus METADATA (review P2) -- an
+  ordinary literal map is not mistaken for it. A body that is only this marker
+  is a HOST-ONLY function."
+  [body]
+  (and (= 1 (count body))
+       (map? (first body))
+       (true? (:kotoba.reader/no-reading (first body)))
+       (true? (:kotoba.reader/no-reading (meta (first body))))))
+
 (defn- host-only-body
   "A body that is ONLY the reader's no-reading marker is a HOST-ONLY function:
   the author gave it no :kotoba reading (a `#?(:clj ... :cljs ...)`-only body,
@@ -1292,9 +1302,7 @@
   marker is what separates 'no reading on this host' from 'the author wrote
   nothing'."
   [body]
-  (if (and (= 1 (count body))
-           (map? (first body))
-           (true? (:kotoba.reader/no-reading (first body))))
+  (if (host-only-body? body)
     [(list (quote throw) "no :kotoba reading: function is defined only for host readings")]
     body))
 
@@ -4372,7 +4380,8 @@
                      (mapcat
                      (fn [{:keys [name source-name raw-params result body effects-ceiling
                                   result-inferred? callable-result-contract]}]
-                       (let [body (host-only-body body)
+                       (let [host-only? (host-only-body? body)
+                             body (host-only-body body)
                              source-name (or source-name name)]
                          (when-not (valid-name? name) (reject! "invalid function name" name))
                          (when (contains? reserved-function-names name)
@@ -4475,6 +4484,14 @@
                                              :result result :effects #{}
                                              :result-inferred? result-inferred?
                                              :body desugared}
+                                      ;; A HOST-ONLY function's body always
+                                      ;; aborts by design (issue #785); the
+                                      ;; always-aborts annotation policy below
+                                      ;; cannot be answered for it, so the
+                                      ;; flag tells inference to skip that one
+                                      ;; refusal (review P3).
+                                      host-only?
+                                      (assoc :host-only? true)
                                       (seq param-types-inferred)
                                       (assoc :param-types-inferred param-types-inferred)
                                       (seq callable-param-contracts)
