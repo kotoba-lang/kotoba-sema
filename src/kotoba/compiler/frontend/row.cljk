@@ -353,6 +353,10 @@
   (rw-reads-kids param (form/kids-of form) 0 (rw-reads-node param form acc)))
    :default nil)
 
+;; the row-scope cluster (preserved verbatim at the end of this file) is
+;; declared here so the host twins below can wire its mono a7ef280 call sites
+#?(:kotoba nil :default (declare row-scope row-aliases row-get-receiver? row-updates row-list-item? row-list-item-slot? row-param-text))
+
 #?(:kotoba
 ;; The fields FORM reads off PARAM, as a set: a descriptor-less `(record-get PARAM :k)`, and the fields
 ;; `(dissoc PARAM :k ..)` / `(select-keys PARAM :k ..)` name
@@ -360,25 +364,43 @@
   (form/form-set (rw-reads param form (form/no-forms))))
    :default
 (defn row-field-reads
-  "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`,
-  and the fields `(dissoc PARAM :k ..)` / `(select-keys PARAM :k ..)` name
-  (floor :row-operations: a row shrinks only by fields it has)."
+  "The fields FORM reads off PARAM: a descriptor-less `(record-get PARAM :k)`
+  or `(get PARAM :k)`, and the fields `(dissoc PARAM :k ..)` /
+  `(select-keys PARAM :k ..)` name (floor :row-operations: a row shrinks only
+  by fields it has). `(get PARAM :k d)` does not require :k -- a record
+  without it answers d -- and neither does a match pattern's projection: an
+  arm naming a key the record lacks does not match (floor
+  :row-get-and-match). A field read off a name bound to an update of PARAM
+  that the update did not write is read off PARAM (`row-updates`)."
   [param form]
-  (into (sorted-set)
-        (mapcat (fn [x]
-                  (cond
-                    (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
-                         (keyword? (nth x 2))
-                         (or (= param (second x))
-                             ;; `(:k (if c m n))` reads :k off both branches
-                             ;; (floor :row-unification).
-                             (contains? (row-if-branches (second x)) param)))
-                    [(nth x 2)]
-                    (and (seq? x) (contains? '#{dissoc select-keys} (first x))
-                         (= param (second x)))
-                    (filter keyword? (drop 2 x))
-                    :else nil)))
-        (tree-seq coll? seq form))))
+  (let [aliases (row-aliases param form)
+        updates (row-updates param form)
+        updated (fn [receiver k]
+                  (when-let [written (get updates receiver)]
+                    (not (contains? written k))))]
+    (into (sorted-set)
+          (mapcat (fn [x]
+                    (cond
+                      (and (seq? x) (= 'record-get (first x)) (= 3 (count x))
+                           (keyword? (nth x 2))
+                           (or (contains? aliases (second x))
+                               (updated (second x) (nth x 2))
+                               ;; `(:k (if c m n))` reads :k off both branches
+                               ;; (floor :row-unification).
+                               (contains? (row-if-branches (second x)) param)))
+                      [(nth x 2)]
+                      (and (row-get-receiver? aliases x) (= 'get (first x)) (= 3 (count x))
+                           (keyword? (nth x 2)) (not (:kotoba.compiler.frontend/match-projection (meta x))))
+                      [(nth x 2)]
+                      (and (seq? x) (= 'get (first x)) (= 3 (count x)) (keyword? (nth x 2))
+                           (not (:kotoba.compiler.frontend/match-projection (meta x)))
+                           (updated (second x) (nth x 2)))
+                      [(nth x 2)]
+                      (and (seq? x) (contains? '#{dissoc select-keys} (first x))
+                           (= param (second x)))
+                      (filter keyword? (drop 2 x))
+                      :else nil)))
+          (tree-seq coll? seq form)))))
 
 #?(:kotoba
 (defn rw-any-eq? [param [:ref :form/r] xs [:ref :form/r] i :i64] :bool
@@ -413,14 +435,19 @@
   0353 floor :row-operations)? Either makes it a row even when no field is
   read off it: `(defn- f [m] (assoc m :d 1))`."
   [param form]
-  (boolean
-   (first-truthy
-    (fn [x]
-      (and (seq? x)
-           (or (and (contains? '#{map-assoc dissoc select-keys merge} (first x))
-                    (= param (second x)))
-               (and (= 'merge (first x)) (first-truthy #{param} (rest x))))))
-    (tree-seq coll? seq form)))))
+  (let [aliases (row-aliases param form)]
+    (boolean
+     (first-truthy
+      (fn [x]
+        (and (seq? x)
+             (or (and (contains? '#{map-assoc dissoc select-keys merge} (first x))
+                      (= param (second x)))
+                 (and (= 'merge (first x)) (first-truthy #{param} (rest x)))
+                 ;; floor :row-get-and-match: any `get` off it, a computed
+                 ;; key's included -- the specialization refuses that by
+                 ;; name -- and a match map pattern over it.
+                 (row-get-receiver? aliases x))))
+      (tree-seq coll? seq form))))))
 
 #?(:kotoba
 (defn rw-pass-args [param [:ref :form/r] x [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
@@ -780,7 +807,8 @@
                       (when (or loop-helper? (and source-name (seq param-types-inferred)))
                         [name (into {}
                                     (keep (fn [i]
-                                            (let [p (nth params i)]
+                                            (let [p (nth params i)
+                                                  body (if (simple-symbol? p) (row-scope p body) body)]
                                               (when (and (= :i64 (nth param-types i))
                                                          (simple-symbol? p)
                                                          (not (row-rebinds? p body))
@@ -788,6 +816,7 @@
                                                                (row-pass-through p body))))
                                                 [i {:reads (row-field-reads p body)
                                                     :operated? (row-operated? p body)
+                                                    :list-item? (row-list-item? p body)
                                                     :passes (row-pass-through p body)
                                                     :joins (into #{}
                                                                  (map (zipmap params (range)))
@@ -824,7 +853,21 @@
                                            slots)]
                             (when (seq rows) [fname rows]))))
                   candidates)]
-        (if (= next-known known) known (recur next-known)))))))
+        (if (= next-known known)
+          ;; floor :list-item-from-expression: a parameter of a row function
+          ;; that is only conj'd onto an open `[]` field rides along with the
+          ;; row -- specialized at the record a call passes it, left as it is
+          ;; for anything else. Added after the fixed point, so passing it on
+          ;; makes nothing else a row.
+          (into {}
+                (map (fn [[fname rows]]
+                       [fname (reduce-kv (fn [rows i {:keys [list-item?]}]
+                                           (if (and list-item? (not (contains? rows i)))
+                                             (assoc rows i (with-meta (sorted-set) {::list-item true}))
+                                             rows))
+                                         rows (get candidates fname))]))
+                known)
+          (recur next-known)))))))
 
 #?(:kotoba
 (defn rw-texts [xs [:ref :form/r] i :i64 acc :string] :string
@@ -1569,7 +1612,13 @@
                                              a)))
                                        args))
                             types (into (sorted-map)
-                                        (map (fn [[i _]] [i (arg-type (nth args i) locals table)]))
+                                        (keep (fn [[i reads]]
+                                                (let [t (arg-type (nth args i) locals table)]
+                                                  ;; A list-item slot takes a record's type, and
+                                                  ;; nothing else's.
+                                                  (when (or (not (row-list-item-slot? reads))
+                                                            (row-record-fields t))
+                                                    [i t]))))
                                         rows)
                             bad (first (keep (fn [[i t]]
                                                (let [fields (row-record-fields t)
@@ -1600,7 +1649,9 @@
                           split (apply list op args)
                           (nil? bad) (apply list (instantiate! op types) args)
                           final? (row-generic-call-refusal!
-                                  (label op) bad (nth (:params (get by-name op)) bad)
+                                  (label op) bad
+                                  (row-param-text (nth (:params (get by-name op)) bad)
+                                                  (:body (get by-name op)))
                                   (get rows bad) (nth args bad) (get types bad))
                           :else (apply list op args)))
                       :else (apply list op (map #(rw % locals table final?) args))))
