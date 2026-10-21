@@ -1286,6 +1286,8 @@
    :default nil)
 
 ;; the checks on the clause before it is read
+#?(:kotoba nil :default
+(do
 (defn- host-only-body?
   "The reader's no-reading marker: the map KEY plus METADATA (review P2) -- an
   ordinary literal map is not mistaken for it. A body that is only this marker
@@ -1307,7 +1309,7 @@
   [body]
   (if (host-only-body? body)
     [(list (quote throw) "no :kotoba reading: function is defined only for host readings")]
-    body))
+    body))))
 
 #?(:kotoba
 (defn an-part-gate [part [:ref :form/r]] :i64
