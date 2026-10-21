@@ -9,7 +9,7 @@
                    keyword-has-namespace? keyword-value kids-of last-of nil-form no-forms
                    nth-of one-form rest-list span-of string-form string-value symbol-form
                    symbol-value three-forms two-forms vec2 vec3 vec4 vec5 vec6
-                   with-children]}
+                   with-children tag-of is-list-like? bytes-form bytes-of is-bytes?]}
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]})))
@@ -586,6 +586,16 @@
 #?(:kotoba (defn f64-form [x :f64] [:ref :form/r] (form-mk 10 "" (f64-to-bits x) :none (form-no-forms))))
 #?(:kotoba (defn bits-of [f [:ref :form/r]] :i64 (record-get [:ref :form/r] f :n)))
 #?(:kotoba (defn span-of [f [:ref :form/r]] :i64 (record-get [:ref :form/r] f :span)))
+;; The Form accessors the Kotoba readings of osaho, kotoba-verifier, kotoba-walk and
+;; kotoba-wasm call (amu JUN-202 selfbuild scan, 2026-10-21: E6004 "qualified call is
+;; not an admitted exported import: form/tag-of" in 4 modules); same bodies as the
+;; kotoba-hir dual-runtime kotoba.form. A bytes Form is tag 11 with its bytes in :data.
+#?(:kotoba (defn tag-of [f [:ref :form/r]] :i64 (form-tag-of f)))
+#?(:kotoba (defn is-list-like? [f [:ref :form/r]] :bool (form-is-list-like? f)))
+#?(:kotoba (defn bytes-form [b :bytes] [:ref :form/r]
+             (record-new [:ref :form/r] 11 "" 0 :none (form-no-forms) 0 b)))
+#?(:kotoba (defn bytes-of [f [:ref :form/r]] :bytes (record-get [:ref :form/r] f :data)))
+#?(:kotoba (defn is-bytes? [f [:ref :form/r]] :bool (= 11 (form-tag-of f))))
 #?(:kotoba (defn bool-value [f [:ref :form/r]] :bool (form-bool-value f)))
 #?(:kotoba (defn int-value [f [:ref :form/r]] :i64 (form-int-value f)))
 #?(:kotoba (defn string-value [f [:ref :form/r]] :string (form-string-value f)))
