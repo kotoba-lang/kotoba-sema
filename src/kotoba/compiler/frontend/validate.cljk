@@ -359,9 +359,11 @@
 ;; 2026-10-04; they answered "vx/unsupported" before).
 #?(:kotoba
    (defn validate-expr [form [:ref :form/r] locals [:ref :form/r] functions [:ref :form/r] nodes :i64] :i64
-     (let [context (vx/check-context locals functions (forbidden-heads) (grammar-declared-heads)
-                                     (form/vec2 (form/bool-form false) (form/int-form -1)))
-           r (vx/check-form form context nodes)
+     ;; `vx/check-form` is the 7-argument entry kotoba.compiler.validate-expr defines; the
+     ;; `vx/check-context` this arm called (2ffad04's overlay) is defined nowhere in this
+     ;; repository, so the module had no Kotoba reading. Same answers as `validate-expr-in`
+     ;; against `(validate-ctx)`, which analyze uses (once-per-run context).
+     (let [r (vx/check-form form locals functions (forbidden-heads) (grammar-declared-heads) nodes)
            ok (form/bool-value (form/nth-of r 0))
            ck (require-k ok (form/string-value (form/nth-of r 2)) (form/string-value (form/nth-of r 1)) form)]
        (form/int-value (form/nth-of r 3))))
