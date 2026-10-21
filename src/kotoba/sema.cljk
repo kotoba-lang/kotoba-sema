@@ -6,7 +6,8 @@
             #?@(:kotoba [[kotoba.form :as form]
                          [kotoba.compiler.frontend.namespace-defs :as namespace-defs]
                          [kotoba.compiler.frontend-tables :as tables]])
-            #?@(:default [[kotoba.compiler.frontend.analyze :as fe-analyze]
+            #?@(:kotoba []
+                 :default [[kotoba.compiler.frontend.analyze :as fe-analyze]
                           [kotoba.compiler.frontend.expand :as fe-expand]
                           [kotoba.compiler.frontend.namespace-defs :as fe-namespace-defs]
                           [kotoba.compiler.frontend.validate :as fe-validate]]))
