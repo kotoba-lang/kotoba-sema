@@ -50,7 +50,7 @@
 
 
 ;; forward references inside this module (the cut keeps the original form order)
-#?(:kotoba nil :default (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call sequence-first-chain desugar-sequence-first desugar-update require-rowed-callable-argument! reject-absent-field-conflict! reject-list-field-conflict! absent-field-type list-field-type desugar-absent-field-value guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*))
+#?(:kotoba nil :default (declare desugar-result-expr desugar-expr chain-temp desugar-cond-value desugar-bool-expr desugar-cond-rest absence-marker-form thread-form desugar-tail-expressions desugar-comparison-chain desugar-head str-part sequenced-body args-from some-thread-temp all-literal? desugar-or top-level-function-symbol? desugar-ordinary-call sequence-first-chain desugar-sequence-first desugar-update require-rowed-callable-argument! reject-absent-field-conflict! reject-list-field-conflict! absent-field-type list-field-type desugar-absent-field-value guess-document-form? document-head-target desugar-and desugar-thread desugar-as-thread desugar-some-thread desugar-cond desugar-condp desugar-cond-thread desugar-case desugar-binding-some desugar-binding-if desugar-typed-op desugar-list-arm desugar-item-ctor desugar-hetero-ctor desugar-typed-map-new desugar-record-ctor desugar-record-get desugar-record-assoc desugar-hetero-assoc desugar-variant-new desugar-match-variant desugar-variant-match desugar-match-result desugar-result-match-of desugar-option-match desugar-match-option desugar-throw desugar-try desugar-catch-arm desugar-vector-i64-arm desugar-vector-f64-arm desugar-xorshift32 desugar-assoc-arm desugar-select-keys-arm desugar-merge-arm desugar-named-op args-from-loop desugar-expected-value desugar-map desugar-validate-error-type closed-vector-literal-type desugar-each-from ev-each-types all-keywords? note-used-capability desugar-do ^:dynamic *local-types* ^:dynamic *local-option-types* form-free-symbols desugar-list string-from-i64-helper-name map-literal-lowered-type desugar-expr*))
 
 
 ;; Dataspace v1 is a language-owned typed capability contract. These
@@ -5687,6 +5687,15 @@
         (require-matching-callable-contract! result-type form)
         (binding [*expected-callable-contract* result-type]
           (desugar-expr form)))
+      ;; ADR 0353 floor :empty-vector-field: a vector literal where a
+      ;; `[:list T]` is expected -- `[]` at a list field -- is that list, each
+      ;; item typed against T (a map literal against a record T, as an absent
+      ;; field's is).
+      (and (canonical-list-type? result-type) (vector? form))
+      (let [t (second result-type)]
+        (list* 'typed-list-new result-type
+               (mapv #(if (and (map? %) (record-type? t)) (desugar-map % t) (desugar-expected-value t %))
+                     form)))
       (closure-result-type? result-type {})
       (desugar-result-expr result-type form)
       :else (desugar-expr form)))))
