@@ -9,7 +9,8 @@
 (defn intrinsic-helper-name? [name [:ref :form/r]] :bool
   (and (form/is-symbol? name)
        (let [s (form/symbol-value name)]
-         (and (>= (string-length s) 19) (string=? (string-substring s 0 19) "__kotoba_intrinsic_")))))
+         (or (and (>= (string-length s) 19) (string=? (string-substring s 0 19) "__kotoba_intrinsic_"))
+             (and (>= (string-length s) 13) (string=? (string-substring s 0 13) "__kotoba_doc_"))))))
    :default nil)
 
 #?(:kotoba
