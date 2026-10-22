@@ -470,7 +470,8 @@
   [name]
   (and (symbol? name)
        (let [s (str name)]
-         (= "__kotoba_intrinsic_" (subs s 0 (min 19 (count s))))))))
+         (or (= "__kotoba_intrinsic_" (subs s 0 (min 19 (count s))))
+             (= "__kotoba_doc_" (subs s 0 (min 13 (count s)))))))))
 
 #?(:kotoba nil
    :default
@@ -1598,7 +1599,7 @@
         p2 (if (an-uses-any? p1 0 3) (an-conj p1 (helper-forms/map-without-helper)) p1)
         p3 (if (an-uses-any? p2 0 0) (an-concat p2 (form/form-vec (form/two-forms (helper-forms/string-from-i64-nat-helper) (helper-forms/string-from-i64-helper)))) p2)
         p4 (if (an-uses-any? p3 0 1) (an-conj p3 (helper-forms/char-helper)) p3)]
-    (if (uses-documents? p4) (an-concat p4 (helper-forms/document-helpers)) p4)))
+    p4))
    :default nil)
 
 #?(:kotoba
@@ -1713,27 +1714,43 @@
    :default nil)
 
 #?(:kotoba
-(defn an-function-uses-documents? [f [:ref :form/r]] :bool
-  (or (an-doc-kw-tree? (form/form-vec (form/append-form (form/kids-of (fget f :param-types)) (fget f :result))))
-      (an-doc-symbol-tree? (fget f :body))))
+(defn an-doc-helper-symbol-tree? [x [:ref :form/r]] :bool
+  (or (and (form/is-symbol? x)
+           (let [s (form/symbol-value x)]
+             (and (>= (string-length s) 13) (string=? (string-substring s 0 13) "__kotoba_doc_"))))
+      (an-doc-helper-symbol-kids? x 0)))
    :default nil)
 
 #?(:kotoba
-;; True when a function set mentions `:document` in a signature or calls a `document-*` head
+(defn an-doc-helper-symbol-kids? [x [:ref :form/r] i :i64] :bool
+  (if (>= i (form/count-of x))
+    false
+    (or (an-doc-helper-symbol-tree? (form/nth-of x i)) (an-doc-helper-symbol-kids? x (+ i 1)))))
+   :default nil)
+
+#?(:kotoba
+(defn an-function-uses-documents? [f [:ref :form/r]] :bool
+  (an-doc-helper-symbol-tree? (fget f :body)))
+   :default nil)
+
+#?(:kotoba
+;; True when a function set calls one of the injected `__kotoba_doc_*` helpers
 (defn uses-documents? [functions [:ref :form/r]] :bool
   (an-any-doc-function? functions 0))
    :default
 (defn uses-documents?
-  "True when a function set mentions `:document` in a signature or calls a
-  `document-*` head: only those modules get the document sequence helpers."
+  "True when a function set calls one of the injected `__kotoba_doc_*`
+  document sequence helpers: only those modules get the helper cluster. A
+  `:document` in a signature, or a `document-*` builtin head, is not enough --
+  the intrinsic `ex-info` / `ex-message` helpers carry `:document` and call
+  none of them, and a module that calls none of them keeps mono's function
+  set and `[main]` export set (the battery's ex-roundtrip case)."
   [functions]
   (boolean
-   (some (fn [{:keys [param-types result body]}]
-           (or (some #{:document} (tree-seq coll? seq (concat param-types [result])))
-               (some #(and (symbol? %)
-                           (or (str/starts-with? (str %) "document-")
-                               (= '__kotoba_document_of %)))
-                     (tree-seq coll? seq body))))
+   (some (fn [{:keys [body]}]
+           (some #(and (symbol? %)
+                       (str/starts-with? (str %) "__kotoba_doc_"))
+                 (tree-seq coll? seq body)))
          functions))))
 
 #?(:kotoba
@@ -2438,7 +2455,12 @@
         u_2 (check-no-abort-before-recur! p12)
         p13 (thread-state-abilities ctx0 p12 clones handlers)
         p14 (rewrite-record-projections ctx0 p13 schemas (fget d :protocol-dispatch))
-        p15 (an-retire-bodies p14 0 (form/no-forms))
+        ;; the document cluster: injected AFTER the rewrite above, which is
+        ;; what writes the `__kotoba_doc_*` calls -- a `:document` in a
+        ;; signature is not enough (the intrinsic ex-info / ex-message
+        ;; helpers carry it and call none of them).
+        p14h (if (uses-documents? p14) (an-concat p14 (helper-forms/document-helpers)) p14)
+        p15 (an-retire-bodies p14h 0 (form/no-forms))
         p16 (infer-absent-results ctx0 p15)
         u_3 (validate-interrupt-entries! (form/kids-of p16))
         named (elaborate-named-abilities ctx0 p16)
@@ -4611,9 +4633,7 @@
                  (first-truthy #(uses-string-from-i64? (:body %)) parsed)
                  (#(into % [string-from-i64-nat-helper string-from-i64-helper]))
                  (first-truthy #(uses-char? (:body %)) parsed)
-                 (conj char-helper)
-                 (uses-documents? parsed)
-                 (into document-helpers))
+                 (conj char-helper))
         parsed (mapv #(if (:param-types %)
                         %
                         (assoc % :param-types (vec (repeat (count (:params %)) :i64))))
@@ -4715,7 +4735,14 @@
                  (conj list-count-helper)
                  (and (first-truthy #(uses-list-drop? (:body %)) parsed)
                       (not (first-truthy #(= list-drop-helper-name (:name %)) parsed)))
-                 (conj list-drop-helper))
+                 (conj list-drop-helper)
+                 ;; ... and a `__kotoba_doc_*` sequence helper call as the
+                 ;; document cluster. Injected AFTER the rewrite above, which
+                 ;; is what writes those calls -- a `:document` in a signature
+                 ;; is not enough (the intrinsic ex-info / ex-message helpers
+                 ;; carry it and call none of them).
+                 (uses-documents? parsed)
+                 (into document-helpers))
         parsed (mapv #(update % :body retire-absence-markers) parsed)
         ;; `option-or` intentionally survives syntactic desugaring until the
         ;; rewrite above can infer its payload descriptor from locals and
