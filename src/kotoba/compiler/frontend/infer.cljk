@@ -8170,3 +8170,50 @@
       :else (reject! (str "first of filter / remove / reverse searches a bounded "
                           "vector or a [:list T]; got " (pr-str value-type))
                      items :kotoba.error/sequence-first-receiver)))))
+
+;; --- list-note cluster (a7ef280 monolith), host twins only ---
+;; Moved from desugar.cljk's main-only preservation forms (M11): the
+;; `conj` arms of record-projection's rewrite call `note-list-item-type!`,
+;; and record-projection cannot require desugar (desugar requires it).
+;; The analysis state lives here with the other analyze-bound vars
+;; (`*state-handlers*`, `*row-op-schemas*`), and `analyze-forms*` binds
+;; `*module-list-inferred*` / `*list-item-notes*`. Preserved verbatim
+;; except `^:private` / `defn-` dropped on the names other modules now
+;; refer (as `list-field-read-key` already was in desugar).
+
+#?(:kotoba nil :default (def ^:dynamic *list-item-notes* nil))
+
+#?(:kotoba nil :default (def ^:dynamic *module-list-fields* {}))
+
+#?(:kotoba nil :default (def ^:dynamic *module-list-inferred* {}))
+
+#?(:kotoba nil :default (defn list-field-read-key
+  "The keyword key RECEIVER reads, `(record-get m k)` / `(get m k)` / `(k m)`,
+  or nil."
+  [receiver]
+  (when (seq? receiver)
+    (let [[op & args] receiver]
+      (cond
+        (and (contains? '#{record-get get} op) (keyword? (last args))) (last args)
+        (and (keyword? op) (= 1 (count args))) op
+        :else nil)))))
+
+#?(:kotoba nil :default (defn note-list-item-type!
+  "floor :list-item-from-expression: an item of type T is conj'd onto the field
+  RECEIVER reads. Noted when that is an open `[]` key and T is known and not
+  `:i64`. Floor :record-list-field-literal: onto a record-lists key T is
+  noted, and where its list is known to be LIST-TYPE `[:list R]`, R before
+  it, so a T /= R is a second type at the key (`:record-conflicts`)."
+  ([receiver t] (note-list-item-type! receiver t nil))
+  ([receiver t list-type]
+   (when-let [notes *list-item-notes*]
+     (when-let [k (list-field-read-key receiver)]
+       (when (and (some? t) (not= :i64 t))
+         (cond
+           (contains? (:open *module-list-fields*) k)
+           (vswap! notes conj [k t])
+
+           (contains? (:record-lists *module-list-fields*) k)
+           (if (canonical-list-type? list-type)
+             (vswap! notes conj [k (second list-type)] [k t])
+             (vswap! notes conj [k t])))))))))
