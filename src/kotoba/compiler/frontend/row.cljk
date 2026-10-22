@@ -1782,7 +1782,9 @@
     (cond
       (and (rw-sym-is? op "map-new") (> argc 0) (= 0 (rem argc 2)) (rw-all-keywords-at-even? form 1))
       (let [types (rw-literal-types ctx form 1 locals table (form/no-forms))]
-        (if (rw-all-some? types 0)
+        ;; M17: the vector arm's rule applied to the map arm -- all `:i64`
+        ;; (or not all known) keeps the legacy pair map byte for byte.
+        (if (and (rw-all-some? types 0) (not (rw-all-i64? types 0)))
           (let [_ (rw-record-too-big form (form/count-of types))]
             (form/form-seq (form/cons-onto (sa-sym-record-new)
                                             (form/cons-onto (map-literal-record-type (rw-record-fields-of form types 0 (form/no-forms)))
@@ -1815,9 +1817,11 @@
   A keyword-keyed pair map `(map-new :a x :b y)` is the anonymous closed
   record of its fields, each typed by its value -- the record a literal with
   a spelled non-i64 value already lowered to (`keyword-map-literal-record-
-  fields`) -- wherever the literal is written, so a `let` binding that is
-  later passed to a row is that row's record. The keyword->i64 pair map is
-  no longer what a literal is: reading a key it lacks is refused, not 0.
+  fields`) -- only when a field's known type is NOT `:i64`. A literal whose
+  fields are all `:i64` (or not all known here) is the legacy pair map it
+  always was, byte for byte (ADR 0012 decision 1; the CID-stability control
+  in `keyword-map-record-literal-test`), and its missing keys answer get's
+  default. This is the same rule the `vector-new` arm below applies.
 
   A vector literal `(vector-new a b)` whose items are not all `:i64` is a
   typed vector: `[:list T]` when every item is one type T (so `nth` with any
@@ -1833,7 +1837,12 @@
            (every? keyword? (take-nth 2 args)))
       (let [entries (partition 2 args)
             types (mapv #(literal-item-type (second %) locals table) entries)]
-        (if (every? some? types)
+        ;; M17: the vector arm's rule applied to the map arm -- a literal
+        ;; whose items are all `:i64` (or not all known here) is the legacy
+        ;; pair map it always was, byte for byte (ADR 0012 decision 1, and
+        ;; the CID-stability control in keyword-map-record-literal-test).
+        ;; Only a known non-:i64 item makes the anonymous closed record.
+        (if (and (every? some? types) (not (every? #{:i64} types)))
           (do (when (> (count entries) max-record-fields)
                 (reject! (str "map literal with keyword keys lowers to a closed record and "
                               "exceeds the record field limit: " (count entries)
