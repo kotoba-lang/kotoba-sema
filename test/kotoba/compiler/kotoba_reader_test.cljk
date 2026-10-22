@@ -14,6 +14,35 @@
 #?(:clj  (def ^:private one 1)
    :cljs (def ^:private one (js/BigInt "1")))
 
+(deftest public-facade-has-one-native-import-per-namespace
+  ;; A separate #?@(:default ...) also selects on :kotoba. The facade must
+  ;; exclude its host-only imports before the native project reader admits
+  ;; this graph; importing namespace-defs under two aliases is refused.
+  (let [source #?(:clj (slurp "src/kotoba/sema.cljk")
+                  :cljs (.readFileSync (js/require "node:fs")
+                                      "src/kotoba/sema.cljk" "utf8"))
+        header (first (r/read-forms source))
+        requires (rest (first (filter #(and (seq? %) (= :require (first %)))
+                                      (drop 2 header))))
+        namespaces (mapv first requires)]
+    (is (= (count namespaces) (count (distinct namespaces))))
+    (is (= #{'kotoba.compiler.frontend 'kotoba.compiler.schema 'kotoba.form
+             'kotoba.compiler.frontend.namespace-defs
+             'kotoba.compiler.frontend-tables}
+           (set namespaces)))))
+
+(deftest native-analyzer-excludes-host-collection-helpers
+  (let [path "src/kotoba/compiler/frontend/analyze.cljk"
+        source #?(:clj (slurp path)
+                  :cljs (.readFileSync (js/require "node:fs") path "utf8"))
+        definitions (->> (r/read-forms source)
+                         (filter #(and (seq? %) (#{'defn 'defn-} (first %))))
+                         (map second)
+                         set)]
+    (is (contains? definitions 'an-part-gate))
+    (is (not (contains? definitions 'host-only-body?)))
+    (is (not (contains? definitions 'host-only-body)))))
+
 (deftest fn-shorthand-reads-as-fn-form
   ;; #() is ONE call form: #(* % 2) == (fn [p1] (* p1 2)).
   (is (= (list 'fn ['p1] (list '* 'p1 two))

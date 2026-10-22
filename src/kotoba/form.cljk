@@ -9,7 +9,7 @@
                    keyword-has-namespace? keyword-value kids-of last-of nil-form no-forms
                    nth-of one-form rest-list span-of string-form string-value symbol-form
                    symbol-value three-forms two-forms vec2 vec3 vec4 vec5 vec6
-                   with-children]}
+                   with-children tag-of is-list-like? bytes-form bytes-of is-bytes?]}
   #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
                                           [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]
                                  :form/rd [:record :form/rd [[:form [:ref :form/r]] [:pos :i64]]]})))
@@ -382,13 +382,14 @@
          (= kind :symbol) (form-symbol-form (document-edn-print d))
          (= kind :f64) (let [text (document-edn-print d)]
                          (f64-form
-                          (option-value-of
-                           [:option :f64]
-                           (cond (= text "##NaN") (option-some-of [:option :f64] (f64-from-bits 9221120237041090560))
-                                 (= text "##Inf") (option-some-of [:option :f64] (f64-from-bits 9218868437227405312))
-                                 (= text "##-Inf") (option-some-of [:option :f64] (f64-from-bits -4503599627370496))
-                                 :else (decimal-f64-parse text))
-                           (f64-from-bits 0))))
+                          (f64-to-bits
+                           (option-value-of
+                            [:option :f64]
+                            (cond (= text "##NaN") (option-some-of [:option :f64] (f64-from-bits 9221120237041090560))
+                                  (= text "##Inf") (option-some-of [:option :f64] (f64-from-bits 9218868437227405312))
+                                  (= text "##-Inf") (option-some-of [:option :f64] (f64-from-bits -4503599627370496))
+                                  :else (decimal-f64-parse text))
+                            (f64-from-bits 0)))))
          (= kind :vector) (if (form-set-marker? d) (form-form-set (form-doc-set-items d)) (form-form-vec (form-doc-items d false)))
          (= kind :list) (form-form-seq (form-doc-items d true))
          (= kind :set) (form-form-set (form-doc-items d false))
@@ -583,9 +584,23 @@
 #?(:kotoba (defn form-vec [kids [:list [:ref :form/r]]] [:ref :form/r] (form-form-vec kids)))
 #?(:kotoba (defn form-set [kids [:list [:ref :form/r]]] [:ref :form/r] (form-form-set kids)))
 #?(:kotoba (defn form-map [kids [:list [:ref :form/r]]] [:ref :form/r] (form-form-map kids)))
-#?(:kotoba (defn f64-form [x :f64] [:ref :form/r] (form-mk 10 "" (f64-to-bits x) :none (form-no-forms))))
+;; f64-form takes the raw IEEE-754 bit pattern (:i64), matching :n's meaning in
+;; :form/r (bits-of reads it back as :i64) and the guest twin amu src/kotoba/form.kotoba.
+;; The value form lives at the call site (f64-to-bits), so a Value <-> Form round trip
+;; preserves NaN payload bits exactly instead of canonicalizing them through a register.
+#?(:kotoba (defn f64-form [bits :i64] [:ref :form/r] (form-mk 10 "" bits :none (form-no-forms))))
 #?(:kotoba (defn bits-of [f [:ref :form/r]] :i64 (record-get [:ref :form/r] f :n)))
 #?(:kotoba (defn span-of [f [:ref :form/r]] :i64 (record-get [:ref :form/r] f :span)))
+;; The Form accessors the Kotoba readings of osaho, kotoba-verifier, kotoba-walk and
+;; kotoba-wasm call (amu JUN-202 selfbuild scan, 2026-10-21: E6004 "qualified call is
+;; not an admitted exported import: form/tag-of" in 4 modules); same bodies as the
+;; kotoba-hir dual-runtime kotoba.form. A bytes Form is tag 11 with its bytes in :data.
+#?(:kotoba (defn tag-of [f [:ref :form/r]] :i64 (form-tag-of f)))
+#?(:kotoba (defn is-list-like? [f [:ref :form/r]] :bool (form-is-list-like? f)))
+#?(:kotoba (defn bytes-form [b :bytes] [:ref :form/r]
+             (record-new [:ref :form/r] 11 "" 0 :none (form-no-forms) 0 b)))
+#?(:kotoba (defn bytes-of [f [:ref :form/r]] :bytes (record-get [:ref :form/r] f :data)))
+#?(:kotoba (defn is-bytes? [f [:ref :form/r]] :bool (= 11 (form-tag-of f))))
 #?(:kotoba (defn bool-value [f [:ref :form/r]] :bool (form-bool-value f)))
 #?(:kotoba (defn int-value [f [:ref :form/r]] :i64 (form-int-value f)))
 #?(:kotoba (defn string-value [f [:ref :form/r]] :string (form-string-value f)))
