@@ -17,7 +17,6 @@
             [kotoba.compiler.frontend.record-projection :as record-projection]
             [kotoba.compiler.frontend.desugar :as desugar]
             [kotoba.compiler.frontend.row :as row]
-            [kotoba.compiler.frontend.hiccup]
             [kotoba.compiler.frontend.state-ability :as state-ability]
             [kotoba.compiler.frontend.analyze :as analyze]
             [kotoba.compiler.frontend.lint :as lint-core])
