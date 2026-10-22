@@ -288,8 +288,9 @@
 
     (rp-ty? type :string)
     (str "A string has no element count in this profile: string-byte-length "
-         "counts UTF-8 BYTES, not characters, and naming it here would give "
-         "two different answers the same spelling")
+         "counts UTF-8 BYTES and string-code-unit-count counts UTF-16 code "
+         "units, and naming either one count would give two different answers "
+         "the same spelling (ADR 0353)")
 
     :else ""))
    :default
@@ -335,8 +336,9 @@
 
     (= :string type)
     (str "A string has no element count in this profile: string-byte-length "
-         "counts UTF-8 BYTES, not characters, and naming it here would give "
-         "two different answers the same spelling")
+         "counts UTF-8 BYTES and string-code-unit-count counts UTF-16 code "
+         "units, and naming either one count would give two different answers "
+         "the same spelling (ADR 0353)")
 
     :else nil)))
 
