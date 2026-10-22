@@ -4986,10 +4986,26 @@
    :default
 (defn analyze-forms*
   "`analyze-forms**` with this analysis's state handler table bound: a probe
-  module analysed from inside it (`fold-def-value!`) gets a table of its own."
+  module analysed from inside it (`fold-def-value!`) gets a table of its own.
+
+  ADR 0353 floor :list-item-from-expression: analysed again while a pass notes
+  an item type at an open `[]` key that the passes before it had not, each
+  pass with every type noted so far; the keys are finite, and so are the
+  passes."
   [source-forms opts]
-  (binding [*state-handlers* (volatile! {})]
-    (analyze-forms** source-forms opts))))
+  (loop [inferred {} passes 0]
+    (let [notes (volatile! [])
+          outcome (binding [*state-handlers* (volatile! {})
+                            *module-list-inferred* inferred
+                            *list-item-notes* notes]
+                    (try {:hir (analyze-forms** source-forms opts)}
+                         (catch #?(:clj Throwable :cljs :default) error {:error error})))
+          inferred' (reduce (fn [acc [k t]]
+                              (if (some #(= t %) (get acc k)) acc (update acc k (fnil conj []) t)))
+                            inferred @notes)]
+      (if (and (not= inferred' inferred) (< passes 16))
+        (recur inferred' (inc passes))
+        (if-let [error (:error outcome)] (throw error) (:hir outcome)))))))
 
 #?(:kotoba
 (defn analyze [source :string opts [:ref :form/r]] [:ref :ana/ir]
