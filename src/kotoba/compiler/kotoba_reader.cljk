@@ -484,6 +484,25 @@
                            (compare (pr-str left) (pr-str right))))
           (partition 2 forms)))
 
+(defn- exact-integer-item?
+  "One value `parse-int-token` hands back: a JS `bigint` on `:cljs`, a Long
+  (else `BigInt`) on `:clj`. The set reader asks this before it trusts the
+  host to hash a set's items.
+
+  ## On `:cljs` the test is the constructor, and `instance?` cannot be it
+
+  Measured on this repository's run-tests host (nbb on Node 26, 2026-10-23):
+  a `js/BigInt` primitive answers FALSE to `(instance? js/BigInt form)`,
+  FALSE to `integer?`, and FALSE to `number?` -- `instanceof` is false for
+  every primitive, whatever its type. So the check is the one the reader's
+  own tests already trust (`an-integer-in-range-is-a-long-on-the-jvm`):
+  `(identical? js/BigInt (.-constructor form))`. `nil` is guarded first
+  because property access on it throws."
+  [form]
+  #?(:clj (integer? form)
+     :cljs (and (some? form)
+                (identical? js/BigInt (.-constructor form)))))
+
 (defn- reader-set
   "`cljs.core/set` above eight elements, with a name for what it does.
 
@@ -492,6 +511,22 @@
   hash a BigInt. `#{1 2 3 4 5 6 7 8}` therefore read and
   `#{1 2 3 4 5 6 7 8 9}` threw a raw `TypeError` that reached the caller as
   `source reader rejected input` with no reason attached.
+
+  ## The trigger is the elements now, not the exception
+
+  The `catch` below was a probe for the host's BigInt hashability, and the
+  host moved out from under it: nbb on Node 26 hashes JS BigInt happily
+  (measured 2026-10-23, this repository's run-tests host: `(hash 5n)` answers
+  a stable value and two separately-read equal bigints hash equal, so
+  `(set forms)` stopped throwing). The tagged form therefore silently stopped
+  appearing -- `nine-exact-integers-in-a-set-read-as-a-tagged-form-on-this-host`
+  and `large-integer-set-is-refused-by-name-not-as-an-internal-error` went red
+  with no change anywhere in this file. A reader whose output depends on the
+  runtime's BigInt hashability is the defect: the boundary that decides
+  between the plain set and the tagged form is `cljs.core/set`'s own (an
+  array-backed set up to eight items, a hashed one above), so it is now
+  written as the items it concerns -- above eight items, any exact integer --
+  and the `catch` stays as the net for anything else the host cannot hash.
 
   This does NOT lift the limit. Reading the set is only the first barrier:
   measured 2026-09-08, building the set without hashing (a `sorted-set-by`
@@ -518,9 +553,12 @@
   guard."
   [forms]
   #?(:clj (set forms)
-     :cljs (try
-             (set forms)
-             (catch :default _
+     :cljs (if (and (> (count forms) 8)
+                    (some exact-integer-item? forms))
+             (list 'kotoba.reader/set (vec forms))
+             (try
+               (set forms)
+               (catch :default _
                ;; A set of more than eight exact integers is HOST data in any
                ;; case (Kotoba admits keyword-set data only), so it reads as
                ;; the tagged form `(kotoba.reader/set [..])` and is refused by
@@ -528,7 +566,7 @@
                ;; same treatment as #"..." / #js / \c. Measured 2026-09-11:
                ;; two of the compiler's own sources (interrupt_abi, an ABI
                ;; table) were refused whole for one such literal.
-               (list 'kotoba.reader/set (vec forms))))))
+               (list 'kotoba.reader/set (vec forms)))))))
 
 (defn- read-form
   "Returns `[state form skip?]`. `skip?` is true for a `#?()` clause with no
