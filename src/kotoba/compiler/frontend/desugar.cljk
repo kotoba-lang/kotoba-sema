@@ -7525,8 +7525,13 @@
         context-record (let [t (canonical-closure-result-type contextual-type)]
                          (when (record-type? t) t))]
     (cond
-      (and context-record (= #{:keyword} kinds))
+      (and context-record (contains? #{#{:keyword} #{}} kinds))
       (desugar-map-against-record form context-record)
+
+      ;; ADR 0353 floor :empty-map-literal: `{}` where its context declares
+      ;; a typed map is that map, empty.
+      (and (empty? form) (canonical-typed-map-type? contextual-type))
+      (list 'typed-map-new contextual-type)
 
       (contains? kinds nil)
       (let [offender (first (remove map-literal-key-kind (keys form)))]
