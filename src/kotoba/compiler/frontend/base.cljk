@@ -1090,9 +1090,15 @@
      (let [entry (ih-entry heads defined (form/nth-of f 0))]
        (if (form/is-nil? entry)
          acc
-         (let [subvec2 (and (string=? (form/symbol-value (form/nth-of entry 0)) "__kotoba_intrinsic_subvec")
+         (let [named (form/symbol-value (form/nth-of entry 0))
+               subvec2 (and (string=? named "__kotoba_intrinsic_subvec")
                             (= 2 (- (form/count-of f) 1)))
-               key (if subvec2 (ih-entry heads defined (form/symbol-form "subvec-from")) entry)]
+               subs2 (and (string=? named "__kotoba_intrinsic_subs")
+                          (= 2 (- (form/count-of f) 1)))
+               key (cond
+                     subvec2 (ih-entry heads defined (form/symbol-form "subvec-from"))
+                     subs2 (ih-entry heads defined (form/symbol-form "subs-from"))
+                     :else entry)]
            (if (form/is-nil? key) acc (ih-add-all acc (form/nth-of key 1) 0))))))
    :default nil)
 
@@ -1119,9 +1125,14 @@
        (let [op (form/nth-of f 0)
              entry (ih-entry heads defined op)
              named (if (form/is-nil? entry) "" (form/symbol-value (form/nth-of entry 0)))
-             helper (if (and (string=? named "__kotoba_intrinsic_subvec") (= 2 (- (form/count-of f) 1)))
+             ;; `(subvec v start)` and `(subs s start)` are the arities that
+             ;; name a different helper.
+             helper (cond
+                      (and (string=? named "__kotoba_intrinsic_subvec") (= 2 (- (form/count-of f) 1)))
                       "__kotoba_intrinsic_subvec_from"
-                      named)
+                      (and (string=? named "__kotoba_intrinsic_subs") (= 2 (- (form/count-of f) 1)))
+                      "__kotoba_intrinsic_subs_from"
+                      :else named)
              args0 (form/rest-list f)
              args (if (string=? helper "__kotoba_intrinsic_ex_info") (ex-info-data-argument args0 f) args0)
              head (if (string=? helper "") (ih-rename heads defined op) (form/symbol-form helper))]
@@ -1184,13 +1195,18 @@
                    (seq? form)
                    (let [[op & args] form
                          helper (when (symbol? op) (first (get heads op)))
-                         ;; `(subvec v start)` is the one arity that names a
-                         ;; different helper.
-                         helper (if (and (= helper '__kotoba_intrinsic_subvec) (= 2 (count args)))
+                         ;; `(subvec v start)` and `(subs s start)` are the
+                         ;; arities that name a different helper.
+                         helper (cond
+                                  (and (= helper '__kotoba_intrinsic_subvec) (= 2 (count args)))
                                   '__kotoba_intrinsic_subvec_from
-                                  helper)]
-                     (when helper (vswap! used conj (if (= helper '__kotoba_intrinsic_subvec_from)
-                                                      'subvec-from op)))
+                                  (and (= helper '__kotoba_intrinsic_subs) (= 2 (count args)))
+                                  '__kotoba_intrinsic_subs_from
+                                  :else helper)]
+                     (when helper (vswap! used conj (case helper
+                                                      __kotoba_intrinsic_subvec_from 'subvec-from
+                                                      __kotoba_intrinsic_subs_from 'subs-from
+                                                      op)))
                      (with-meta (apply list (if helper
                                               (with-meta helper {:kotoba.diag/source-head op})
                                               (rename op))

@@ -1379,7 +1379,7 @@
 
 #?(:kotoba
    (defn intrinsic-helper-heads [] [:ref :form/r]
-     (form/edn-form "{subvec [__kotoba_intrinsic_subvec [__kotoba_intrinsic_subvec]] string-to-utf8 [__kotoba_intrinsic_string_to_utf8 [__kotoba_intrinsic_string_to_utf8]] subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]] ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]] ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]] ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]] string-parse-i64 [__kotoba_intrinsic_parse_i64 [__kotoba_intrinsic_parse_i64]] parse-long [__kotoba_intrinsic_parse_long [__kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]]}"))
+     (form/edn-form "{subvec [__kotoba_intrinsic_subvec [__kotoba_intrinsic_subvec]] string-to-utf8 [__kotoba_intrinsic_string_to_utf8 [__kotoba_intrinsic_string_to_utf8]] subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]] string-code-unit-count [__kotoba_intrinsic_code_unit_count [__kotoba_intrinsic_code_unit_count]] string-code-unit-at [__kotoba_intrinsic_code_unit_at [__kotoba_intrinsic_code_unit_at]] subs [__kotoba_intrinsic_subs [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs]] subs-from [__kotoba_intrinsic_subs_from [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs_from]] ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]] ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]] ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]] string-parse-i64 [__kotoba_intrinsic_parse_i64 [__kotoba_intrinsic_parse_i64]] parse-long [__kotoba_intrinsic_parse_long [__kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]]}"))
    :default
    (def intrinsic-helper-heads
      "Surface head -> [helper it calls, every helper definition it needs, in
@@ -1389,6 +1389,11 @@
        ;; not a surface head: the arity-2 half of `subvec`, recorded by the
        ;; renaming so its one helper is appended.
        subvec-from [__kotoba_intrinsic_subvec_from [__kotoba_intrinsic_subvec_from]]
+       string-code-unit-count [__kotoba_intrinsic_code_unit_count [__kotoba_intrinsic_code_unit_count]]
+       string-code-unit-at [__kotoba_intrinsic_code_unit_at [__kotoba_intrinsic_code_unit_at]]
+       subs [__kotoba_intrinsic_subs [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs]]
+       ;; not a surface head: the arity-2 half of `subs`, as `subvec-from` is.
+       subs-from [__kotoba_intrinsic_subs_from [__kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs_from]]
        ex-info [__kotoba_intrinsic_ex_info [__kotoba_intrinsic_ex_info]]
        ex-message [__kotoba_intrinsic_ex_message [__kotoba_intrinsic_ex_message]]
        ex-data [__kotoba_intrinsic_ex_data [__kotoba_intrinsic_ex_data]]
@@ -1398,11 +1403,13 @@
 
 #?(:kotoba
    (defn intrinsic-helper-order [] [:ref :form/r]
-     (form/edn-form "[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from __kotoba_intrinsic_string_to_utf8 __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]"))
+     (form/edn-form "[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from __kotoba_intrinsic_string_to_utf8 __kotoba_intrinsic_code_unit_count __kotoba_intrinsic_code_unit_at __kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs __kotoba_intrinsic_subs_from __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]"))
    :default
    (def intrinsic-helper-order
      '[__kotoba_intrinsic_subvec __kotoba_intrinsic_subvec_from
        __kotoba_intrinsic_string_to_utf8
+       __kotoba_intrinsic_code_unit_count __kotoba_intrinsic_code_unit_at
+       __kotoba_intrinsic_code_unit_offset __kotoba_intrinsic_subs __kotoba_intrinsic_subs_from
        __kotoba_intrinsic_ex_info __kotoba_intrinsic_ex_message __kotoba_intrinsic_ex_data
        __kotoba_intrinsic_parse_i64 __kotoba_intrinsic_parse_long]))
 
@@ -3379,13 +3386,17 @@
          false
          (let [h (+ (* n 1024) (string-code-point-at s 0))]
            (cond
+             (= h 4211) (string=? s "subs")
              (= h 6259) (string=? s "subvec")
              (= h 7269) (or (string=? s "ex-info") (string=? s "ex-data"))
+             (= h 9331) (string=? s "subs-from")
              (= h 10341) (string=? s "ex-message")
              (= h 10352) (string=? s "parse-long")
              (= h 11379) (string=? s "subvec-from")
              (= h 14451) (string=? s "string-to-utf8")
              (= h 16499) (string=? s "string-parse-i64")
+             (= h 19571) (string=? s "string-code-unit-at")
+             (= h 22643) (string=? s "string-code-unit-count")
              :else false)))))
    :default nil)
 
