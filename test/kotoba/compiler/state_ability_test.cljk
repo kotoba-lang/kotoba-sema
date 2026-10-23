@@ -24,8 +24,12 @@
             [kotoba.sema :as sema]
             [sha2.core :as sha2]))
 
-(defn- run [source]
-  (str (kir/execute (kir/lower (sema/analyze source)) 'main [])))
+(defn- run
+  "Run `source`'s `main` on the reference interpreter. The second arity names
+  the run's budgets (superproject adr-2609242100 P4: the profile defaults are
+  per-run overridable); the first arity takes the profile defaults."
+  ([source] (str (kir/execute (kir/lower (sema/analyze source)) 'main [])))
+  ([source opts] (str (kir/execute (kir/lower (sema/analyze source)) 'main [] opts))))
 
 (defn- refusal [source]
   (try (do (sema/analyze source) nil)
@@ -100,7 +104,20 @@
                      (defn- sum-to [n :i64] :i64
                        (loop [i 1] (if (> i n) (perform :state/get) (do (add! i) (recur (+ i 1))))))
                      (defn main [] :i64 (handle (sum-to 100) (with cell 0)))")]
-    (is (= "5050" (run source)))
+    ;; The run names its budget. 100 iterations of (add! i) is ~600 charged
+    ;; units: the handler clauses are function entries (the self-tail
+    ;; trampoline re-entries are free) and, since amu ADR 0353 floor
+    ;; :allocation-budget (2026-09-30), one unit per constructed cell as well.
+    ;; The profile default of 512 predates that floor and no longer pays for
+    ;; this program -- re-measured 2026-10-24 on the mono (a7ef280) and split
+    ;; arms alike, byte-identical: traps
+    ;; :budget/fuel at 512 / 550 / 600, answers "5050" at 650. A caller names
+    ;; its budget per run (superproject adr-2609242100 P4).
+    (is (= "5050" (run source {:fuel 4096})))
+    (testing "under the profile default the trap names the budget, not an internal error"
+      (let [e (try (run source) nil (catch #?(:clj Throwable :cljs :default) e e))]
+        (is (= "budget/fuel" (ex-message e)))
+        (is (= :budget/fuel (:trap (ex-data e))))))
     (testing "the loop helper's specialization is itself a __kotoba_loop_N, so
               the reference interpreter's self-tail trampoline still applies"
       (is (some #(and (re-matches #"__kotoba_loop_\d+" (str (:name %)))
